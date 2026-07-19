@@ -1,6 +1,6 @@
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py314"   # runtime réel : CPython 3.14 (cf. LANCER.bat)
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -11,7 +11,7 @@ ignore = ["E501"]
 extend-immutable-calls = ["fastapi.File", "fastapi.Form"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 ignore_missing_imports = true
 check_untyped_defs = true
 files = ["app"]

@@ -21,6 +21,13 @@ def test_health_and_boot():
         assert j["version"]                  # version non vide
 
 
+def test_onboarding_flow():
+    with _client() as c:
+        assert c.get("/api/onboarding").json()["show"] is True   # base neuve → on montre l'accueil
+        assert c.post("/api/onboarding/seen").json()["ok"] is True
+        assert c.get("/api/onboarding").json()["show"] is False   # vu → ne réapparaît plus
+
+
 def test_free_port_and_instance_detection():
     from app import main
 

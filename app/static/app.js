@@ -27,10 +27,12 @@ const toast = (msg) => {
 };
 
 // Modale intégrée (remplace confirm()/alert() natifs). Retourne une Promise<boolean>.
-function showModal({ title = "", message = "", confirmText = "Continuer", cancelText = "Annuler", danger = false } = {}) {
+function showModal({ title = "", message = "", html = "", confirmText = "Continuer", cancelText = "Annuler", danger = false } = {}) {
   return new Promise((resolve) => {
     $("modalTitle").textContent = title;
-    $("modalBody").textContent = message;
+    // `html` : contenu STATIQUE de confiance (jamais de saisie utilisateur) ; sinon texte échappé.
+    if (html) $("modalBody").innerHTML = html;
+    else $("modalBody").textContent = message;
     const overlay = $("modalOverlay");
     const okBtn = $("modalConfirm");
     const noBtn = $("modalCancel");
@@ -2815,6 +2817,45 @@ async function pollMashAnimJob(jobId) {
   }
 }
 
+// Navigue vers une section en réutilisant le gestionnaire de clic de la barre latérale.
+function gotoSection(sec) {
+  const btn = document.querySelector(`.nav-item[data-section="${sec}"]`);
+  if (btn) btn.click();
+}
+
+// Écran d'accueil au TOUT PREMIER lancement (base neuve) : quoi créer, où mettre les clés,
+// et surtout qu'on peut TOUT tester en simulation sans aucune clé. Ne réapparaît plus ensuite.
+async function maybeOnboarding() {
+  try {
+    const o = await api("/api/onboarding");
+    if (!o.show) return;
+    const goSettings = await showModal({
+      title: "Bienvenue dans Pipeline UGC 👋",
+      html:
+        "<p>Cette app fabrique des pubs vidéo verticales (avatar, objet animé, mashup, voix off).</p>" +
+        "<p><b>Tu peux tout tester tout de suite en MODE SIMULATION</b> — aucune clé, aucun crédit : " +
+        "de vraies étapes, des fichiers de démonstration en sortie.</p>" +
+        "<p>Pour générer <b>pour de vrai</b>, crée un compte chez les fournisseurs que tu utilises " +
+        "et colle leurs clés dans <b>Réglages</b> :</p>" +
+        "<ul style='margin:6px 0 6px 18px'>" +
+        "<li><b>Anthropic (Claude)</b> — le « cerveau » qui découpe tes scripts</li>" +
+        "<li><b>Gradium</b> — les voix</li>" +
+        "<li><b>HeyGen</b> — les vidéos avatar</li>" +
+        "<li><b>OpenRouter</b> — images (Nano Banana) + vidéos mashup (Kling/Veo)</li>" +
+        "<li><b>xAI (Grok)</b> — animation « objet » (voix + lip-sync)</li>" +
+        "</ul>" +
+        "<p class='muted'>Tu ne paies que ce que TU génères en mode réel. Décoche « simulation » " +
+        "dans Réglages seulement quand tu es prêt.</p>",
+      confirmText: "Ouvrir les Réglages",
+      cancelText: "Plus tard",
+    });
+    await api("/api/onboarding/seen", { method: "POST" }).catch(() => {});
+    if (goSettings) gotoSection("settings");
+  } catch (_) {
+    /* non bloquant : l'accueil ne doit jamais empêcher l'app de démarrer */
+  }
+}
+
 // Affiche la version de l'app (sidebar) — utile pour le support / les mises à jour.
 async function loadHealth() {
   try {
@@ -2829,3 +2870,4 @@ async function loadHealth() {
 // ------------------------------------------------ démarrage
 loadHealth();
 loadDashboard().catch(() => {});
+maybeOnboarding();

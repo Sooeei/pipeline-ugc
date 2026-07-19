@@ -55,6 +55,17 @@ def create_app() -> FastAPI:
             "dry_run": db.get_setting("dry_run", "1") == "1",
         }
 
+    @app.get("/api/onboarding")
+    def onboarding_status() -> dict[str, bool]:
+        """Au 1er lancement (base neuve, accueil jamais vu), l'UI affiche un écran d'accueil."""
+        return {"show": db.get_setting("onboarding_seen", "0") != "1"}
+
+    @app.post("/api/onboarding/seen")
+    def onboarding_seen() -> dict[str, bool]:
+        """Marque l'accueil comme vu (ne réapparaît plus)."""
+        db.set_setting("onboarding_seen", "1")
+        return {"ok": True}
+
     @app.get("/")
     def index() -> HTMLResponse:
         # Anti-cache : on VERSIONNE app.js / style.css par leur date de modif (mtime). Sans ça,

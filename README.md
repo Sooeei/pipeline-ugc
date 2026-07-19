@@ -1,78 +1,82 @@
-# Pipeline UGC — Gradium → HeyGen → clips numérotés
+# Pipeline UGC
 
-Prend un fichier de scènes (script + motion prompt), génère la voix off sur **Gradium**,
-la balance à **HeyGen** sur un avatar **déjà créé** avec le motion prompt, et te sort
-**un clip par scène** numéroté (`1.mp4`, `2.mp4`, …) dans un dossier.
+Application **locale** (Windows) qui fabrique des pubs vidéo verticales 9:16. Interface simple
+en 5 sections : Tableau de bord, Nouvelle pub, Bibliothèque, Coûts, Réglages.
 
-Pas de sous-titres, pas de montage collé — tu ajoutes les sous-titres toi-même après.
-
----
-
-## Ce que tu fais, ce que fait le script
-
-- **Moi (Claude), à chaque pub** : je découpe ton script + j'écris les motion prompts → je te donne le `scenes.json`.
-- **Le script (toi, en local)** : lit ce JSON → Gradium (voix) → HeyGen (vidéo) → clips numérotés.
+**5 types de pub :**
+- **Avatar** (HeyGen) — un avatar parle ton script.
+- **Objet animé** (Nano Banana → Grok) — un produit devient un personnage qui parle.
+- **Mashup IA** (Nano Banana → Kling/Veo) — b-roll ultra-réaliste, sans voix.
+- **Voix off** — juste une voix off (Gradium) à partir d'un script.
+- **Voix seules** — les voix par scène, à finir toi-même dans HeyGen.
 
 ---
 
-## Installation
+## Démarrage rapide
+
+1. **Lance l'app** : double-clic sur **`PipelineUGC.exe`** (version packagée) — ou, depuis les
+   sources, double-clic sur **`LANCER.bat`**.
+2. L'app s'ouvre dans sa fenêtre. Au **premier lancement**, un écran d'accueil t'explique tout.
+3. **Teste tout de suite en MODE SIMULATION** (activé par défaut) : de vraies étapes, des fichiers
+   de démonstration en sortie — **aucune clé, aucun crédit dépensé**.
+
+> Tout se règle dans **Réglages**. La version de l'app est affichée en bas de la barre latérale.
+
+---
+
+## Générer « pour de vrai » (mode réel)
+
+Le mode réel appelle des API **payantes** : **tu paies ce que tu génères, avec tes propres comptes**.
+Crée un compte chez les fournisseurs que tu utilises et colle leurs clés dans **Réglages**, puis
+décoche « simulation ».
+
+| Fournisseur | Sert à | Où créer la clé |
+|---|---|---|
+| **Anthropic (Claude)** | le « cerveau » qui découpe tes scripts | console.anthropic.com |
+| **Gradium** | les voix | gradium.ai (Studio → API Keys) |
+| **HeyGen** | les vidéos avatar (crédits) | HeyGen → Settings → API |
+| **OpenRouter** | images (Nano Banana) + vidéos mashup (Kling/Veo) | openrouter.ai |
+| **xAI (Grok)** | animation « objet » (voix + lip-sync) | x.ai |
+
+Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Anthropic + Gradium + HeyGen
+pour l'avatar). Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
+
+---
+
+## Prérequis
+
+- **Windows 10/11.**
+- **ffmpeg** (pour les voix MP3 et les vidéos en mode réel). S'il manque, l'app le signale en haut
+  de l'écran. Installe-le : ouvre un terminal et tape `winget install Gyan.FFmpeg`, ou télécharge-le
+  sur ffmpeg.org. *Le mode simulation fonctionne sans ffmpeg.*
+
+Les données (base + médias générés) sont stockées dans
+`%LOCALAPPDATA%\PipelineUGC\data\` (hors de l'app : elles survivent aux mises à jour/déplacements).
+
+---
+
+## Livrable (.exe) & build
+
+L'exe se trouve, après build, dans **`dist/PipelineUGC/`** :
+- `PipelineUGC.exe` + un dossier `_internal/`.
+- **Distribue le dossier `dist/PipelineUGC/` entier** (zippé) — pas seulement le .exe.
+
+Reconstruire depuis les sources :
 
 ```bash
-pip install gradium requests
-cp config.example.py config.py     # puis remplis config.py
+pip install -r requirements.txt -r requirements-dev.txt
+py -3.14 -m PyInstaller PipelineUGC.spec --noconfirm
+py -3.14 verify_build.py     # vérifie qu'aucun secret n'est embarqué
 ```
 
-## Avant de lancer, il te faut
-
-1. **Compte Gradium** + ta **voix québécoise clonée** (Gradium Studio → Voice Clone, ~10 s d'audio) → tu récupères un `voice_id`.
-2. **Compte HeyGen** avec ton **avatar déjà créé** (Digital Twin / Photo Avatar) → tu récupères son `avatar_id`, plus des **crédits**.
-3. Remplis `config.py` : les deux clés API, le `voice_id` Gradium, et le dico `AVATARS` (tu peux en mettre plusieurs).
-
-## Utilisation
-
-```bash
-python ugc_pipeline.py scenes_example.json
-```
-
-Les clips arrivent dans le dossier `sortie/` : `1.mp4`, `2.mp4`, … (un par scène).
+L'exe démarre **vierge** : aucune clé, base neuve, mode simulation. `config.py` (tes clés en dev)
+n'est **jamais** embarqué.
 
 ---
 
-## Format du fichier de scènes
+## En cas de souci
 
-```json
-{
-  "ad": "lunia_authority",
-  "avatar": "maquilleuse_50",
-  "scenes": [
-    { "n": 1, "script": "…texte verbatim…", "motion_prompt": "…acting en anglais…" }
-  ]
-}
-```
-
-- `avatar` = un label présent dans `AVATARS` (config). Absent → `DEFAULT_AVATAR`.
-- `script` = le texte envoyé à Gradium (verbatim, on n'y touche pas).
-- `motion_prompt` = envoyé à HeyGen (par défaut : regard caméra, sauf si le script demande autre chose).
-
-`scenes_example.json` = la pub Lunia complète (17 scènes) prête à tester.
-
----
-
-## À savoir (honnêtement)
-
-- **Tourne en local, pas dans le chat.** Le bon endroit pour le lancer / brancher tes clés / débugger, c'est **Claude Code** sur ta machine.
-- **Coût HeyGen** : Avatar IV/V consomme des crédits, et le motion prompt est facturé ~2:1 (30 s de vidéo ≈ 20 crédits), seulement sur les secondes d'avatar générées.
-- **C'est asynchrone** : HeyGen prend quelques minutes par scène ; le script attend tout seul (phase « rendu »).
-- **Gradium** : sessions ≤ 300 s (une réplique de scène, largement suffisant). Serveurs EU/US → mets `GRADIUM_BASE_URL` si besoin.
-
-## ⚠️ À vérifier contre la doc HeyGen (les noms de champs varient selon l'endpoint)
-
-Le script cible `POST https://api.heygen.com/v3/videos`. Selon ta version d'API, ajuste dans `heygen_create_video()` :
-
-- **motion** : `motion_prompt` (chemin avatar) **ou** `custom_motion_prompt` (chemin photo/Avatar IV).
-- **audio** : `audio_asset_id` (après upload) **ou** `audio_url`.
-- **voice_id** : parfois requis même quand tu fournis de l'audio → remplis `HEYGEN_VOICE_ID` dans la config si l'API le réclame.
-
-Docs : <https://docs.heygen.com> · <https://docs.gradium.ai>
-
-Si un appel renvoie une erreur de champ, le message d'erreur s'affiche (tronqué) → c'est là qu'on ajuste.
+- **La fenêtre ne s'ouvre pas** : l'app se rabat sur ton navigateur (Chrome/Edge). Si rien ne
+  s'affiche, regarde `%LOCALAPPDATA%\PipelineUGC\data\app.log`.
+- **Un message d'erreur** te dit toujours *quoi faire* (clé manquante → Réglages, crédits
+  insuffisants → recharge le compte concerné, réseau instable → réessaie).

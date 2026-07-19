@@ -25,6 +25,10 @@ venv/
 # --- logs ---
 *.log
 
+# --- artefacts de build PyInstaller (le .spec, lui, est versionné) ---
+build/
+dist/
+
 # --- runtime local Claude Code ---
 .claude/scheduled_tasks.lock
 .claude/settings.local.json

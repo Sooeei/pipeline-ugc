@@ -7,7 +7,9 @@ Tout passe par la base SQLite locale ; le MODE SIMULATION (dry_run) évite clés
 from __future__ import annotations
 
 import io
+import os
 import re
+import sys
 import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -25,7 +27,11 @@ from . import __version__, bootstrap, brain, config_app, cost, db, jobs, media, 
 from . import providers as prov
 from .settings_service import load_provider_config
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Frozen (PyInstaller) : les statics sont extraits sous _MEIPASS/app/static ; sinon à côté du module.
+if getattr(sys, "frozen", False):
+    STATIC_DIR = Path(getattr(sys, "_MEIPASS", ".")) / "app" / "static"
+else:
+    STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @asynccontextmanager
@@ -1763,6 +1769,12 @@ def run() -> None:
             config_app.PORT_FILE.write_text(str(port), encoding="utf-8")
         except OSError:
             pass  # non bloquant : au pire l'instance-unique ne détecte pas cette instance
+
+        if os.environ.get("UGC_NO_WINDOW") == "1":
+            # Mode serveur SANS fenêtre (diagnostic / test d'install) : on sert jusqu'à ce que
+            # le processus soit arrêté (Ctrl+C ou kill). Aucune fenêtre/onglet n'est ouvert.
+            thread.join()
+            return
 
         _open_window(url)          # BLOQUE jusqu'à la fermeture de la fenêtre
         server.should_exit = True  # fenêtre fermée -> on arrête le serveur en fond

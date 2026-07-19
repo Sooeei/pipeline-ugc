@@ -1,10 +1,22 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+// Transforme le champ `detail` d'une réponse d'erreur en message lisible, sans code HTTP ni
+// JSON brut. FastAPI renvoie `detail` = chaîne (nos messages FR) OU tableau d'objets (validation
+// 422) : dans ce dernier cas on affiche un message générique plutôt que « [object Object] ».
+function detailToMessage(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return "Requête invalide (un champ manque ou est incorrect).";
+  if (typeof detail === "object" && typeof detail.msg === "string") return detail.msg;
+  return "";
+}
 const api = async (url, opts) => {
   const r = await fetch(url, opts);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || ("Erreur " + r.status));
+  if (!r.ok) {
+    throw new Error(detailToMessage(data.detail) || "Le serveur n'a pas pu traiter la demande — réessaie.");
+  }
   return data;
 };
 const toast = (msg) => {
@@ -929,14 +941,18 @@ const PHASE_LABEL = {
 // Le message complet reste disponible au survol (title).
 function prettyError(raw) {
   const m = String(raw || "échec");
-  if (/\(401\)|unauthor|invalid api key|authentication/i.test(m)) return "clé API refusée (401)";
-  if (/quota|insufficient|not enough|no.*credit/i.test(m)) return "crédits insuffisants";
+  if (/unauthor|invalid api key|authentication|clé.*refus/i.test(m)) return "clé API refusée — vérifie-la dans Réglages";
+  if (/quota|insufficient|not enough|no.*credit|crédits insuffisants/i.test(m)) return "crédits insuffisants";
   if (/too long|trop long|max.*char|character limit|1500\s*(car|char)/i.test(m)) return "texte trop long (max 1500 car.)";
   if (/voice.*not found|voix introuvable|invalid voice|unknown voice/i.test(m)) return "voix introuvable";
-  if (/content type not match|audio\/x-wav/i.test(m)) return "format audio refusé par HeyGen";
-  if (/avatar.*not found|invalid avatar/i.test(m)) return "avatar introuvable";
-  const j = m.match(/"message"\s*:\s*"([^"]+)"/); // extrait le message JSON HeyGen
-  if (j) return (m.startsWith("HeyGen") ? "HeyGen : " : "") + j[1];
+  if (/content type not match|audio\/x-wav|format audio/i.test(m)) return "format audio refusé par HeyGen";
+  if (/avatar.*not found|invalid avatar|avatar introuvable/i.test(m)) return "avatar introuvable";
+  // Le backend renvoie désormais un message FR clair → on l'affiche tel quel, SAUF s'il ressemble
+  // encore à du brut technique (JSON, trace, code HTTP, balise) → message générique. Le texte
+  // complet reste disponible dans l'infobulle (title=) là où les lignes sont rendues.
+  if (/[{}]|"message"\s*:|traceback|error code|exception|<\/?[a-z]/i.test(m)) {
+    return "erreur inattendue — réessaie ; si ça persiste, vérifie tes clés (Réglages)";
+  }
   return m.length > 140 ? m.slice(0, 140) + "…" : m;
 }
 

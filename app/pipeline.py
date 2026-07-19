@@ -18,6 +18,8 @@ from typing import Any
 from . import config_app, cost, db
 from .providers import (
     ProviderConfig,
+    ProviderError,
+    _log_detail,
     gradium_tts,
     grok_dialogue_prompt,
     grok_generate_video,
@@ -35,13 +37,27 @@ def _noop(_: dict[str, Any]) -> None:
     pass
 
 
+def _user_error_message(exc: object) -> str:
+    """Message d'échec LISIBLE pour un utilisateur non-technique.
+
+    Une erreur fournisseur (`ProviderError`) porte DÉJÀ un message clair et actionnable (clé,
+    crédits, réseau…) → on le garde tel quel. Toute AUTRE erreur (bug, fichier, ffmpeg, clé…)
+    est remplacée par un message générique ; son détail technique part dans app.log (jamais à
+    l'écran). Ainsi aucun `{exc}` cru, code HTTP ou fragment JSON n'atteint l'utilisateur.
+    """
+    if isinstance(exc, ProviderError):
+        return str(exc)
+    _log_detail(f"Échec génération clip : {exc!r}")
+    return "La génération a échoué — réessaie ; si ça persiste, vérifie tes clés (Réglages)."
+
+
 def _emit_clip_failure(
     emit: UpdateFn, clip_id: int, n: int, exc: object, *, extra: dict[str, Any] | None = None,
 ) -> bool:
-    """Marque UN clip en échec (statut « echec » + message stocké) et émet l'événement de
+    """Marque UN clip en échec (statut « echec » + message LISIBLE stocké) et émet l'événement de
     progression correspondant, sans bloquer les autres clips. `extra` ajoute des clés à
     l'événement (ex. `voice_ok`). Renvoie toujours False (retour d'un worker en échec)."""
-    msg = str(exc)
+    msg = _user_error_message(exc)
     db.update_clip(clip_id, status="echec", error=msg)
     emit({"scene": n, "phase": "erreur", "status": "echec", "message": msg, **(extra or {})})
     return False
@@ -105,7 +121,7 @@ def _voice_one_scene(
     clip_id = int(s["clip_id"]) if s.get("clip_id") else db.create_clip(ad_id, n, script, motion)
     wav = out_dir / f"{n}.wav"
     emit({"scene": n, "phase": "voix", "status": "en_cours"})
-    last = ""
+    last: Exception | None = None
     for attempt in range(max(1, config_app.GRADIUM_TTS_RETRIES)):
         try:
             # Voix intermédiaire de l'avatar : TOUJOURS en WAV (HeyGen exige un upload WAV/x-wav).
@@ -118,7 +134,7 @@ def _voice_one_scene(
             return {"n": n, "clip_id": clip_id, "motion": motion, "script": script,
                     "wav": wav, "ok": True}
         except Exception as exc:  # noqa: BLE001 - on réessaie (concurrency Gradium ponctuelle)
-            last = str(exc)
+            last = exc
             if attempt + 1 < config_app.GRADIUM_TTS_RETRIES:
                 time.sleep(1.5 * (attempt + 1))
     _emit_clip_failure(emit, clip_id, n, last)

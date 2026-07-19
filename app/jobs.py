@@ -10,8 +10,20 @@ import time
 import uuid
 from typing import Any
 
-from . import db, pipeline
-from .providers import ProviderConfig
+from . import brain, db, pipeline
+from .providers import ProviderConfig, ProviderError, _log_detail
+
+
+def _job_error_message(exc: BaseException) -> str:
+    """Message d'échec GLOBAL de job, lisible pour un utilisateur non-technique.
+
+    ProviderError (clé/crédits/réseau) et BrainError (découpage) portent déjà un message clair
+    → on le garde. Toute autre erreur (bug inattendu) devient un message générique, le détail
+    technique partant dans app.log (jamais à l'écran)."""
+    if isinstance(exc, (ProviderError, brain.BrainError)):
+        return str(exc)
+    _log_detail(f"Échec job : {exc!r}")
+    return "La génération a échoué — réessaie ; si ça persiste, vérifie tes clés et tes réglages."
 
 
 class Job:
@@ -134,7 +146,7 @@ class JobManager:
                     "termine" if summary.get("echec", 0) == 0 else "partiel", summary
                 )
             except Exception as exc:  # noqa: BLE001
-                job.set_state("echec", {"message": str(exc)})
+                job.set_state("echec", {"message": _job_error_message(exc)})
                 db.set_ad_status(ad_id, "echec")
 
         threading.Thread(target=_run, name=f"job-{job.id}", daemon=True).start()

@@ -292,11 +292,10 @@ def anthropic_check(cfg: ProviderConfig) -> dict[str, Any]:
                 time.sleep(providers._RETRY_BACKOFF * attempt)
                 continue
             break
-    if providers.is_network_hiccup(last):
-        return {"ok": False, "message": (
-            f"Anthropic : délai réseau dépassé après {providers.CONNECTION_TEST_RETRIES} "
-            f"tentatives — réessaie (ce n'est PAS forcément une clé invalide). Détail : {last}")}
-    return {"ok": False, "message": f"Anthropic : {last}"}
+    if last is None:  # ne devrait pas arriver (on sort de la boucle sur exception)
+        return {"ok": False, "message": "Anthropic : erreur inconnue — réessaie."}
+    # Message clair et actionnable (réseau → « réessaie » ; sinon clé/crédits) ; détail → app.log.
+    return {"ok": False, "message": _friendly_anthropic(last)}
 
 
 # ============================================================ API publique
@@ -582,7 +581,7 @@ def _one_visuals_batch_with_retry(
             if _is_transient_brain_error(exc):
                 last_err = str(exc)
                 continue
-            raise BrainProviderError(f"Anthropic : {exc}") from exc
+            raise BrainProviderError(_friendly_anthropic(exc)) from exc
     # Mode manuel : les DIALOGUES sont ceux de l'utilisateur (jamais perdus). Si les visuels
     # échouent (JSON tronqué / surcharge), on se rabat sur les gabarits canned → _BrainRetryable.
     raise _BrainRetryable(f"visuels manuels invalides ({last_err})")
@@ -682,7 +681,7 @@ def _one_plan_batch_with_retry(
             if _is_transient_brain_error(exc):
                 last_err, last_verbatim = str(exc), False
                 continue
-            raise BrainProviderError(f"Anthropic : {exc}") from exc
+            raise BrainProviderError(_friendly_anthropic(exc)) from exc
         # Garde-fou VERBATIM dans la boucle : si le modèle a altéré le script, on relance.
         clean = _renumber_shots([s for s in shots if str(s.get("dialogue", "")).strip()])
         if clean and dialogue_verbatim_ok(script, clean):
@@ -856,7 +855,7 @@ def _one_mashup_batch_with_retry(
         except Exception as exc:  # noqa: BLE001 - 529/réseau : on relance ; auth/400 : stop
             if _is_transient_brain_error(exc):
                 continue
-            raise BrainProviderError(f"Anthropic : {exc}") from exc
+            raise BrainProviderError(_friendly_anthropic(exc)) from exc
     raise BrainProviderError(_OVERLOADED_MESSAGE)
 
 
@@ -972,7 +971,7 @@ def _generate_with_retry(
             if _is_transient_brain_error(exc):
                 last_err, last_verbatim = str(exc), False
                 continue
-            raise BrainProviderError(f"Anthropic : {exc}") from exc
+            raise BrainProviderError(_friendly_anthropic(exc)) from exc
         if verbatim_ok(script, scenes):
             return scenes
         last_err, last_verbatim = "texte altéré par le modèle", True

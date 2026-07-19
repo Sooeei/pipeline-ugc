@@ -368,8 +368,11 @@ def create_app() -> FastAPI:
                 cfg, prompt, [], out, label="Aperçu style",
                 subtitle=config_app.OBJET_STYLES[key]["label"],
             )
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(502, f"Aperçu impossible : {exc}") from exc
+        except prov.ProviderError as exc:
+            raise HTTPException(502, str(exc)) from exc  # message fournisseur déjà clair
+        except Exception as exc:  # noqa: BLE001 - imprévu : message générique, détail en log
+            prov._log_detail(f"Aperçu style : {exc}")
+            raise HTTPException(502, "Aperçu impossible pour le moment — réessaie.") from exc
         if not cfg.dry_run:
             cost.record_image(None, pipeline._objet_image_model_id(cfg))
         return {"ok": True, "cached": False, "image_url": _media_url(str(path)), "style": key}

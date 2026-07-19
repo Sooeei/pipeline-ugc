@@ -607,27 +607,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/objet/regenerate-image/{clip_id}")
     def objet_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
-        cfg = load_provider_config()
-        clip = db.get_clip(clip_id)
-        if clip is None:
-            raise HTTPException(404, "Plan introuvable.")
-        ad = db.get_ad(int(clip["ad_id"]))
-        if ad is None or ad.get("kind") != "objet":
-            raise HTTPException(400, "Ce plan n'appartient pas à une pub « Objet animé ».")
-        if not cfg.dry_run and not body.confirm:
-            raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
-
-        # Prompt éventuellement édité par l'utilisateur → on le mémorise avant de régénérer.
-        prompt_image = body.prompt_image.strip() if body.prompt_image.strip() else str(clip["prompt_image"] or "")
-        db.update_clip(clip_id, prompt_image=prompt_image, status="en_attente", error=None)
-
-        shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
-                "refs_needed": clip.get("refs_needed")}
-        job = jobs.manager.start(
-            cfg, int(ad["id"]), str(ad["name"]), [shot], "",
-            output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
+        return _regenerate_image(
+            clip_id, body, "objet", "une pub « Objet animé »", allow_prompt_edit=True,
         )
-        return {"ok": True, "job_id": job.id}
 
     @app.post("/api/objet/validate/{clip_id}")
     def objet_validate(clip_id: int, body: ValidateIn) -> dict[str, Any]:
@@ -693,30 +675,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/objet/ad/{ad_id}")
     def objet_ad(ad_id: int) -> dict[str, Any]:
-        ad = db.get_ad(ad_id)
-        if ad is None:
-            raise HTTPException(404, "Pub introuvable.")
-        clips = [c for a in db.list_ads_with_clips() if a["id"] == ad_id for c in a["clips"]]
-        shots = [
-            {
-                "clip_id": c["id"],
-                "n": c["scene_n"],
-                "prompt_image": c.get("prompt_image") or "",
-                "prompt_motion": c.get("motion_prompt") or "",
-                "dialogue": c.get("script") or "",   # ce que l'objet dit (verbatim, éditable)
-                "image_url": _media_url(c.get("image_path")),
-                "video_url": _media_url(c.get("mp4_path")),
-                "status": c["status"],
-                "error": c.get("error"),
-                "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
-                "is_anchor": bool(c.get("is_anchor")),
-            }
-            for c in clips
-        ]
-        return {
-            "ad_id": ad_id, "name": ad["name"], "status": ad["status"], "shots": shots,
-            **_ad_overview(ad_id, clips),
-        }
+        # « dialogue » = ce que l'objet dit (verbatim, éditable).
+        return _ad_shots_response(ad_id, lambda c: {"dialogue": c.get("script") or ""})
 
     @app.post("/api/objet/dialogue/{clip_id}")
     def objet_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
@@ -809,25 +769,10 @@ def create_app() -> FastAPI:
 
     @app.post("/api/mashup/regenerate-image/{clip_id}")
     def mashup_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
-        cfg = load_provider_config()
-        clip = db.get_clip(clip_id)
-        if clip is None:
-            raise HTTPException(404, "Plan introuvable.")
-        ad = db.get_ad(int(clip["ad_id"]))
-        if ad is None or ad.get("kind") != "mashup":
-            raise HTTPException(400, "Ce plan n'appartient pas à un « Mashup ».")
-        if not cfg.dry_run and not body.confirm:
-            raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
-        # L'utilisateur ne rédige pas les prompts : on réutilise le prompt_image existant du clip.
-        prompt_image = str(clip["prompt_image"] or "")
-        db.update_clip(clip_id, status="en_attente", error=None)
-        shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
-                "refs_needed": clip.get("refs_needed")}
-        job = jobs.manager.start(
-            cfg, int(ad["id"]), str(ad["name"]), [shot], "",
-            output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
+        # L'utilisateur ne rédige pas les prompts mashup → on réutilise le prompt existant du clip.
+        return _regenerate_image(
+            clip_id, body, "mashup", "un « Mashup »", allow_prompt_edit=False,
         )
-        return {"ok": True, "job_id": job.id}
 
     @app.post("/api/mashup/validate/{clip_id}")
     def mashup_validate(clip_id: int, body: ValidateIn) -> dict[str, Any]:
@@ -902,30 +847,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/mashup/ad/{ad_id}")
     def mashup_ad(ad_id: int) -> dict[str, Any]:
-        ad = db.get_ad(ad_id)
-        if ad is None:
-            raise HTTPException(404, "Pub introuvable.")
-        clips = [c for a in db.list_ads_with_clips() if a["id"] == ad_id for c in a["clips"]]
-        shots = [
-            {
-                "clip_id": c["id"],
-                "n": c["scene_n"],
-                "prompt_image": c.get("prompt_image") or "",
-                "prompt_motion": c.get("motion_prompt") or "",
-                "duration_s": c.get("duration_s") or config_app.KLING_DEFAULT_CLIP_SECONDS,
-                "image_url": _media_url(c.get("image_path")),
-                "video_url": _media_url(c.get("mp4_path")),
-                "status": c["status"],
-                "error": c.get("error"),
-                "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
-                "is_anchor": bool(c.get("is_anchor")),
-            }
-            for c in clips
-        ]
-        return {
-            "ad_id": ad_id, "name": ad["name"], "status": ad["status"], "shots": shots,
-            **_ad_overview(ad_id, clips),
-        }
+        return _ad_shots_response(
+            ad_id,
+            lambda c: {"duration_s": c.get("duration_s") or config_app.KLING_DEFAULT_CLIP_SECONDS},
+        )
 
     # -------------------------------------------------- VOIX OFF (voix Gradium seule)
     @app.post("/api/voiceover/preview")
@@ -1523,6 +1448,74 @@ def _ad_overview(ad_id: int, clips: list[dict[str, Any]]) -> dict[str, Any]:
         # facturent même en cas d'échec → on l'affiche pour éviter la mauvaise surprise.
         "billed_despite_failure": bool(n_echec and real["usd"] > 0),
     }
+
+
+def _ad_shots_response(
+    ad_id: int, extra_fields: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Réponse commune aux détails d'une pub objet/mashup : la liste des plans (shots) + l'aperçu
+    coût. `extra_fields(c)` fournit les champs propres au type (dialogue pour l'objet, duration_s
+    pour le mashup). Une seule requête clips (db.clips_for_ad) au lieu de charger la bibliothèque."""
+    ad = db.get_ad(ad_id)
+    if ad is None:
+        raise HTTPException(404, "Pub introuvable.")
+    clips = db.clips_for_ad(ad_id)
+    shots = [
+        {
+            "clip_id": c["id"],
+            "n": c["scene_n"],
+            "prompt_image": c.get("prompt_image") or "",
+            "prompt_motion": c.get("motion_prompt") or "",
+            **extra_fields(c),
+            "image_url": _media_url(c.get("image_path")),
+            "video_url": _media_url(c.get("mp4_path")),
+            "status": c["status"],
+            "error": c.get("error"),
+            "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
+            "is_anchor": bool(c.get("is_anchor")),
+        }
+        for c in clips
+    ]
+    return {
+        "ad_id": ad_id, "name": ad["name"], "status": ad["status"], "shots": shots,
+        **_ad_overview(ad_id, clips),
+    }
+
+
+def _regenerate_image(
+    clip_id: int, body: RegenerateIn, kind: str, kind_label: str, *, allow_prompt_edit: bool,
+) -> dict[str, Any]:
+    """Régénère l'image d'UN plan (objet/mashup) : relance un job image sur ce seul clip.
+
+    `allow_prompt_edit` (objet) : honore un prompt_image édité par l'utilisateur s'il est non
+    vide ; sinon (mashup, ou édition vide) on réutilise le prompt_image existant du clip.
+    """
+    cfg = load_provider_config()
+    clip = db.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "Plan introuvable.")
+    ad = db.get_ad(int(clip["ad_id"]))
+    if ad is None or ad.get("kind") != kind:
+        raise HTTPException(400, f"Ce plan n'appartient pas à {kind_label}.")
+    if not cfg.dry_run and not body.confirm:
+        raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
+
+    edited = body.prompt_image.strip()
+    if allow_prompt_edit and edited:
+        # Prompt édité par l'utilisateur → on le mémorise avant de régénérer.
+        prompt_image = edited
+        db.update_clip(clip_id, prompt_image=prompt_image, status="en_attente", error=None)
+    else:
+        prompt_image = str(clip["prompt_image"] or "")
+        db.update_clip(clip_id, status="en_attente", error=None)
+
+    shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
+            "refs_needed": clip.get("refs_needed")}
+    job = jobs.manager.start(
+        cfg, int(ad["id"]), str(ad["name"]), [shot], "",
+        output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
+    )
+    return {"ok": True, "job_id": job.id}
 
 
 def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:

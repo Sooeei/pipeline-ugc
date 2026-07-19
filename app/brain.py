@@ -588,13 +588,38 @@ def _one_visuals_batch_with_retry(
     raise _BrainRetryable(f"visuels manuels invalides ({last_err})")
 
 
+def _call_claude_json(
+    cfg: ProviderConfig, *, system: str, user: str, max_tokens: int,
+    result_key: str, empty_msg: str,
+) -> list[dict[str, Any]]:
+    """Appel Claude commun aux cerveaux : envoie (system, user), enregistre le coût, extrait le
+    JSON et renvoie `data[result_key]` (liste non vide) ; sinon lève _BrainRetryable(empty_msg).
+
+    Toute la queue (client → messages.create → _record_anthropic → extraction texte → JSON) est
+    partagée ; chaque cerveau ne fournit que son system, son user, max_tokens et la clé de résultat.
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    resp = client.messages.create(
+        model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    _record_anthropic(resp)
+    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+    data = _extract_json(text)
+    items = data.get(result_key)
+    if not isinstance(items, list) or not items:
+        raise _BrainRetryable(empty_msg)
+    return items
+
+
 def _call_claude_manual_visuals(
     cfg: ProviderConfig, product_name: str, ambiance: str, segments: list[str],
     persona: str = "", attempt: int = 0,
 ) -> list[dict[str, Any]]:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     seg_txt = "\n".join(f"[Plan {i + 1}] {seg}" for i, seg in enumerate(segments))
     correction = ""
     if attempt > 0:
@@ -610,19 +635,10 @@ def _call_claude_manual_visuals(
         f"PLANS (dialogues DÉJÀ définis, NE PAS les changer) :\n{seg_txt}\n\n"
         f"Écris UNIQUEMENT le JSON des visuels (un objet par plan, MÊME ordre).{correction}"
     )
-    resp = client.messages.create(
-        model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
-        max_tokens=4000,
-        system=_with_style(OBJET_MANUAL_SYSTEM_PROMPT, cfg),
-        messages=[{"role": "user", "content": user}],
+    return _call_claude_json(
+        cfg, system=_with_style(OBJET_MANUAL_SYSTEM_PROMPT, cfg), user=user,
+        max_tokens=4000, result_key="shots", empty_msg="visuels manuels manquants",
     )
-    _record_anthropic(resp)
-    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
-    data = _extract_json(text)
-    shots = data.get("shots")
-    if not isinstance(shots, list) or not shots:
-        raise _BrainRetryable("visuels manuels manquants")
-    return shots
 
 
 def _generate_plan_with_retry(
@@ -681,9 +697,6 @@ def _call_claude_plan(
     cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
     persona: str = "", attempt: int = 0,
 ) -> list[dict[str, Any]]:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     correction = ""
     if attempt > 0:
         correction = (
@@ -703,19 +716,11 @@ def _call_claude_plan(
         f"{script}\n\n"
         f"Écris le plan de tournage (JSON strict).{correction}"
     )
-    resp = client.messages.create(
-        model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
-        max_tokens=4000,
-        system=_with_style(OBJET_SYSTEM_PROMPT, cfg),
-        messages=[{"role": "user", "content": user}],
+    return _call_claude_json(
+        cfg, system=_with_style(OBJET_SYSTEM_PROMPT, cfg), user=user,
+        max_tokens=4000, result_key="shots",
+        empty_msg="réponse du modèle sans plans exploitables",
     )
-    _record_anthropic(resp)
-    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
-    data = _extract_json(text)
-    shots = data.get("shots")
-    if not isinstance(shots, list) or not shots:
-        raise _BrainRetryable("réponse du modèle sans plans exploitables")
-    return shots
 
 
 # ============================================================ HELPERS PROMPT IMAGE (partagés)
@@ -859,9 +864,6 @@ def _call_claude_mashup(
     cfg: ProviderConfig, brief: str, style: str, persona: str, ratio: str,
     count: int = 0, attempt: int = 0, part_hint: str = "",
 ) -> list[dict[str, Any]]:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     nb = f"\nNombre de plans souhaité : {count}.{part_hint}" if count and count > 0 else ""
     correction = "\n\n[RAPPEL] JSON strict : prompt_image + prompt_motion + duration_s par plan." if attempt else ""
     user = (
@@ -871,19 +873,10 @@ def _call_claude_mashup(
         f"RATIO : {ratio}.{nb}\n\n"
         f"Écris la série de plans (JSON strict).{correction}"
     )
-    resp = client.messages.create(
-        model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
-        max_tokens=2500,
-        system=MASHUP_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user}],
+    return _call_claude_json(
+        cfg, system=MASHUP_SYSTEM_PROMPT, user=user, max_tokens=2500,
+        result_key="shots", empty_msg="réponse du modèle sans plans mashup",
     )
-    _record_anthropic(resp)
-    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
-    data = _extract_json(text)
-    shots = data.get("shots")
-    if not isinstance(shots, list) or not shots:
-        raise _BrainRetryable("réponse du modèle sans plans mashup")
-    return shots
 
 
 def generate_mashup_plan(
@@ -991,9 +984,6 @@ def _generate_with_retry(
 def _call_claude(
     cfg: ProviderConfig, script: str, brief: str, avatar_label: str, attempt: int = 0
 ) -> list[dict[str, Any]]:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     correction = ""
     if attempt > 0:
         correction = (
@@ -1009,19 +999,10 @@ def _call_claude(
     # Le JSON de sortie contient tout le script (réparti) + motion prompts + structure :
     # on dimensionne max_tokens sur la taille du script (chars ≥ tokens attendus).
     max_tokens = min(16000, max(4000, len(script)))
-    resp = client.messages.create(
-        model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
-        max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user}],
+    return _call_claude_json(
+        cfg, system=SYSTEM_PROMPT, user=user, max_tokens=max_tokens,
+        result_key="scenes", empty_msg="réponse du modèle sans scènes exploitables",
     )
-    _record_anthropic(resp)
-    text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
-    data = _extract_json(text)
-    scenes = data.get("scenes")
-    if not isinstance(scenes, list) or not scenes:
-        raise _BrainRetryable("réponse du modèle sans scènes exploitables")
-    return scenes
 
 
 _FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)

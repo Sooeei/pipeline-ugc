@@ -35,6 +35,18 @@ def _noop(_: dict[str, Any]) -> None:
     pass
 
 
+def _emit_clip_failure(
+    emit: UpdateFn, clip_id: int, n: int, exc: object, *, extra: dict[str, Any] | None = None,
+) -> bool:
+    """Marque UN clip en échec (statut « echec » + message stocké) et émet l'événement de
+    progression correspondant, sans bloquer les autres clips. `extra` ajoute des clés à
+    l'événement (ex. `voice_ok`). Renvoie toujours False (retour d'un worker en échec)."""
+    msg = str(exc)
+    db.update_clip(clip_id, status="echec", error=msg)
+    emit({"scene": n, "phase": "erreur", "status": "echec", "message": msg, **(extra or {})})
+    return False
+
+
 def _run_parallel(
     items: list[dict[str, Any]],
     worker: Callable[[dict[str, Any]], bool],
@@ -109,8 +121,7 @@ def _voice_one_scene(
             last = str(exc)
             if attempt + 1 < config_app.GRADIUM_TTS_RETRIES:
                 time.sleep(1.5 * (attempt + 1))
-    db.update_clip(clip_id, status="echec", error=last)
-    emit({"scene": n, "phase": "erreur", "status": "echec", "message": last})
+    _emit_clip_failure(emit, clip_id, n, last)
     return {"n": n, "clip_id": clip_id, "motion": motion, "script": script, "wav": wav, "ok": False}
 
 
@@ -138,9 +149,7 @@ def _render_one_video(
         emit({"scene": n, "phase": "pret", "status": "ok", "mp4": str(mp4), "voice_ok": True})
         return True
     except Exception as exc:  # noqa: BLE001 - une scène en échec ne bloque pas les autres
-        db.update_clip(clip_id, status="echec", error=str(exc))
-        emit({"scene": n, "phase": "erreur", "status": "echec", "message": str(exc), "voice_ok": True})
-        return False
+        return _emit_clip_failure(emit, clip_id, n, exc, extra={"voice_ok": True})
 
 
 def generate_ad(
@@ -207,19 +216,24 @@ def _safe_name(name: str) -> str:
     return cleaned
 
 
-def voices_dir(ad_id: int, ad_name: str) -> Path:
-    """Dossier de sortie « voix seules », nommé d'après la pub.
+def _unique_pub_dir(base_dir: Path, ad_id: int, ad_name: str) -> Path:
+    """Dossier de sortie nommé d'après la pub, sous `base_dir`, sans écrasement.
 
-    Chaque génération est une pub distincte (ad_id unique). Si un dossier du même nom
-    existe déjà (ex. deux pubs nommées « pub »), on suffixe par l'ad_id pour NE PAS
-    écraser les .wav/recap d'une génération précédente.
+    Chaque génération est une pub distincte (ad_id unique). Si un dossier du même nom existe
+    déjà (ex. deux pubs nommées « pub »), on suffixe par l'ad_id pour NE PAS écraser les
+    fichiers d'une génération précédente.
     """
     base = _safe_name(ad_name or f"pub_{ad_id}")
-    d = config_app.VOICES_DIR / base
+    d = base_dir / base
     if d.exists():
-        d = config_app.VOICES_DIR / f"{base}_{ad_id}"
+        d = base_dir / f"{base}_{ad_id}"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def voices_dir(ad_id: int, ad_name: str) -> Path:
+    """Dossier de sortie « voix seules », nommé d'après la pub (sans écrasement)."""
+    return _unique_pub_dir(config_app.VOICES_DIR, ad_id, ad_name)
 
 
 def _write_recap(
@@ -302,9 +316,7 @@ def generate_voices_only(
             emit({"scene": n, "phase": "pret", "status": "ok", "wav": audio_path})
             ok += 1
         except Exception as exc:  # noqa: BLE001 - une scène en échec ne bloque pas les autres
-            msg = str(exc)
-            db.update_clip(clip_id, status="echec", error=msg)
-            emit({"scene": n, "phase": "erreur", "status": "echec", "message": msg})
+            _emit_clip_failure(emit, clip_id, n, exc)
             ko += 1
 
     recap = _write_recap(folder, ad_name, avatar_label, scenes, ext=config_app.audio_ext(cfg.audio_format))
@@ -452,10 +464,54 @@ def _generate_one_image(
         emit({"scene": n, "phase": "pret", "status": "ok", "image": str(img)})
         return True
     except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
-        db.update_clip(clip_id, status="echec", error=str(exc))
-        emit({"scene": n, "phase": "erreur", "status": "echec", "message": str(exc)})
-        return False
+        return _emit_clip_failure(emit, clip_id, n, exc)
 
+
+
+RenderClipFn = Callable[[dict[str, Any], Path], None]
+
+
+def _animate_clips(
+    ad_id: int,
+    ad_name: str,
+    clips: list[dict[str, Any]],
+    render_clip: RenderClipFn,
+    *,
+    parallel_cap: int,
+    log_kind: str,
+    log_prefix: str,
+    set_status: bool = True,
+    on_update: UpdateFn | None = None,
+) -> dict[str, Any]:
+    """Squelette commun aux animations (objet/mashup). Pour chaque plan validé : émet la
+    progression, appelle `render_clip(c, mp4)` (partie propre au provider : génération + coût),
+    marque le clip « pret » puis « ok » ; en cas d'échec le marque « echec » sans bloquer les
+    autres. Anime en parallèle (file bornée), met à jour le statut de la pub et journalise.
+    Les clips sont sélectionnés par l'appelant (objet vs mashup vs « tester ce plan »)."""
+    emit = on_update or _noop
+    folder = objet_dir(ad_id, ad_name)
+    if not clips:
+        raise RuntimeError("Aucun plan validé à animer (valide les images d'abord).")
+
+    def _animate_one(c: dict[str, Any]) -> bool:
+        n = int(c["scene_n"])
+        clip_id = int(c["id"])
+        mp4 = folder / f"{n}.mp4"
+        try:
+            emit({"scene": n, "phase": "animation", "status": "en_cours"})
+            render_clip(c, mp4)
+            db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
+            emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(mp4)})
+            return True
+        except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
+            return _emit_clip_failure(emit, clip_id, n, exc)
+
+    ok, ko = _run_parallel(clips, _animate_one, parallel_cap)
+    # « Tester ce plan » (set_status=False) ne doit PAS marquer toute la pub comme terminée.
+    if set_status:
+        db.set_ad_status(ad_id, "termine" if ok and not ko else "objet_images")
+    db.log_activity(log_kind, f"{log_prefix} : {ok} clips, {ko} en échec.")
+    return {"ok": ok, "echec": ko, "status": "termine", "ad_id": ad_id}
 
 
 def animate_objet_clips(
@@ -471,8 +527,6 @@ def animate_objet_clips(
     Grok via une section AUDIO (voir providers.grok_dialogue_prompt). Sans dialogue → clip muet.
     Ne touche qu'aux clips « valide » ayant une image ; chaque clip animé passe « pret ».
     """
-    emit = on_update or _noop
-    folder = objet_dir(ad_id, ad_name)
     vmodel = config_app.OBJET_VIDEO_MODELS.get(
         cfg.objet_video_model, config_app.OBJET_VIDEO_MODELS[config_app.DEFAULT_OBJET_VIDEO_MODEL]
     )
@@ -482,8 +536,6 @@ def animate_objet_clips(
         c for c in db.clips_for_ad(ad_id)
         if c.get("image_path") and c.get("status") in ("valide", "echec")
     ]
-    if not clips:
-        raise RuntimeError("Aucun plan validé à animer (valide les images d'abord).")
     # Timbre + DÉBIT de voix choisis dans les Réglages → directives autour du dialogue.
     style = config_app.GROK_VOICE_STYLES.get(
         cfg.objet_voice_style, config_app.GROK_VOICE_STYLES[config_app.DEFAULT_GROK_VOICE_STYLE]
@@ -493,10 +545,8 @@ def animate_objet_clips(
         cfg.objet_voice_pace, config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]
     )
 
-    def _animate_one(c: dict[str, Any]) -> bool:
+    def _render(c: dict[str, Any], mp4: Path) -> None:
         n = int(c["scene_n"])
-        clip_id = int(c["id"])
-        mp4 = folder / f"{n}.mp4"
         # Dialogue VERBATIM du plan (ce que l'objet dit) → intégré au prompt Grok (section AUDIO).
         dialogue = str(c.get("script") or "").strip()
         prompt = grok_dialogue_prompt(
@@ -504,27 +554,19 @@ def animate_objet_clips(
         )
         # Durée calibrée sur le temps naturel pour dire le dialogue au DÉBIT choisi.
         seconds = config_app.clip_seconds_for_dialogue(dialogue, pace_cfg["words_per_sec"])
-        try:
-            emit({"scene": n, "phase": "animation", "status": "en_cours"})
-            grok_generate_video(
-                cfg, str(c["image_path"]), prompt, mp4,
-                model_value=vmodel["model"], seconds=seconds, label=ad_name, index=n - 1,
-            )
-            if not cfg.dry_run:
-                cost.record_grok_clip(ad_id, seconds)  # 1 clip Grok (voix + lip-sync)
-            db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
-            emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(mp4)})
-            return True
-        except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
-            db.update_clip(clip_id, status="echec", error=str(exc))
-            emit({"scene": n, "phase": "erreur", "status": "echec", "message": str(exc)})
-            return False
+        grok_generate_video(
+            cfg, str(c["image_path"]), prompt, mp4,
+            model_value=vmodel["model"], seconds=seconds, label=ad_name, index=n - 1,
+        )
+        if not cfg.dry_run:
+            cost.record_grok_clip(ad_id, seconds)  # 1 clip Grok (voix + lip-sync)
 
-    # Tous les plans validés animés EN PARALLÈLE (file bornée GROK_MAX_PARALLEL).
-    ok, ko = _run_parallel(clips, _animate_one, config_app.GROK_MAX_PARALLEL)
-    db.set_ad_status(ad_id, "termine" if ok and not ko else "objet_images")
-    db.log_activity("objet", f"Animation « {ad_name} » : {ok} clips, {ko} en échec.")
-    return {"ok": ok, "echec": ko, "status": "termine", "ad_id": ad_id}
+    return _animate_clips(
+        ad_id, ad_name, clips, _render,
+        parallel_cap=config_app.GROK_MAX_PARALLEL,
+        log_kind="objet", log_prefix=f"Animation « {ad_name} »",
+        on_update=on_update,
+    )
 
 
 def animate_mashup_clips(
@@ -540,8 +582,6 @@ def animate_mashup_clips(
     `prompt_motion` (sobre) sert de prompt, la durée vient de `clip.duration_s`. `only_clip_id`
     → n'anime QUE ce clip (bouton « Tester ce plan »). Plans « valide » ou « echec » (avec image).
     """
-    emit = on_update or _noop
-    folder = objet_dir(ad_id, ad_name)
     model_key = cfg.mashup_video_model
     vmodel = config_app.mashup_model_cfg(model_key)
     resolution = config_app.mashup_resolution_for(model_key)  # 1080p si supporté, sinon meilleure
@@ -558,44 +598,31 @@ def animate_mashup_clips(
             c for c in db.clips_for_ad(ad_id)
             if c.get("image_path") and c.get("status") in ("valide", "echec")
         ]
-    if not clips:
-        raise RuntimeError("Aucun plan validé à animer (valide les images d'abord).")
 
-    def _animate_one(c: dict[str, Any]) -> bool:
+    def _render(c: dict[str, Any], mp4: Path) -> None:
         n = int(c["scene_n"])
-        clip_id = int(c["id"])
-        mp4 = folder / f"{n}.mp4"
         # Durée ADAPTÉE au modèle (ex. Veo n'accepte que {4,6,8} → 5 devient 6).
         seconds = config_app.snap_mashup_duration(c.get("duration_s"), model_key)
-        try:
-            emit({"scene": n, "phase": "animation", "status": "en_cours"})
-            usage: dict[str, Any] = {}
-            kling_generate_video(
-                cfg, str(c["image_path"]), str(c.get("motion_prompt", "")), mp4,
-                model_value=vmodel["model"], seconds=seconds,
-                resolution=resolution, label=ad_name, index=n - 1,
-                usage_out=usage,
+        usage: dict[str, Any] = {}
+        kling_generate_video(
+            cfg, str(c["image_path"]), str(c.get("motion_prompt", "")), mp4,
+            model_value=vmodel["model"], seconds=seconds,
+            resolution=resolution, label=ad_name, index=n - 1,
+            usage_out=usage,
+        )
+        if not cfg.dry_run:
+            # Coût EXACT (usage.cost OpenRouter) si dispo, sinon fallback secondes×taux.
+            cost.record_kling_clip(
+                ad_id, seconds, model=cfg.mashup_video_model, usd_cost=usage.get("cost"),
             )
-            if not cfg.dry_run:
-                # Coût EXACT (usage.cost OpenRouter) si dispo, sinon fallback secondes×taux.
-                cost.record_kling_clip(
-                    ad_id, seconds, model=cfg.mashup_video_model, usd_cost=usage.get("cost"),
-                )
-            db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
-            emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(mp4)})
-            return True
-        except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
-            db.update_clip(clip_id, status="echec", error=str(exc))
-            emit({"scene": n, "phase": "erreur", "status": "echec", "message": str(exc)})
-            return False
 
-    # Animation EN PARALLÈLE (file bornée KLING_MAX_PARALLEL : jobs vidéo longs).
-    ok, ko = _run_parallel(clips, _animate_one, config_app.KLING_MAX_PARALLEL)
-    # Un simple « Tester ce plan » ne doit PAS marquer toute la pub comme terminée.
-    if only_clip_id is None:
-        db.set_ad_status(ad_id, "termine" if ok and not ko else "objet_images")
-    db.log_activity("mashup", f"Animation Mashup « {ad_name} » : {ok} clips, {ko} en échec.")
-    return {"ok": ok, "echec": ko, "status": "termine", "ad_id": ad_id}
+    return _animate_clips(
+        ad_id, ad_name, clips, _render,
+        parallel_cap=config_app.KLING_MAX_PARALLEL,
+        log_kind="mashup", log_prefix=f"Animation Mashup « {ad_name} »",
+        set_status=(only_clip_id is None),
+        on_update=on_update,
+    )
 
 
 # ==================================================================== VOIX OFF (audio seul)
@@ -656,12 +683,7 @@ def voiceover_verbatim_ok(original: str, segments: list[str]) -> bool:
 
 def voiceover_dir(ad_id: int, ad_name: str) -> Path:
     """Dossier de sortie « Voix off » (audios + récap), un par pub, sans écrasement."""
-    base = _safe_name(ad_name or f"pub_{ad_id}")
-    d = config_app.VOICEOVER_DIR / base
-    if d.exists():
-        d = config_app.VOICEOVER_DIR / f"{base}_{ad_id}"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return _unique_pub_dir(config_app.VOICEOVER_DIR, ad_id, ad_name)
 
 
 def _write_voiceover_recap(
@@ -721,9 +743,7 @@ def generate_voiceover(
             emit({"scene": i, "phase": "pret", "status": "ok", "wav": audio_path})
             ok += 1
         except Exception as exc:  # noqa: BLE001 - un segment en échec ne bloque pas les autres
-            msg = str(exc)
-            db.update_clip(clip_id, status="echec", error=msg)
-            emit({"scene": i, "phase": "erreur", "status": "echec", "message": msg})
+            _emit_clip_failure(emit, clip_id, i, exc)
             ko += 1
 
     recap = _write_voiceover_recap(

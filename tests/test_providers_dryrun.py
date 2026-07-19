@@ -97,21 +97,6 @@ def test_fix_wav_passthrough_non_wav():
     assert media.fix_wav_bytes(b"not a wav at all") == b"not a wav at all"
 
 
-def test_fix_wav_file_on_disk_reports_and_repairs(tmp_path):
-    good = _make_wav(frames=48000)
-    idx = good.find(b"data")
-    corrupt = good[: idx + 4] + struct.pack("<I", 0xFFFFFFFF) + good[idx + 8 :]
-    p = tmp_path / "voix.wav"
-    p.write_bytes(corrupt)
-
-    rep = media.fix_wav_file(p)
-    assert rep["changed"] is True
-    assert rep["sample_rate"] == 48000
-    assert rep["before_seconds"] > 40000 and rep["after_seconds"] == 1.0
-    # relance : plus rien à corriger
-    assert media.fix_wav_file(p)["changed"] is False
-
-
 # ---------------------------------------------------------------- Tests de connexion : timeout + retry
 def test_connection_test_timeout_is_large():
     from app import providers as pv

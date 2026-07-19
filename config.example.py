@@ -1,6 +1,11 @@
 # ============================================================
 #  CONFIG  —  copie ce fichier en "config.py" et remplis les champs.
 #  Ne partage JAMAIS config.py : il contient tes clés.
+#
+#  Note : ces valeurs ne servent QU'AU tout premier démarrage (import unique
+#  dans la base). Ensuite, tout se règle dans l'écran « Réglages » de l'app.
+#  Les clés Google (Nano Banana), xAI (Grok) et OpenRouter se saisissent
+#  directement dans Réglages (elles ne sont pas importées d'ici).
 # ============================================================
 
 # ---------- Clés API ----------
@@ -9,10 +14,9 @@ HEYGEN_API_KEY    = "xxxxxxxxxxxxxxxxxxxx"      # HeyGen > Settings > API
 ANTHROPIC_API_KEY = ""                          # console.anthropic.com  (cerveau IA / découpage)
 BRAIN_MODEL       = "claude-sonnet-5"           # modèle Claude pour le découpage
 
-# ---------- Voix Gradium (ta voix québécoise clonée) ----------
+# ---------- Voix Gradium (ta voix clonée) ----------
 GRADIUM_VOICE_ID = "YTpq7expH9539ERJ"          # ID de ta voix clonée (Gradium Studio > Voice Clone, 10s d'audio)
 GRADIUM_MODEL    = "default"
-GRADIUM_BASE_URL = None                         # None = défaut. Europe : "wss://eu.api.gradium.ai/api/speech/tts"
 
 # ---------- Avatars HeyGen déjà créés ----------
 #  >>> LE CHAMP MULTI-AVATARS <<<
@@ -23,15 +27,6 @@ AVATARS = {
     # "coach_homme":   "AVATAR_ID_2",
     # "cliente_60":    "AVATAR_ID_3",
 }
-DEFAULT_AVATAR = "maquilleuse_50"               # utilisé si une pub ne précise pas d'avatar
 
-# ---------- Réglages HeyGen ----------
-HEYGEN_ENGINE   = "avatar_v"                     # "avatar_v" (recommandé) ou "avatar_iv"
+# ---------- Réglage HeyGen optionnel ----------
 HEYGEN_VOICE_ID = ""                             # parfois requis même avec audio ; sinon laisse vide
-VIDEO_WIDTH     = 1080                           # 9:16 vertical
-VIDEO_HEIGHT    = 1920
-ENHANCE_MOTION  = True                           # laisse l'IA affiner le motion prompt
-
-# ---------- Sortie ----------
-OUTPUT_DIR = "sortie"                            # clips numérotés : 1.mp4, 2.mp4, ...
-WORK_DIR   = "travail"                           # audio intermédiaire (.wav)

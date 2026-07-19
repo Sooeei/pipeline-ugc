@@ -79,51 +79,6 @@ def fix_wav_bytes(raw: bytes) -> bytes:
     return b"RIFF" + struct.pack("<I", riff_size) + b"WAVE" + fmt_chunk + data_chunk
 
 
-def fix_wav_file(path: str | Path) -> dict[str, Any]:
-    """Répare un fichier .wav SUR DISQUE (entêtes de taille) sans altérer l'audio. Renvoie un
-    petit rapport {changed, before_frames, after_frames, sample_rate}. Ne réécrit que si besoin."""
-    path = Path(path)
-    raw = path.read_bytes()
-    fixed = fix_wav_bytes(raw)
-
-    def _frames(b: bytes) -> tuple[int, int]:
-        # (frames déclarées par l'entête data, sample_rate) — pour le rapport avant/après
-        if len(b) < 12 or b[:4] != b"RIFF":
-            return (0, 0)
-        n = len(b)
-        pos, sr, ba = 12, 0, 1
-        while pos + 8 <= n:
-            cid = b[pos : pos + 4]
-            csize = struct.unpack_from("<I", b, pos + 4)[0]
-            body = pos + 8
-            if cid == b"fmt " and body + 16 <= n:
-                sr = struct.unpack_from("<I", b, body + 4)[0]
-                ba = max(1, struct.unpack_from("<H", b, body + 12)[0])
-                pos = body + csize + (csize & 1)
-            elif cid == b"data":
-                return (csize // ba, sr)
-            else:
-                step = csize + (csize & 1)
-                if step <= 0 or body + step > n:
-                    return (0, sr)
-                pos = body + step
-        return (0, sr)
-
-    before_frames, sr = _frames(raw)
-    after_frames, _ = _frames(fixed)
-    changed = fixed != raw
-    if changed:
-        path.write_bytes(fixed)
-    return {
-        "changed": changed,
-        "sample_rate": sr,
-        "before_frames": before_frames,
-        "after_frames": after_frames,
-        "before_seconds": round(before_frames / sr, 1) if sr else 0,
-        "after_seconds": round(after_frames / sr, 1) if sr else 0,
-    }
-
-
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 

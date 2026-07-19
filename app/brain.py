@@ -67,9 +67,6 @@ RÈGLES ABSOLUES :
 - Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises.
 """
 
-# Styles gérés par le cerveau « avatar » (generate_scenes). L'« Objet animé » a son PROPRE
-# parcours (generate_shooting_plan) et n'est donc pas listé ici comme style avatar.
-STYLES_DISPONIBLES = {"avatar": True, "objet_vivant": False, "voix_off": False}
 MAX_SCRIPT_CHARS = 20000  # garde d'entrée : au-delà, on demande de découper la pub
 
 # --- System prompt du « plan de tournage » (pipeline Objet animé) ---
@@ -310,8 +307,11 @@ def generate_scenes(
     style: str,
     avatar_label: str,
 ) -> dict[str, Any]:
-    """Retourne {"ad","avatar","scenes":[...]} ou lève BrainError."""
-    if not STYLES_DISPONIBLES.get(style, False):
+    """Retourne {"ad","avatar","scenes":[...]} ou lève BrainError.
+
+    Ce cerveau ne gère que le style « avatar » ; « Objet animé », « Mashup » et « Voix off »
+    ont leurs propres parcours (generate_shooting_plan / generate_mashup_plan / voix)."""
+    if style != "avatar":
         raise BrainError(f"Style « {style} » pas encore disponible (bientôt).")
     if not script.strip():
         raise BrainError("Script vide.")

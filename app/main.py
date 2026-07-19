@@ -286,7 +286,7 @@ def create_app() -> FastAPI:
                     "user_gender": m.get("gender", ""),
                     "user_age": m.get("age", ""),
                     "user_note": m.get("note", ""),
-                    "sample_url": _media_url_any(m.get("sample_path")) if m.get("sample_path") else None,
+                    "sample_url": _media_url(m.get("sample_path")) if m.get("sample_path") else None,
                 })
             return out
 
@@ -321,7 +321,7 @@ def create_app() -> FastAPI:
         cfg = load_provider_config()
         existing = db.get_voice_meta(uid)
         if existing and existing.get("sample_path") and Path(existing["sample_path"]).exists():
-            return {"ok": True, "cached": True, "sample_url": _media_url_any(existing["sample_path"])}
+            return {"ok": True, "cached": True, "sample_url": _media_url(existing["sample_path"])}
         if not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise (générer un échantillon coûte un court appel TTS).")
         if not cfg.dry_run and not (cfg.gradium_api_key or "").strip():
@@ -333,7 +333,7 @@ def create_app() -> FastAPI:
         except prov.ProviderError as exc:
             raise HTTPException(502, str(exc)) from exc
         db.set_voice_meta(uid, sample_path=path)
-        return {"ok": True, "cached": False, "sample_url": _media_url_any(path)}
+        return {"ok": True, "cached": False, "sample_url": _media_url(path)}
 
     @app.post("/api/gradium/voices/{uid}/label")
     def gradium_voice_label(uid: str, body: VoiceLabelIn) -> dict[str, Any]:
@@ -352,7 +352,7 @@ def create_app() -> FastAPI:
         key = body.style if body.style in config_app.OBJET_STYLES else config_app.DEFAULT_OBJET_STYLE
         out = config_app.MEDIA_DIR / "style_previews" / f"{key}.png"
         if not body.refresh and out.exists():
-            return {"ok": True, "cached": True, "image_url": _media_url_any(str(out)), "style": key}
+            return {"ok": True, "cached": True, "image_url": _media_url(str(out)), "style": key}
         if not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise (générer un aperçu coûte 1 image).")
         if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
@@ -372,7 +372,7 @@ def create_app() -> FastAPI:
             raise HTTPException(502, f"Aperçu impossible : {exc}") from exc
         if not cfg.dry_run:
             cost.record_image(None, pipeline._objet_image_model_id(cfg))
-        return {"ok": True, "cached": False, "image_url": _media_url_any(str(path)), "style": key}
+        return {"ok": True, "cached": False, "image_url": _media_url(str(path)), "style": key}
 
     @app.post("/api/voices")
     def add_voice(body: VoiceIn) -> dict[str, Any]:
@@ -704,8 +704,8 @@ def create_app() -> FastAPI:
                 "prompt_image": c.get("prompt_image") or "",
                 "prompt_motion": c.get("motion_prompt") or "",
                 "dialogue": c.get("script") or "",   # ce que l'objet dit (verbatim, éditable)
-                "image_url": _media_url_any(c.get("image_path")),
-                "video_url": _media_url_any(c.get("mp4_path")),
+                "image_url": _media_url(c.get("image_path")),
+                "video_url": _media_url(c.get("mp4_path")),
                 "status": c["status"],
                 "error": c.get("error"),
                 "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
@@ -913,8 +913,8 @@ def create_app() -> FastAPI:
                 "prompt_image": c.get("prompt_image") or "",
                 "prompt_motion": c.get("motion_prompt") or "",
                 "duration_s": c.get("duration_s") or config_app.KLING_DEFAULT_CLIP_SECONDS,
-                "image_url": _media_url_any(c.get("image_path")),
-                "video_url": _media_url_any(c.get("mp4_path")),
+                "image_url": _media_url(c.get("image_path")),
+                "video_url": _media_url(c.get("mp4_path")),
                 "status": c["status"],
                 "error": c.get("error"),
                 "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
@@ -1008,8 +1008,8 @@ def create_app() -> FastAPI:
                 {
                     "clip_id": c["id"],
                     "scene_n": c["scene_n"],
-                    "image_url": _media_url_any(c.get("image_path")),
-                    "video_url": _media_url_any(c.get("mp4_path")),
+                    "image_url": _media_url(c.get("image_path")),
+                    "video_url": _media_url(c.get("mp4_path")),
                     "prompt_image": c.get("prompt_image") or "",
                     "status": c["status"],
                 }
@@ -1354,6 +1354,7 @@ def _validate_scenes(scenes: list[dict[str, Any]]) -> None:
 
 
 def _media_url(mp4_path: str | None) -> str | None:
+    # Sert aussi bien les .mp4 que les images (.png) sous MEDIA_DIR.
     if not mp4_path:
         return None
     p = Path(mp4_path)
@@ -1362,11 +1363,6 @@ def _media_url(mp4_path: str | None) -> str | None:
     except ValueError:
         return None
     return "/media/" + str(rel).replace("\\", "/")
-
-
-# Alias explicite : sert aussi bien les .mp4 que les images (.png) sous MEDIA_DIR.
-def _media_url_any(path: str | None) -> str | None:
-    return _media_url(path)
 
 
 def _check_voiceover_len(script: str) -> None:

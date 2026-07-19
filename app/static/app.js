@@ -2815,5 +2815,17 @@ async function pollMashAnimJob(jobId) {
   }
 }
 
+// Affiche la version de l'app (sidebar) — utile pour le support / les mises à jour.
+async function loadHealth() {
+  try {
+    const h = await api("/api/health");
+    const el = $("appVersion");
+    if (el && h.version) el.textContent = "v" + h.version;
+  } catch (_) {
+    /* non bloquant : la version reste vide si la santé n'est pas joignable */
+  }
+}
+
 // ------------------------------------------------ démarrage
+loadHealth();
 loadDashboard().catch(() => {});

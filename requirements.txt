@@ -1,0 +1,10 @@
+# Dépendances RUNTIME de l'application (celles embarquées dans l'exe).
+# Outils de dev/test : voir requirements-dev.txt.
+fastapi              # serveur web + validation (API locale)
+uvicorn              # serveur ASGI qui fait tourner FastAPI
+pywebview            # fenêtre native de l'app (repli Chrome/Edge --app si absente)
+requests             # appels HTTP aux fournisseurs (HeyGen, OpenRouter, xAI) + téléchargements
+gradium              # SDK voix Gradium (synthèse vocale)
+anthropic            # SDK du « cerveau » (Claude) : découpage scènes / plans
+python-multipart     # requis par FastAPI pour les uploads (photos de référence)
+pillow               # images du mode simulation (démo sans clé)

@@ -1,0 +1,7 @@
+# Outils de développement / vérification — PAS embarqués dans l'exe distribué.
+# Install : pip install -r requirements.txt -r requirements-dev.txt
+pytest               # suite de tests
+httpx                # requis par le client de test FastAPI (TestClient)
+ruff                 # lint + formatage
+mypy                 # vérification de types
+pyinstaller          # construction de l'exe Windows (voir build/)

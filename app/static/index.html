@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pipeline UGC</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- ============ MENU LATÉRAL ============ -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">▶</div>
+        <div>
+          <div class="brand-title">Pipeline UGC</div>
+          <div class="brand-sub">Gradium → HeyGen</div>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-section="dashboard">📊 Tableau de bord</button>
+        <button class="nav-item" data-section="new">✨ Nouvelle pub</button>
+        <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
+        <button class="nav-item" data-section="costs">💰 Coûts</button>
+        <button class="nav-item" data-section="settings">⚙️ Réglages</button>
+      </nav>
+      <div class="mode-badge" id="modeBadge">Mode : —</div>
+    </aside>
+
+    <!-- ============ CONTENU ============ -->
+    <main class="content">
+
+      <!-- ---- TABLEAU DE BORD ---- -->
+      <section id="dashboard" class="panel active">
+        <header class="panel-head">
+          <h1>Tableau de bord</h1>
+          <button class="btn" id="refreshDash">↻ Rafraîchir</button>
+        </header>
+        <div class="cards">
+          <div class="card"><div class="card-label">Crédits Gradium</div><div class="card-value" id="gradiumCredits">—</div></div>
+          <div class="card"><div class="card-label">Quota HeyGen</div><div class="card-value" id="heygenQuota">—</div></div>
+          <div class="card"><div class="card-label">Vidéos générées</div><div class="card-value" id="totalVideos">—</div></div>
+        </div>
+        <h2>Activité récente</h2>
+        <ul class="activity" id="activityList"></ul>
+      </section>
+
+      <!-- ---- NOUVELLE PUB ---- -->
+      <section id="new" class="panel">
+        <header class="panel-head"><h1>Nouvelle pub</h1></header>
+
+        <!-- Étape 1 : style d'UGC -->
+        <h2>1. Style d'UGC</h2>
+        <div class="styles" id="styleCards">
+          <button class="style-card active" data-style="avatar">
+            <div class="style-emoji">🧍</div><div class="style-name">Avatar</div>
+            <div class="style-tag">disponible</div>
+          </button>
+          <button class="style-card" data-style="objet_vivant">
+            <div class="style-emoji">📦</div><div class="style-name">Objet animé</div>
+            <div class="style-tag">disponible</div>
+          </button>
+          <button class="style-card" data-style="voix_off">
+            <div class="style-emoji">🎙️</div><div class="style-name">Voix off</div>
+            <div class="style-tag">disponible</div>
+          </button>
+          <button class="style-card" data-style="mashup">
+            <div class="style-emoji">🎬</div><div class="style-name">Mashup IA</div>
+            <div class="style-tag">disponible</div>
+          </button>
+        </div>
+
+        <!-- ============ FLUX AVATAR ============ -->
+        <div id="avatarFlow">
+        <!-- Étape 2 : avatar + voix -->
+        <h2>2. Avatar &amp; voix</h2>
+        <div class="row grid2">
+          <label>Avatar <select id="avatarSelect"></select></label>
+          <label>Voix Gradium <select id="voiceSelect"></select></label>
+        </div>
+
+        <!-- Étape 3 : script + brief -->
+        <h2>3. Ton script &amp; ton brief</h2>
+        <label>Script (verbatim — jamais modifié)
+          <textarea id="scriptText" rows="7" placeholder="Colle ici le texte exact de ta pub…"></textarea>
+        </label>
+        <label>Brief (ton, persona, contexte — n'apparaît pas dans les clips)
+          <textarea id="briefText" rows="3" placeholder="Ex. maquilleuse québécoise 50 ans, ton sincère et posé, cible femmes 45-65…"></textarea>
+        </label>
+        <div class="row">
+          <button class="btn primary" id="brainBtn">🧠 Générer les scènes</button>
+          <button class="btn" id="importJsonBtn">Importer un scenes.json</button>
+          <input type="file" id="scenesFile" accept=".json" class="hidden" />
+        </div>
+        <div id="brainMsg" class="test-result"></div>
+
+        <!-- Étape 4 : scènes générées + coût -->
+        <div id="adPreview" class="hidden">
+          <h2>4. Scènes générées</h2>
+          <div class="row grid2">
+            <label>Nom de la pub <input type="text" id="adName" /></label>
+          </div>
+          <div class="scenes-preview" id="scenesPreview"></div>
+
+          <h2>5. Mode qualité / coût</h2>
+          <div class="modes" id="modeCards">
+            <button class="mode-card" data-mode="premium">
+              <div class="mode-name">💎 Premium</div>
+              <div class="mode-desc">Avatar V + mouvement custom · qualité max</div>
+              <div class="mode-cost" id="modeCostPremium">—</div>
+            </button>
+            <button class="mode-card" data-mode="classique">
+              <div class="mode-name">💠 Classique</div>
+              <div class="mode-desc">Avatar IV · gestes automatiques · moins cher</div>
+              <div class="mode-cost" id="modeCostClassique">—</div>
+            </button>
+            <button class="mode-card" data-mode="voix_seules">
+              <div class="mode-name">🎙️ Voix seules</div>
+              <div class="mode-desc">Voix Gradium seulement · tu finis dans HeyGen à la main</div>
+              <div class="mode-cost" id="modeCostVoix">0 crédit API</div>
+            </button>
+          </div>
+          <div class="estimate" id="estimate"></div>
+
+          <div class="row">
+            <button class="btn primary" id="generateBtn">🎬 Générer les vidéos</button>
+          </div>
+        </div>
+
+        <div id="progressArea" class="hidden">
+          <h2>Progression <span class="muted" style="font-size:13px;font-weight:400">— voix d'abord (2 max), puis vidéos en parallèle</span></h2>
+          <div id="progPhase" class="prog-phase"></div>
+          <div class="progressbar"><div class="progressbar-fill" id="progFill"></div></div>
+          <div class="prog-count" id="progCount"></div>
+          <ul class="scene-progress" id="sceneProgress"></ul>
+          <button class="btn danger-outline hidden" id="retryFailedBtn">🔁 Réessayer les scènes en échec</button>
+        </div>
+        </div><!-- /avatarFlow -->
+
+        <!-- ============ FLUX OBJET ANIMÉ ============ -->
+        <div id="objetFlow" class="hidden">
+          <h2>2. Ton produit</h2>
+          <div class="row grid2">
+            <label>Nom du produit <span class="muted">(optionnel)</span>
+              <input type="text" id="objProduct" placeholder="Optionnel — sinon basé sur tes photos" />
+            </label>
+          </div>
+          <label>Script — ce que ton objet DIT (VERBATIM, jamais réécrit)
+            <textarea id="objScript" rows="5"
+              placeholder="Colle ici le texte exact que le personnage doit dire."></textarea>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="objManual" />
+            Je découpe moi-même les plans
+          </label>
+          <p class="muted" id="objManualHint" style="margin-top:-4px">
+            Auto : le cerveau découpe le script en plans par idée (verbatim).
+            <span class="objManualOn hidden">Manuel : sépare chaque plan par une <b>ligne vide</b>
+            (ou une ligne <b>« --- »</b>) ; chaque bloc devient un plan, dans l'ordre. Ton texte
+            est dit mot pour mot ; le cerveau ne fait que le visuel.</span>
+          </p>
+          <label>Ambiance / contexte <span class="muted">(tes consignes priment — ex. « pas de cils », « pas d'écriture sur l'objet »)</span>
+            <textarea id="objAmbiance" rows="2"
+              placeholder="Ex. spa matinal, lumière douce, tons beige et vert sauge — pas de cils, pas d'écriture sur l'objet…"></textarea>
+          </label>
+          <label>Persona / cible visée (optionnel — oriente le style, pas le texte)
+            <textarea id="objPersona" rows="2"
+              placeholder="Ex. femmes 50-60 ans, ton premium et rassurant…"></textarea>
+          </label>
+          <label for="objDropzone">Photos de ton produit (face, côté, packaging… — gardent le produit fidèle)</label>
+          <div id="objDropzone" class="dropzone" tabindex="0" role="button"
+               aria-label="Glisser-déposer ou sélectionner des images">
+            <input type="file" id="objRefs" accept="image/*" multiple class="hidden" />
+            <span class="dropzone-icon">🖼️</span>
+            <span class="dropzone-text">Glisse-dépose une ou plusieurs images ici</span>
+            <button type="button" class="btn small" id="objRefsBtn">Sélect. fichiers</button>
+          </div>
+          <div id="objRefsPreview" class="refs-preview"></div>
+          <div class="row">
+            <button class="btn primary" id="objPlanBtn">🎬 Générer le plan de tournage</button>
+          </div>
+          <div id="objPlanMsg" class="test-result"></div>
+
+          <!-- Étape 3 : plan de tournage + coût -->
+          <div id="objPlanArea" class="hidden">
+            <h2>3. Plan de tournage</h2>
+            <div class="scenes-preview" id="objPlanList"></div>
+            <div class="estimate" id="objEstimate"></div>
+            <p class="muted">Séquentiel : on génère d'abord le <b>Plan 1</b> (il définit le
+              personnage). Tu le valides, puis tu génères les plans suivants — tu ne paies les
+              autres que quand le personnage te plaît.</p>
+            <div class="row">
+              <button class="btn primary" id="objGenImagesBtn">🖼️ Générer le Plan 1 (le personnage)</button>
+            </div>
+          </div>
+
+          <!-- Progression de la génération d'images -->
+          <div id="objProgress" class="hidden">
+            <h2>Génération des images</h2>
+            <div class="progressbar"><div class="progressbar-fill" id="objProgFill"></div></div>
+            <div class="prog-count" id="objProgCount"></div>
+            <ul class="scene-progress" id="objSceneProgress"></ul>
+          </div>
+
+          <!-- Étape 4 : validation -->
+          <div id="objValidation" class="hidden">
+            <h2>4. Validation des plans</h2>
+            <p class="muted">Valide chaque image. <b>Rien n'est animé tant que tu n'as pas validé.</b>
+              Tu peux régénérer une image, ou éditer son prompt puis régénérer.</p>
+            <p class="muted">🎭 <b>Même personnage sur tous les plans</b> : valide d'abord le
+              <b>Plan 1</b> (il fixe l'apparence du personnage), puis clique
+              <b>« Générer les plans suivants »</b> — ils sont générés à partir de ton Plan 1
+              validé (même tête/yeux/bouche/style) + tes photos produit, dans leur propre scène.</p>
+            <div id="objGallery" class="obj-gallery"></div>
+            <div class="row">
+              <button class="btn" id="objRefreshBtn">↻ Rafraîchir</button>
+              <button class="btn primary" id="objConsistencyBtn">▶️ Générer les plans suivants (depuis Plan 1 validé)</button>
+            </div>
+
+            <h2>5. Animer les plans validés</h2>
+            <p class="muted">Seuls les plans <b>validés</b> sont animés (image → vidéo). Si un plan
+              a un <b>dialogue</b>, <b>Grok génère la voix ET le lip-sync</b> (le personnage parle,
+              synchro bouche) dans la même passe. Les clips numérotés arrivent dans la Bibliothèque.</p>
+            <div class="estimate" id="objAnimEstimate"></div>
+            <div class="row">
+              <button class="btn primary" id="objAnimateBtn">🎬 Animer les plans validés</button>
+            </div>
+            <div id="objAnimProgress" class="hidden">
+              <div class="progressbar"><div class="progressbar-fill" id="objAnimProgFill"></div></div>
+              <div class="prog-count" id="objAnimProgCount"></div>
+              <ul class="scene-progress" id="objAnimSceneProgress"></ul>
+            </div>
+          </div>
+        </div><!-- /objetFlow -->
+
+        <!-- ============ FLUX VOIX OFF ============ -->
+        <div id="voixoffFlow" class="hidden">
+          <h2>2. Voix &amp; script</h2>
+          <div class="row grid2">
+            <label>Voix Gradium <select id="voVoiceSelect"></select></label>
+            <label>Nom de la pub <input type="text" id="voAdName" placeholder="Ex. promo_printemps" /></label>
+          </div>
+          <label>Script de la voix off (verbatim — jamais modifié)
+            <textarea id="voScript" rows="8" placeholder="Colle ici le texte exact à dire en voix off…"></textarea>
+          </label>
+          <div class="row">
+            <button class="btn" id="voPreviewBtn">👁️ Aperçu du découpage</button>
+            <button class="btn primary" id="voGenBtn">🎙️ Générer la voix off</button>
+          </div>
+          <div id="voPreview" class="estimate hidden"></div>
+          <div id="voMsg" class="test-result"></div>
+
+          <div id="voProgress" class="hidden">
+            <h2>Génération de la voix</h2>
+            <div class="progressbar"><div class="progressbar-fill" id="voProgFill"></div></div>
+            <div class="prog-count" id="voProgCount"></div>
+            <ul class="scene-progress" id="voSceneProgress"></ul>
+          </div>
+        </div><!-- /voixoffFlow -->
+
+        <!-- ============ FLUX MASHUP IA (ultra-réaliste, Nano Banana → Kling) ============ -->
+        <div id="mashupFlow" class="hidden">
+          <h2>2. Tes plans</h2>
+          <label>Décris les plans <span class="muted">(une idée à décomposer, ou tes prompts)</span>
+            <textarea id="mashBrief" rows="5"
+              placeholder="Ex. un lever de soleil sur une ville, un café fumant en gros plan, une personne qui regarde par la fenêtre…"></textarea>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="mashManual" />
+            J'écris mes prompts moi-même (un par bloc)
+          </label>
+          <p class="muted" id="mashManualHint" style="margin-top:-4px">
+            Auto : le cerveau décompose ton idée en une série de plans (image + mouvement sobre).
+            <span class="mashManualOn hidden">Manuel : sépare chaque plan par une <b>ligne vide</b>
+            (ou une ligne <b>« --- »</b>) ; ton texte devient le <b>prompt image</b>, le cerveau
+            n'ajoute que le mouvement.</span>
+          </p>
+          <div class="row grid2">
+            <label>Style <span class="muted">(LIBRE — ultra-réaliste, rien d'imposé)</span>
+              <input type="text" id="mashStyle" placeholder="Ex. photoréaliste, ultra-réaliste, cinématique" />
+            </label>
+            <label>Format <select id="mashRatio"></select></label>
+          </div>
+          <div id="mashStyleChips" class="style-chips"></div>
+          <div class="row grid2">
+            <label>Nombre de plans <span class="muted">(optionnel, auto)</span>
+              <input type="number" id="mashCount" min="0" max="40" step="1" placeholder="0 = auto" />
+            </label>
+          </div>
+          <label for="mashDropzone">Photos de référence <span class="muted">(optionnel — cadre/style/couleurs)</span></label>
+          <div id="mashDropzone" class="dropzone" tabindex="0" role="button"
+               aria-label="Glisser-déposer ou sélectionner des images">
+            <input type="file" id="mashRefs" accept="image/*" multiple class="hidden" />
+            <span class="dropzone-icon">🖼️</span>
+            <span class="dropzone-text">Glisse-dépose une ou plusieurs images ici (optionnel)</span>
+            <button type="button" class="btn small" id="mashRefsBtn">Sélect. fichiers</button>
+          </div>
+          <div id="mashRefsPreview" class="refs-preview"></div>
+          <div class="row">
+            <button class="btn primary" id="mashPlanBtn">🎬 Prévisualiser les plans</button>
+          </div>
+          <div id="mashPlanMsg" class="test-result"></div>
+
+          <!-- Étape 3 : plans + coût -->
+          <div id="mashPlanArea" class="hidden">
+            <h2>3. Plans (image + mouvement)</h2>
+            <div class="scenes-preview" id="mashPlanList"></div>
+            <div class="estimate" id="mashEstimate"></div>
+            <p class="muted">Séquentiel : on génère d'abord le <b>Plan 1</b>. Tu le valides, puis
+              les plans suivants — tu ne paies l'animation que sur les plans validés. Aucune voix,
+              aucun texte gravé (tu ajoutes sous-titres/musique au montage).</p>
+            <div class="row">
+              <button class="btn primary" id="mashGenImagesBtn">🖼️ Générer le Plan 1</button>
+            </div>
+          </div>
+
+          <!-- Progression génération d'images -->
+          <div id="mashProgress" class="hidden">
+            <h2>Génération des images</h2>
+            <div class="progressbar"><div class="progressbar-fill" id="mashProgFill"></div></div>
+            <div class="prog-count" id="mashProgCount"></div>
+            <ul class="scene-progress" id="mashSceneProgress"></ul>
+          </div>
+
+          <!-- Étape 4 : validation + animation -->
+          <div id="mashValidation" class="hidden">
+            <h2>4. Validation des plans</h2>
+            <p class="muted">Valide chaque image (garder / régénérer — tu ne rédiges aucun prompt).
+              <b>Rien ne s'anime tant que tu n'as pas validé.</b> Valide d'abord le <b>Plan 1</b>,
+              puis « Générer les plans suivants » (mêmes réglages/cohérence).</p>
+            <div id="mashGallery" class="obj-gallery"></div>
+            <div class="row">
+              <button class="btn" id="mashRefreshBtn">↻ Rafraîchir</button>
+              <button class="btn primary" id="mashConsistencyBtn">▶️ Générer les plans suivants (depuis Plan 1 validé)</button>
+            </div>
+
+            <h2>5. Animer les plans validés</h2>
+            <p class="muted">Seuls les plans <b>validés</b> sont animés (image → vidéo, mouvement sobre,
+              <b>sans voix ni texte</b>), avec le modèle vidéo choisi dans les Réglages (défaut :
+              Kling v3.0 Pro, 720p). Les clips numérotés arrivent dans la Bibliothèque.</p>
+            <div class="estimate" id="mashAnimEstimate"></div>
+            <div class="row">
+              <button class="btn primary" id="mashAnimateBtn">🎬 Animer les plans validés</button>
+            </div>
+            <div id="mashAnimProgress" class="hidden">
+              <div class="progressbar"><div class="progressbar-fill" id="mashAnimProgFill"></div></div>
+              <div class="prog-count" id="mashAnimProgCount"></div>
+              <ul class="scene-progress" id="mashAnimSceneProgress"></ul>
+            </div>
+          </div>
+        </div><!-- /mashupFlow -->
+      </section>
+
+      <!-- ---- BIBLIOTHÈQUE (sous-sections par type) ---- -->
+      <section id="library" class="panel">
+        <header class="panel-head">
+          <h1>Bibliothèque</h1>
+          <button class="btn" id="refreshLib">↻ Rafraîchir</button>
+        </header>
+        <div class="subtabs">
+          <button class="subtab active" data-libtab="avatar">🎬 Avatar</button>
+          <button class="subtab" data-libtab="objet">📦 Objet animé</button>
+          <button class="subtab" data-libtab="mashup">🎬 Mashup IA</button>
+          <button class="subtab" data-libtab="voices">🎙️ Voix off</button>
+          <button class="subtab" data-libtab="photos">🖼️ Photos</button>
+        </div>
+        <div class="lib-panel" data-libpanel="avatar"><div id="libAvatarContent"></div></div>
+        <div class="lib-panel hidden" data-libpanel="objet"><div id="libObjetContent"></div></div>
+        <div class="lib-panel hidden" data-libpanel="mashup"><div id="libMashupContent"></div></div>
+        <div class="lib-panel hidden" data-libpanel="voices"><div id="libVoicesContent"></div></div>
+        <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
+      </section>
+
+      <!-- ---- COÛTS / DÉPENSES ---- -->
+      <section id="costs" class="panel">
+        <header class="panel-head">
+          <h1>Coûts <span class="muted" style="font-size:14px;font-weight:400">— dépenses estimées (générations réelles)</span></h1>
+          <div class="head-actions">
+            <button class="btn" id="refreshCosts">↻ Rafraîchir</button>
+            <button class="btn" id="resetCosts" title="Range les coûts actuels dans les Archives et repart de zéro (rien n'est perdu ; la Bibliothèque reste intacte)">🗄 Archiver &amp; repartir de zéro</button>
+          </div>
+        </header>
+
+        <div class="cost-toolbar">
+          <div class="seg" id="costViewSeg" role="tablist" aria-label="Mode d'affichage">
+            <button class="seg-btn active" data-costview="both">Les deux</button>
+            <button class="seg-btn" data-costview="chart">Graphique</button>
+            <button class="seg-btn" data-costview="table">Classique</button>
+          </div>
+          <div class="seg" id="costPeriodSeg" role="tablist" aria-label="Période">
+            <button class="seg-btn active" data-period="day">Par jour</button>
+            <button class="seg-btn" data-period="month">Par mois</button>
+            <button class="seg-btn" data-period="quarter">Par 3 mois</button>
+          </div>
+          <div class="seg" id="costCurrencySeg" role="tablist" aria-label="Devise">
+            <button class="seg-btn active" data-currency="usd">$</button>
+            <button class="seg-btn" data-currency="eur">€</button>
+          </div>
+        </div>
+
+        <!-- Graphique de pilotage -->
+        <div id="costChartBlock" class="card-block">
+          <div class="chart-head">
+            <h2>Évolution des coûts <span class="muted small">(estimés, USD)</span></h2>
+            <div class="chart-period-total" id="costPeriodTotal"></div>
+          </div>
+          <div id="costChart" class="cost-chart"></div>
+          <div id="costChartLegend" class="chart-legend"></div>
+        </div>
+
+        <!-- Vue détaillée « classique » -->
+        <div id="costTableBlock">
+          <div id="costsContent"></div>
+        </div>
+
+        <!-- Archives : périodes clôturées (non destructif) -->
+        <div id="costArchivesBlock">
+          <h2>🗄 Archives <span class="muted" style="font-size:13px;font-weight:400">— périodes clôturées, historique conservé</span></h2>
+          <div id="costArchivesList"></div>
+        </div>
+      </section>
+
+      <!-- ---- RÉGLAGES ---- -->
+      <section id="settings" class="panel">
+        <header class="panel-head"><h1>Réglages</h1></header>
+
+        <div class="card-block">
+          <h2>Clés &amp; voix</h2>
+          <label>Clé API Gradium <input type="password" id="gradiumKey" /></label>
+          <label>Clé API HeyGen <input type="password" id="heygenKey" /></label>
+          <label>Clé API OpenRouter (Nano Banana — images « Objet animé », format sk-or-v1-…)
+            <input type="password" id="openrouterKey" /></label>
+          <label>Clé API xAI (Grok) — animation « Objet animé »
+            <input type="password" id="xaiKey" /></label>
+          <label>Clé API Anthropic (cerveau IA) <input type="password" id="anthropicKey" /></label>
+          <label>Modèle du cerveau (Claude) <input type="text" id="brainModel" /></label>
+          <label>Modèle Gradium <input type="text" id="gradiumModel" /></label>
+          <label>Format des voix off / voix seules
+            <select id="audioFormat"></select>
+          </label>
+          <p class="muted">Le moteur HeyGen (Avatar V / Avatar IV) est choisi par le mode
+            qualité/coût ci-dessus, plus le mode « par pub » dans Nouvelle pub.</p>
+          <label>voice_id HeyGen (optionnel) <input type="text" id="heygenVoiceId" /></label>
+          <label>Mode qualité / coût par défaut
+            <select id="costModeDefault">
+              <option value="premium">Premium — Avatar V + mouvement custom (~4 cr/s, plus cher)</option>
+              <option value="classique">Classique — Avatar IV, gestes auto (~1,5 cr/s, moins cher)</option>
+            </select>
+          </label>
+          <label>Modèle d'image « Objet animé » (Nano Banana / Gemini)
+            <select id="objetImageModel"></select>
+          </label>
+          <label>Modèle vidéo « Objet animé » (Grok Imagine)
+            <select id="objetVideoModel"></select>
+          </label>
+          <label>Modèle vidéo « Mashup IA » (animation, via OpenRouter)
+            <select id="mashupVideoModel"></select>
+          </label>
+          <label>Style de voix « Objet animé » (Grok — timbre)
+            <select id="objetVoiceStyle"></select>
+          </label>
+          <label>Débit de la voix « Objet animé » (vitesse)
+            <select id="objetVoicePace"></select>
+          </label>
+          <label>Style visuel « Objet vivant »
+            <select id="objetStyle"></select>
+          </label>
+          <div class="row">
+            <button class="btn small" id="objetStylePreviewBtn" type="button">👁️ Aperçu du style</button>
+            <span id="objetStyleMsg" class="muted"></span>
+          </div>
+          <div id="objetStylePreview" class="style-preview"></div>
+          <label>Plafond de dépense par génération ($) <span class="muted">(0 = aucun plafond)</span>
+            <input type="number" id="spendCap" min="0" step="1" placeholder="25" />
+          </label>
+          <label class="check">
+            <input type="checkbox" id="dryRun" />
+            Mode simulation (aucune clé requise, aucun crédit dépensé)
+          </label>
+          <div class="row">
+            <button class="btn primary" id="saveSettings">💾 Enregistrer</button>
+            <button class="btn" id="testConn">🔌 Tester la connexion</button>
+          </div>
+          <div id="testResult" class="test-result"></div>
+        </div>
+
+        <div class="card-block">
+          <h2>Avatars</h2>
+          <p class="muted">Plusieurs avatars possibles : un label + son avatar_id (déjà créé sur HeyGen).</p>
+          <ul class="avatars" id="avatarsList"></ul>
+          <div class="row grid2">
+            <input type="text" id="newAvatarLabel" placeholder="label (ex. maquilleuse_50)" />
+            <input type="text" id="newAvatarId" placeholder="avatar_id HeyGen" />
+          </div>
+          <div class="row">
+            <button class="btn" id="addAvatar">+ Ajouter</button>
+            <button class="btn" id="browseHeygenBtn" type="button">🖼️ Parcourir les avatars HeyGen</button>
+          </div>
+          <div id="heygenPicker" class="heygen-picker hidden">
+            <div class="row">
+              <input type="search" id="heygenSearch" placeholder="Rechercher un avatar par nom…" />
+              <select id="heygenGender">
+                <option value="">Tous genres</option>
+                <option value="male">Homme</option>
+                <option value="female">Femme</option>
+              </select>
+              <button class="btn small" id="heygenRefresh" type="button" title="Rafraîchir depuis HeyGen (lent)">↻ Rafraîchir</button>
+            </div>
+            <div id="heygenMsg" class="muted"></div>
+            <div id="heygenGrid" class="heygen-grid"></div>
+          </div>
+        </div>
+
+        <div class="card-block">
+          <h2>Voix Gradium</h2>
+          <p class="muted">Plusieurs voix possibles : un label lisible + son voice_id Gradium (voix clonée).</p>
+          <ul class="avatars" id="voicesList"></ul>
+          <div class="row grid2">
+            <input type="text" id="newVoiceLabel" placeholder="label (ex. Ma voix québécoise)" />
+            <input type="text" id="newVoiceId" placeholder="voice_id Gradium" />
+          </div>
+          <div class="row">
+            <button class="btn" id="addVoice">+ Ajouter</button>
+            <button class="btn" id="browseVoicesBtn" type="button">🎙️ Parcourir les voix Gradium</button>
+          </div>
+          <div id="voicePicker" class="heygen-picker hidden">
+            <div class="row">
+              <input type="search" id="voiceSearch" placeholder="Rechercher (nom, description)…" />
+              <select id="voiceLang"><option value="">Toutes langues</option></select>
+              <button class="btn small" id="voiceRefresh" type="button" title="Rafraîchir depuis Gradium">↻ Rafraîchir</button>
+            </div>
+            <div id="voiceMsg" class="muted"></div>
+            <div id="voiceList" class="voice-list"></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Modale intégrée (remplace les alert/confirm natifs du navigateur) -->
+  <div id="modalOverlay" class="modal-overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h3 class="modal-title" id="modalTitle"></h3>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-actions">
+        <button class="btn" id="modalCancel">Annuler</button>
+        <button class="btn primary" id="modalConfirm">Continuer</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# --- SECRETS : ne JAMAIS commiter tes clés ---
+config.py
+
+# --- données locales de l'app (DB + médias générés) ---
+data/
+
+# --- fichiers de travail / sorties ---
+travail/
+sortie/
+*.wav
+*.mp4
+test_voix.wav
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- caches d'outils ---
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- logs ---
+*.log
+
+# --- runtime local Claude Code ---
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

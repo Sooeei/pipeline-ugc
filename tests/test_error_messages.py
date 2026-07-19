@@ -3,7 +3,7 @@ atteindre l'écran. Les erreurs fournisseur/cerveau gardent leur message FR clai
 erreur devient un message générique actionnable, le détail partant seulement dans app.log.
 """
 
-from app import brain, jobs, pipeline
+from app import brain, jobs, media, pipeline
 from app.providers import ProviderError
 
 
@@ -44,3 +44,11 @@ def test_job_error_generic_for_unexpected():
     msg = jobs._job_error_message(TypeError("object is not subscriptable"))
     assert "subscriptable" not in msg and "TypeError" not in msg
     assert "réessaie" in msg.lower()
+
+
+def test_ffmpeg_error_is_actionable():
+    # Toute erreur mentionnant ffmpeg → message d'installation actionnable (pas générique).
+    assert pipeline._user_error_message(RuntimeError(media.FFMPEG_MISSING_MSG)) == media.FFMPEG_MISSING_MSG
+    assert pipeline._user_error_message(RuntimeError("ffmpeg exited with code 1")) == media.FFMPEG_MISSING_MSG
+    assert jobs._job_error_message(RuntimeError("Cannot find ffmpeg")) == media.FFMPEG_MISSING_MSG
+    assert "winget" in media.FFMPEG_MISSING_MSG  # marche à suivre présente

@@ -79,6 +79,15 @@ def fix_wav_bytes(raw: bytes) -> bytes:
     return b"RIFF" + struct.pack("<I", riff_size) + b"WAVE" + fmt_chunk + data_chunk
 
 
+# Message unique et ACTIONNABLE quand ffmpeg manque (affiché à l'utilisateur non-technique).
+FFMPEG_MISSING_MSG = (
+    "ffmpeg est introuvable — installe-le puis relance l'app. "
+    "Windows : ouvre un terminal et tape « winget install Gyan.FFmpeg », "
+    "ou télécharge-le sur ffmpeg.org. "
+    "Astuce : le MODE SIMULATION fonctionne SANS ffmpeg."
+)
+
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -89,7 +98,7 @@ def wav_bytes_to_mp3_file(wav_bytes: bytes, out_path: str | Path, bitrate_kbps: 
     durée, donc le souci « 12 h » du WAV streaming disparaît. L'entrée WAV est d'abord assainie
     (fix_wav_bytes) pour que ffmpeg lise la bonne longueur."""
     if not ffmpeg_available():
-        raise RuntimeError("ffmpeg introuvable : impossible de convertir la voix en MP3.")
+        raise RuntimeError(FFMPEG_MISSING_MSG)
     br = int(bitrate_kbps or config_app.MP3_BITRATE_KBPS)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

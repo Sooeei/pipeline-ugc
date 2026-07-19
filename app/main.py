@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, bootstrap, brain, config_app, cost, db, jobs, pipeline
+from . import __version__, bootstrap, brain, config_app, cost, db, jobs, media, pipeline
 from . import providers as prov
 from .settings_service import load_provider_config
 
@@ -53,6 +53,7 @@ def create_app() -> FastAPI:
         return {
             "ok": True, "app": "pipeline-ugc", "version": __version__,
             "dry_run": db.get_setting("dry_run", "1") == "1",
+            "ffmpeg": media.ffmpeg_available(),
         }
 
     @app.get("/api/onboarding")

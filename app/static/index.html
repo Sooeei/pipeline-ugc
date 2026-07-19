@@ -31,6 +31,15 @@
     <!-- ============ CONTENU ============ -->
     <main class="content">
 
+      <!-- Avertissement ffmpeg manquant (génération réelle impossible ; simulation OK) -->
+      <div id="ffmpegWarn" class="ffmpeg-warn hidden">
+        ⚠ <b>ffmpeg est introuvable.</b> Les générations réelles (voix MP3, vidéos) ne
+        fonctionneront pas. Installe-le puis relance l'app —
+        Windows : <code>winget install Gyan.FFmpeg</code> (ou ffmpeg.org).
+        Le <b>mode simulation</b> fonctionne sans ffmpeg.
+      </div>
+
+
       <!-- ---- TABLEAU DE BORD ---- -->
       <section id="dashboard" class="panel active">
         <header class="panel-head">

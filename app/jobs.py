@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from . import brain, db, pipeline
+from . import brain, db, media, pipeline
 from .providers import ProviderConfig, ProviderError, _log_detail
 
 
@@ -22,6 +22,8 @@ def _job_error_message(exc: BaseException) -> str:
     technique partant dans app.log (jamais à l'écran)."""
     if isinstance(exc, (ProviderError, brain.BrainError)):
         return str(exc)
+    if "ffmpeg" in str(exc).lower():   # ffmpeg manquant → message d'installation actionnable
+        return media.FFMPEG_MISSING_MSG
     _log_detail(f"Échec job : {exc!r}")
     return "La génération a échoué — réessaie ; si ça persiste, vérifie tes clés et tes réglages."
 

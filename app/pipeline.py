@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import config_app, cost, db
+from . import config_app, cost, db, media
 from .providers import (
     ProviderConfig,
     ProviderError,
@@ -47,6 +47,8 @@ def _user_error_message(exc: object) -> str:
     """
     if isinstance(exc, ProviderError):
         return str(exc)
+    if "ffmpeg" in str(exc).lower():   # ffmpeg manquant → message d'installation actionnable
+        return media.FFMPEG_MISSING_MSG
     _log_detail(f"Échec génération clip : {exc!r}")
     return "La génération a échoué — réessaie ; si ça persiste, vérifie tes clés (Réglages)."
 

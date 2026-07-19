@@ -2862,6 +2862,8 @@ async function loadHealth() {
     const h = await api("/api/health");
     const el = $("appVersion");
     if (el && h.version) el.textContent = "v" + h.version;
+    const warn = $("ffmpegWarn");   // ffmpeg absent → avertissement visible en haut du contenu
+    if (warn) warn.classList.toggle("hidden", h.ffmpeg !== false);
   } catch (_) {
     /* non bloquant : la version reste vide si la santé n'est pas joignable */
   }

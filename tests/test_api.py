@@ -19,6 +19,7 @@ def test_health_and_boot():
         assert j["ok"] is True
         assert j["app"] == "pipeline-ugc"   # marqueur d'identité (détection d'instance unique)
         assert j["version"]                  # version non vide
+        assert isinstance(j["ffmpeg"], bool)  # disponibilité ffmpeg exposée
 
 
 def test_onboarding_flow():

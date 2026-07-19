@@ -437,8 +437,20 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("UGC_PORT", "8765"))
 
 
+_ensured_dirs: set[tuple[str, str, str]] = set()
+
+
 def ensure_dirs() -> None:
-    """Crée les dossiers de données au besoin (idempotent)."""
+    """Crée les dossiers de données au besoin (idempotent).
+
+    Mémoïsé sur le trio de chemins : les `mkdir` ne sont réellement tentés qu'UNE fois par jeu de
+    chemins. `db.connect()` appelle ceci à chaque requête → sans mémoïsation, c'est 3 syscalls
+    par requête (× N avec plusieurs pubs). La clé = chemins → un changement (tests) recrée bien.
+    """
+    key = (str(DATA_DIR), str(MEDIA_DIR), str(OBJET_DIR))
+    if key in _ensured_dirs:
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     OBJET_DIR.mkdir(parents=True, exist_ok=True)
+    _ensured_dirs.add(key)

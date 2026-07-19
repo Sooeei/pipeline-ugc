@@ -1551,8 +1551,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
              "refs_needed": c.get("refs_needed")}
             for c in img_fail
         ]
-        for c in img_fail:
-            db.update_clip(c["id"], status="en_attente", error=None)
+        db.reset_clips_pending([c["id"] for c in img_fail])
         job = jobs.manager.start(
             cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
             ref_paths=db.list_ref_images(ad_id),
@@ -1612,8 +1611,7 @@ def _run_consistency(
          "refs_needed": c.get("refs_needed")}
         for c in targets
     ]
-    for c in targets:
-        db.update_clip(c["id"], status="en_attente", error=None)
+    db.reset_clips_pending([c["id"] for c in targets])
     job = jobs.manager.start(
         cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
         ref_paths=db.list_ref_images(ad_id), character_ref=str(ref["image_path"]),

@@ -29,6 +29,24 @@ def test_ads_and_clips():
     assert db.count_clips() == 1
 
 
+def test_reset_clips_pending_bulk():
+    ad_id = db.create_ad("pub", "label1", "[]")
+    c1 = db.create_clip(ad_id, 1, "t1", "m1")
+    c2 = db.create_clip(ad_id, 2, "t2", "m2")
+    c3 = db.create_clip(ad_id, 3, "t3", "m3")
+    db.update_clip(c1, status="echec", error="boum")
+    db.update_clip(c2, status="echec", error="boum")
+    db.update_clip(c3, status="pret")  # non ciblé : doit rester inchangé
+
+    db.reset_clips_pending([c1, c2])
+
+    by_id = {c["id"]: c for c in db.clips_for_ad(ad_id)}
+    assert by_id[c1]["status"] == "en_attente" and by_id[c1]["error"] is None
+    assert by_id[c2]["status"] == "en_attente" and by_id[c2]["error"] is None
+    assert by_id[c3]["status"] == "pret"        # intact
+    db.reset_clips_pending([])                    # liste vide : no-op, ne lève pas
+
+
 def test_activity():
     db.log_activity("test", "coucou")
     rows = db.recent_activity(5)

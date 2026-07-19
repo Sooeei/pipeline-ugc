@@ -415,6 +415,24 @@ def update_clip(clip_id: int, **fields: Any) -> None:
         con.close()
 
 
+def reset_clips_pending(clip_ids: list[int]) -> None:
+    """Remet PLUSIEURS clips à « en_attente » (et efface leur erreur) en UNE requête, au lieu
+    d'un UPDATE + une connexion par clip (reprise après échec / relance cohérence)."""
+    ids = [int(i) for i in clip_ids]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    con = connect()
+    try:
+        con.execute(
+            f"UPDATE clips SET status='en_attente', error=NULL WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 # ---------------------------------------------------------------- coûts / dépenses (réel)
 def add_cost_event(
     service: str, unit: str, qty: float = 0.0, *, usd: float = 0.0, credits: float = 0.0,

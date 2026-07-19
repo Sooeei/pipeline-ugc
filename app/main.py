@@ -50,7 +50,10 @@ def create_app() -> FastAPI:
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "version": "0.1.0", "dry_run": db.get_setting("dry_run", "1") == "1"}
+        return {
+            "ok": True, "app": "pipeline-ugc", "version": "0.1.0",
+            "dry_run": db.get_setting("dry_run", "1") == "1",
+        }
 
     @app.get("/")
     def index() -> HTMLResponse:
@@ -1655,45 +1658,71 @@ def _json(obj: Any) -> str:
 app = create_app()
 
 
-def _server_up(timeout: float = 1.0) -> bool:
-    """True si un serveur répond déjà sur le port (instance unique)."""
+def _server_up(port: int, timeout: float = 1.0) -> bool:
+    """True si NOTRE app répond déjà sur ce port (santé OK) → détection d'instance unique."""
+    import json as _json_mod
     import urllib.request
 
-    url = f"http://{config_app.HOST}:{config_app.PORT}/api/health"
+    if not port:
+        return False
+    url = f"http://{config_app.HOST}:{port}/api/health"
     try:
-        urllib.request.urlopen(url, timeout=timeout)  # noqa: S310 - localhost seulement
-        return True
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - localhost
+            data = _json_mod.loads(resp.read().decode("utf-8"))
+        return bool(data.get("ok")) and data.get("app") == "pipeline-ugc"
     except Exception:  # noqa: BLE001
         return False
+
+
+def _pick_free_port() -> int:
+    """Port libre attribué par l'OS (bind éphémère sur 0). Évite le conflit d'un port fixe occupé."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((config_app.HOST, 0))
+        return int(s.getsockname()[1])
+
+
+def _running_instance_port() -> int | None:
+    """Port d'une instance DÉJÀ lancée (mémorisé dans PORT_FILE) qui répond encore, sinon None."""
+    try:
+        port = int(config_app.PORT_FILE.read_text(encoding="utf-8").strip())
+    except Exception:  # noqa: BLE001 - fichier absent/illisible : aucune instance connue
+        return None
+    return port if _server_up(port) else None
 
 
 def run() -> None:
     """Démarre le serveur (s'il ne tourne pas déjà) et ouvre l'app dans SA fenêtre.
 
-    Instance unique : si un serveur répond déjà sur le port, on n'en relance pas —
-    on ouvre juste une fenêtre. À la fermeture de la fenêtre, le serveur qu'on a
-    démarré est arrêté proprement.
+    Instance unique : si une instance répond déjà (port mémorisé dans PORT_FILE), on n'en
+    relance pas — on ouvre juste une fenêtre. Le serveur écoute sur un PORT LIBRE choisi au
+    démarrage (0 = auto ; UGC_PORT force un port). À la fermeture de la fenêtre, le serveur
+    qu'on a démarré est arrêté proprement et PORT_FILE est effacé.
     """
     import threading
     import time
 
     _prepare_streams()  # pythonw : sinon uvicorn plante (« Unable to configure formatter »)
 
-    url = f"http://{config_app.HOST}:{config_app.PORT}/"
     try:
-        if _server_up():
-            _open_window(url)  # déjà lancé ailleurs : juste une fenêtre
+        existing = _running_instance_port()
+        if existing is not None:
+            _open_window(f"http://{config_app.HOST}:{existing}/")  # déjà lancé : juste une fenêtre
             return
 
         import uvicorn
 
+        port = config_app.PORT or _pick_free_port()  # UGC_PORT force un port ; 0/absent = libre
+        url = f"http://{config_app.HOST}:{port}/"
+
         # uvicorn dans un thread secondaire : on désactive les gestionnaires de signaux
         # (ils n'existent que dans le thread principal, sinon ValueError). Le corps du
-        # thread est protégé : un échec de bind (port occupé) est journalisé, pas perdu.
+        # thread est protégé : un échec de bind est journalisé, pas perdu.
         # log_config=None : on ne laisse PAS uvicorn reconfigurer le logging (sous pythonw,
         # sans stderr, sa config par défaut échoue).
         cfg = uvicorn.Config(
-            app, host=config_app.HOST, port=config_app.PORT, log_level="warning", log_config=None
+            app, host=config_app.HOST, port=port, log_level="warning", log_config=None
         )
         server = uvicorn.Server(cfg)
         server.install_signal_handlers = lambda: None  # type: ignore[attr-defined,method-assign]
@@ -1708,21 +1737,28 @@ def run() -> None:
         thread.start()
 
         for _ in range(60):  # attendre que le serveur réponde (max ~15 s)
-            if _server_up(0.5):
+            if _server_up(port, 0.5):
                 break
-            if not thread.is_alive():  # le serveur a planté (ex. port occupé)
+            if not thread.is_alive():  # le serveur a planté
                 break
             time.sleep(0.25)
 
-        if not _server_up():
-            _log_launch_error(
-                RuntimeError("Le serveur n'a pas pu démarrer (port déjà utilisé ?).")
-            )
+        if not _server_up(port):
+            _log_launch_error(RuntimeError("Le serveur n'a pas pu démarrer."))
             return  # on n'ouvre PAS de fenêtre sur une URL morte
+
+        try:
+            config_app.PORT_FILE.write_text(str(port), encoding="utf-8")
+        except OSError:
+            pass  # non bloquant : au pire l'instance-unique ne détecte pas cette instance
 
         _open_window(url)          # BLOQUE jusqu'à la fermeture de la fenêtre
         server.should_exit = True  # fenêtre fermée -> on arrête le serveur en fond
         time.sleep(0.5)
+        try:
+            config_app.PORT_FILE.unlink()
+        except OSError:
+            pass
     except Exception as exc:  # noqa: BLE001 - lancé sans console : on journalise
         _log_launch_error(exc)
         raise

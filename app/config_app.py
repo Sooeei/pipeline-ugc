@@ -434,7 +434,11 @@ DEFAULT_DRY_RUN = True
 
 # Réseau
 HOST = "127.0.0.1"
-PORT = int(os.environ.get("UGC_PORT", "8765"))
+# Port : 0 = choisi LIBRE au démarrage (évite le conflit d'un port fixe déjà occupé sur la
+# machine du client). UGC_PORT force un port précis (utile en dev). Le port réellement retenu
+# est mémorisé dans PORT_FILE pour que l'instance-unique retrouve la fenêtre à ouvrir.
+PORT = int(os.environ.get("UGC_PORT", "0"))
+PORT_FILE = DATA_DIR / "port"   # port de l'instance en cours (écrit au démarrage, effacé à l'arrêt)
 
 
 _ensured_dirs: set[tuple[str, str, str]] = set()

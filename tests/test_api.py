@@ -15,7 +15,19 @@ def test_health_and_boot():
     with _client() as c:
         r = c.get("/api/health")
         assert r.status_code == 200
-        assert r.json()["ok"] is True
+        j = r.json()
+        assert j["ok"] is True
+        assert j["app"] == "pipeline-ugc"   # marqueur d'identité (détection d'instance unique)
+        assert j["version"]                  # version non vide
+
+
+def test_free_port_and_instance_detection():
+    from app import main
+
+    p = main._pick_free_port()
+    assert 1024 <= p <= 65535               # port éphémère valide attribué par l'OS
+    assert main._server_up(0) is False       # port 0 → jamais « up »
+    assert main._running_instance_port() is None  # aucun PORT_FILE en test → pas d'instance
 
 
 def test_settings_and_avatars():

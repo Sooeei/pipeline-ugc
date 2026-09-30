@@ -391,6 +391,13 @@ _AVATAR_CONSISTENCY = (
     "Only change framing, pose and action: "
 )
 
+# Deux personnages (découpage client : celui qui parle + un personnage muet).
+_AVATAR_DUO_CONSISTENCY = (
+    "IMPORTANT — PEOPLE CONSISTENCY: the FIRST reference image is the LOCKED scene (same two "
+    "people: same faces, hair, ages, bodies, outfits, same photographic UGC style and lighting). "
+    "Do NOT change the people. Only change framing, pose and action: "
+)
+
 # Préfixe de cohérence par type de pub (objet vivant = défaut).
 _CONSISTENCY_BY_KIND = {
     "mashup": _MASHUP_CONSISTENCY,
@@ -444,8 +451,11 @@ def generate_objet_images(
     # Avatar IA (Omni) = même personne ; Objet vivant = personnage-mascotte. Sinon aucune (Plan 1).
     prefix = ""
     if character_ref:
-        kind = str((db.get_ad(ad_id) or {}).get("kind") or "")
+        ad_row = db.get_ad(ad_id) or {}
+        kind = str(ad_row.get("kind") or "")
         prefix = _CONSISTENCY_BY_KIND.get(kind, _CHARACTER_CONSISTENCY)
+        if kind == "avatar_omni" and ad_personas(ad_row).get("p2_en"):
+            prefix = _AVATAR_DUO_CONSISTENCY
 
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
@@ -697,31 +707,59 @@ def build_omni_prompt(
     has_anchor: bool,
     camera: str = config_app.OMNI_DEFAULT_CAMERA,
     intro: str = config_app.OMNI_INTRO_GESTURE,
+    speaker: str = "",
+    silent: str = "",
 ) -> str:
     """Prompt Google Omni d'UN plan, dans un ordre STRICT : caméra/scène unique → mouvement
     (nettoyé des marques) → dialogue minuté + voix (ou silence) → interdits → ancre éventuelle.
-    Le DIALOGUE est inséré VERBATIM (jamais nettoyé ni reformulé)."""
+    Le DIALOGUE est inséré VERBATIM (jamais nettoyé ni reformulé) ; seules les valeurs « [à
+    valider] » perdent leurs crochets (« [97 %] » → « 97 % », la base garde les crochets).
+    `speaker` / `silent` = descriptions ANGLAISES des personnages 1 (parle) et 2 (muet)."""
     parts = [f"<FIRST_FRAME> {camera}, in a single unbroken scene with no scene cuts."]
     motion = brain.scrub_brand_names(prompt_motion or "")
     if motion:
         parts.append(motion)
-    text = (dialogue or "").strip()
+    text = brain.strip_brackets((dialogue or "").strip())
+    who = f"The speaking character ({speaker})" if speaker else "The person"
     if text:
         parts.append(
-            f"[0-1s] {intro}, silent. [1-{seconds}s] The person says, spoken in French, in "
+            f"[0-1s] {intro}, silent. [1-{seconds}s] {who} says, spoken in French, in "
             f"{voice_sheet}: \"{_omni_quote_dialogue(text)}\" Lips and expression stay in sync "
             "with every word. The audio is their clear spoken voice up front over a quiet room "
             "tone. No music."
         )
     else:
         parts.append("No dialogue. The audio is a quiet natural room tone. No music.")
+    if silent:
+        parts.append(
+            f"The other character ({silent}) remains silent the whole time: no speech and no lip "
+            "movement, only natural listening reactions."
+        )
     parts.append("No other speakers. No subtitles. No on-screen text.")
     if has_anchor:
-        parts.append(
-            "<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it as a "
-            "reference, not as a literal frame."
-        )
+        if silent:
+            parts.append(
+                "<IMAGE_REF_0> is the locked scene reference: keep the exact same people (faces, "
+                "outfits) and the same voice. Use it as a reference, not as a literal frame."
+            )
+        else:
+            parts.append(
+                "<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it "
+                "as a reference, not as a literal frame."
+            )
     return " ".join(parts)
+
+
+def ad_personas(ad: dict[str, Any] | None) -> dict[str, str]:
+    """Personnages d'une pub Avatar IA ({p1, p2, p1_en, p2_en}) ; {} si absents / illisibles."""
+    import json
+
+    raw = (ad or {}).get("personas")
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        data = {}
+    return {k: str(data.get(k) or "") for k in ("p1", "p2", "p1_en", "p2_en")} if data else {}
 
 
 def animate_avatar_omni_clips(
@@ -754,6 +792,7 @@ def animate_avatar_omni_clips(
     profile = config_app.normalize_voice_profile(ad.get("voice_profile"))
     wps = config_app.voice_words_per_sec(profile)
     sheet = config_app.voice_sheet(profile)
+    personas = ad_personas(ad)   # descriptions ANGLAISES (jamais le texte français brut)
     # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
     ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
 
@@ -764,6 +803,7 @@ def animate_avatar_omni_clips(
         has_anchor = ref is not None and int(ref["id"]) != int(c["id"])
         prompt = build_omni_prompt(
             str(c.get("motion_prompt", "")), dialogue, sheet, seconds, has_anchor,
+            speaker=personas.get("p1_en", ""), silent=personas.get("p2_en", ""),
         )
         res = omni_generate_video(
             cfg, str(c["image_path"]), prompt, mp4, seconds,

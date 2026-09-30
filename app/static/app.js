@@ -1052,8 +1052,18 @@ const REF_KIND_OPTS = [
   { v: "style", t: "Style" },
 ];
 
+// Avatar IA : deux personnages → « visage » (personnage 1, parle) / « visage2 » (personnage 2).
+const AO_REF_KIND_OPTS = [
+  { v: "", t: "Type ?" },
+  { v: "visage", t: "Visage perso 1" },
+  { v: "visage2", t: "Visage perso 2" },
+  { v: "produit", t: "Produit" },
+  { v: "decor", t: "Décor" },
+  { v: "style", t: "Style" },
+];
+
 // Contrôles par plan (jalon 2b/2c) : quels types de réfs ce plan utilise + bouton ANCRE.
-function planRefsControls(s) {
+function planRefsControls(s, opts = REF_KIND_OPTS) {
   const wrap = document.createElement("div");
   wrap.className = "plan-refs";
   const lbl = document.createElement("span");
@@ -1061,7 +1071,7 @@ function planRefsControls(s) {
   lbl.textContent = "Réfs utilisées :";
   wrap.appendChild(lbl);
   s.refs_needed = Array.isArray(s.refs_needed) ? s.refs_needed : [];
-  REF_KIND_OPTS.filter((o) => o.v).forEach((o) => {
+  opts.filter((o) => o.v).forEach((o) => {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "ref-chip" + (s.refs_needed.includes(o.v) ? " on" : "");
@@ -1103,11 +1113,11 @@ function planRefsControls(s) {
   return wrap;
 }
 
-function refKindSelect(value, onChange) {
+function refKindSelect(value, onChange, opts = REF_KIND_OPTS) {
   const sel = document.createElement("select");
   sel.className = "ref-kind";
   sel.title = "À quoi sert cette référence ?";
-  REF_KIND_OPTS.forEach((o) => {
+  opts.forEach((o) => {
     const opt = document.createElement("option");
     opt.value = o.v;
     opt.textContent = o.t;
@@ -3033,7 +3043,7 @@ function renderAoRefs() {
     });
     cell.appendChild(img);
     cell.appendChild(rm);
-    cell.appendChild(refKindSelect(aoRefsKinds[idx], (v) => { aoRefsKinds[idx] = v; }));
+    cell.appendChild(refKindSelect(aoRefsKinds[idx], (v) => { aoRefsKinds[idx] = v; }, AO_REF_KIND_OPTS));
     box.appendChild(cell);
   });
 }
@@ -3073,11 +3083,49 @@ function addAoRefs(fileList) {
   });
 })();
 
-$("aoManual").addEventListener("change", () => {
-  document.querySelectorAll(".aoManualOn").forEach((el) =>
-    el.classList.toggle("hidden", !$("aoManual").checked)
-  );
-});
+function aoMode() {
+  const r = document.querySelector('input[name="aoMode"]:checked');
+  return r ? r.value : "auto";
+}
+
+document.querySelectorAll('input[name="aoMode"]').forEach((r) =>
+  r.addEventListener("change", () => {
+    const mode = aoMode();
+    document.querySelectorAll(".aoModeHint").forEach((el) =>
+      el.classList.toggle("hidden", el.dataset.mode !== mode)
+    );
+    $("aoScriptLabel").textContent = mode === "client"
+      ? "Document du client (BLOC N · [timecode] — TITRE dialogue, puis 🎬 mise en scène)"
+      : "Script — ce que la personne DIT (VERBATIM, jamais réécrit)";
+    $("aoScript").placeholder = mode === "client"
+      ? "BLOC 1 · [0:00–0:08] — HOOK Le dialogue exact…\n🎬 La mise en scène du client…"
+      : "Colle ici le texte exact de ta pub.";
+    $("aoScript").rows = mode === "client" ? 14 : 6;
+  })
+);
+
+// Valeurs « [à valider] » surlignées (texte échappé, crochets gardés à l'affichage).
+function aoHighlightBrackets(text) {
+  return esc(text || "").replace(/\[([^\[\]]*)\]/g,
+    '<mark class="ao-val" title="valeur à valider">[$1]</mark>');
+}
+
+function aoBracketValuesHtml(text) {
+  const vals = (String(text || "").match(/\[[^\[\]]*\]/g) || []);
+  if (!vals.length) return "";
+  return `<div class="ao-vals">⚠ À valider : ${vals.map((v) => `<mark class="ao-val">${esc(v)}</mark>`).join(" ")}` +
+    ` <span class="muted">(dit sans les crochets)</span></div>`;
+}
+
+function aoBlockHead(s) {
+  const bits = [`Bloc ${esc(s.block_n)}`];
+  if (s.block_title) bits.push(esc(s.block_title));
+  const tc = s.timecode ? ` <span class="muted">[${esc(s.timecode)}]</span>` : "";
+  const n = s.block_count > 1 ? ` <span class="muted">· ${esc(s.block_count)} sous-plans</span>` : "";
+  return bits.join(" · ") + tc + n;
+}
+
+let aoPersonas = null;   // personnages du dernier plan {p1, p2, p1_en, p2_en} (EN = Claude)
 
 function aoRenderWarnings(boxId, warnings, maxWords) {
   const box = $(boxId);
@@ -3100,10 +3148,12 @@ function aoTier1Html(usdVideo, flag) {
 // -- Étape 3 : plan de tournage --
 $("aoPlanBtn").addEventListener("click", async () => {
   const script = $("aoScript").value;   // VERBATIM
-  const manual = $("aoManual").checked;
+  const mode = aoMode();
+  const manual = mode === "manual";
   const msg = $("aoPlanMsg");
-  if (!script.trim()) return toast("Écris le script (ce que la personne doit dire).");
-  msg.innerHTML = manual ? "🎬 Préparation de tes plans…" : "🎬 Découpage du script en plans…";
+  if (!script.trim()) return toast(mode === "client" ? "Colle le document du client." : "Écris le script (ce que la personne doit dire).");
+  msg.innerHTML = mode === "client" ? "🎬 Lecture du document client + traduction des mises en scène…"
+    : manual ? "🎬 Préparation de tes plans…" : "🎬 Découpage du script en plans…";
   $("aoPlanBtn").disabled = true;
   try {
     const r = await api(AO_API + "/plan", {
@@ -3112,13 +3162,17 @@ $("aoPlanBtn").addEventListener("click", async () => {
       body: JSON.stringify({
         script,
         persona: $("aoPersona").value.trim(),
+        persona1: $("aoPersona1").value.trim(),
+        persona2: $("aoPersona2").value.trim(),
         product: $("aoProduct").value.trim(),
         ambiance: $("aoAmbiance").value.trim(),
         manual,
+        mode,
         voice_profile: aoReadVoice("aoV"),
       }),
     });
     aoShots = r.shots || [];
+    aoPersonas = r.personas || null;
     if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
     msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
     renderAoPlan(aoShots, r);
@@ -3129,22 +3183,31 @@ $("aoPlanBtn").addEventListener("click", async () => {
   }
 });
 
-const AO_REF_LABEL = { visage: "Visage", produit: "Produit", decor: "Décor", style: "Style" };
+const AO_REF_LABEL = { visage: "Visage perso 1", visage2: "Visage perso 2", produit: "Produit", decor: "Décor", style: "Style" };
 
 function renderAoPlan(shots, r) {
   aoLastEstimate = r.estimate || null;
   const list = $("aoPlanList");
   list.innerHTML = "";
+  let prevBlock = null;
   shots.forEach((s) => {
     const refs = Array.isArray(s.refs_needed) ? s.refs_needed : [];
     const refsTxt = refs.length ? refs.map((k) => AO_REF_LABEL[k] || k).join(", ") : "plan neutre";
+    if (s.block_n && s.block_n !== prevBlock) {
+      const head = document.createElement("div");
+      head.className = "ao-block-head";
+      head.innerHTML = aoBlockHead(s);
+      list.appendChild(head);
+    }
+    prevBlock = s.block_n || null;
     const div = document.createElement("div");
     div.className = "scene-card";
     div.innerHTML =
-      `<div><span class="n">Plan ${esc(s.n)}</span> <span class="muted">réfs : ${esc(refsTxt)}</span></div>` +
-      `<div class="motion">💬 ${s.dialogue ? esc(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+      `<div><span class="n">Plan ${esc(s.label || s.n)}</span> <span class="muted">réfs : ${esc(refsTxt)}</span></div>` +
+      `<div class="motion">💬 ${s.dialogue ? aoHighlightBrackets(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+      (s.direction ? `<div class="ao-direction">🎬 Client : ${esc(s.direction)}</div>` : "") +
       `<div class="script">🖼️ ${esc(s.prompt_image)}</div>` +
-      `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>`;
+      `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`;
     list.appendChild(div);
   });
   aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words);
@@ -3181,6 +3244,7 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   fd.append("confirm", "true");
   fd.append("ref_kinds", JSON.stringify(aoRefsKinds));
   fd.append("voice_profile", JSON.stringify(aoReadVoice("aoV")));
+  fd.append("personas", JSON.stringify(aoPersonas || {}));
   aoRefsFiles.forEach((f) => fd.append("files", f, f.name));
   let res;
   try {
@@ -3254,7 +3318,17 @@ async function loadAoGallery(adId) {
   const g = $("aoGallery");
   renderOverviewBanner(g, r, "avatar_omni", adId);
   g.innerHTML = "";
-  aoGalleryShots.forEach((s) => g.appendChild(aoShotCard(s)));
+  let prevBlock = null;
+  aoGalleryShots.forEach((s) => {
+    if (s.block_n && s.block_n !== prevBlock) {
+      const head = document.createElement("div");
+      head.className = "ao-block-head";
+      head.innerHTML = aoBlockHead(s);
+      g.appendChild(head);
+    }
+    prevBlock = s.block_n || null;
+    g.appendChild(aoShotCard(s));
+  });
   aoRenderAnimEstimate();
 }
 
@@ -3302,21 +3376,23 @@ function aoShotCard(s) {
   card.innerHTML =
     thumb +
     `<div class="body">` +
-    `<div class="head"><span class="n">Plan ${esc(s.n)}</span>${badge}</div>` +
+    `<div class="head"><span class="n">Plan ${esc(s.label || s.n)}</span>${badge}</div>` +
     `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
     err +
+    (s.direction ? `<div class="ao-direction" title="Mise en scène du client">🎬 ${esc(s.direction)}</div>` : "") +
     `<div class="lbl">Visuel (prompt image, éditable — pris en compte à la régénération)</div>` +
     `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
     `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>` +
     `<div class="lbl">💬 Dialogue — ce que la personne DIT (verbatim)</div>` +
     `<textarea class="vo" placeholder="Laisse vide = plan sans parole">${esc(s.dialogue || "")}</textarea>` +
+    aoBracketValuesHtml(s.dialogue) +
     `<div class="actions">` +
     (done ? "" : `<button class="btn primary btn-valid">${valid ? "Dévalider" : "Valider"}</button>`) +
     `<button class="btn btn-regen">Régénérer</button>` +
     `<button class="btn small btn-test" title="Anime uniquement ce plan">Tester ce plan</button>` +
     `</div></div>`;
 
-  card.querySelector(".body").insertBefore(planRefsControls(s), card.querySelector(".actions"));
+  card.querySelector(".body").insertBefore(planRefsControls(s, AO_REF_KIND_OPTS), card.querySelector(".actions"));
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");

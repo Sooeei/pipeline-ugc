@@ -206,6 +206,11 @@ class _BrainRetryable(BrainError):
     """Réponse mal formée (JSON illisible / sans scènes) → on relance."""
 
 
+class _BrainTruncated(_BrainRetryable):
+    """Réponse COUPÉE par max_tokens (stop_reason) : relancer à l'identique donnerait la même
+    coupure → l'appelant redécoupe le lot en plus petit (voir _generate_plan_with_retry)."""
+
+
 # ============================================================ RETRY CERVEAU (529 overloaded / réseau / JSON)
 # L'API Anthropic peut être surchargée (HTTP 529 « overloaded ») et COUPER sa réponse → JSON
 # tronqué. Ces incidents passent presque toujours au 2e essai : on relance automatiquement avec
@@ -214,6 +219,16 @@ _BRAIN_RETRY_BACKOFFS = (2.0, 5.0, 10.0)  # attente (s) avant la relance n°1, 2
 _BRAIN_MAX_ATTEMPTS = 4                    # 1 essai + 3 relances (couvre 529 + JSON tronqué)
 _OVERLOADED_MESSAGE = (
     "L'IA est momentanément surchargée, réessaie dans quelques minutes."
+)
+# Réponse trop longue / illisible : ce n'est PAS une surcharge (« surchargée » est réservé aux
+# vrais 429 / 529 / 5xx / réseau). Deux variantes selon les modes proposés par le pipeline.
+TOO_LONG_MESSAGE = (
+    "Le script est trop long pour un seul découpage — l'app l'a découpé en lots ; si ça "
+    "persiste, passe en découpage manuel."
+)
+TOO_LONG_MESSAGE_OMNI = (
+    "Le script est trop long pour un seul découpage — l'app l'a découpé en lots ; si ça "
+    "persiste, passe en Découpage client ou manuel."
 )
 
 
@@ -625,6 +640,9 @@ def _call_claude_json(
         messages=[{"role": "user", "content": user}],
     )
     _record_anthropic(resp)
+    if getattr(resp, "stop_reason", "") == "max_tokens":
+        # JSON coupé par la limite de sortie : ne pas « réparer » un découpage incomplet.
+        raise _BrainTruncated(f"réponse coupée (max_tokens={max_tokens})")
     text = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
     data = _extract_json(text)
     items = data.get(result_key)
@@ -658,13 +676,39 @@ def _call_claude_manual_visuals(
     )
 
 
+def _sentence_chunks(
+    sentences: list[str], per_chunk: int, words_per_call: int | None,
+) -> list[list[str]]:
+    """Tranches CONTIGUËS de phrases : ≤ per_chunk phrases ET (si fourni) ≤ words_per_call mots
+    prononcés (une phrase seule plus longue forme sa propre tranche)."""
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    words = 0
+    for s in sentences:
+        w = config_app.spoken_word_count(s)
+        if cur and (len(cur) >= per_chunk or (words_per_call and words + w > words_per_call)):
+            chunks.append(cur)
+            cur, words = [], 0
+        cur.append(s)
+        words += w
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def _generate_plan_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
     persona: str = "", max_attempts: int = _BRAIN_MAX_ATTEMPTS,
     call: BrainCallFn | None = None,
+    words_per_call: int | None = None, too_long_msg: str = TOO_LONG_MESSAGE,
 ) -> list[dict[str, Any]]:
     """Découpage AUTO verbatim (script → plans). `call` = appel Claude propre au pipeline (objet
-    par défaut ; Avatar IA Omni fournit le sien) — mêmes tranches, relances et garde-fou."""
+    par défaut ; Avatar IA Omni fournit le sien) — mêmes tranches, relances et garde-fou.
+
+    Lots : ≤ 20 phrases par appel, et ≤ `words_per_call` mots si fourni (Omni : plans courts
+    → beaucoup de plans par phrase). Réponse COUPÉE (max_tokens) → le lot est redécoupé en deux
+    (récursif) au lieu d'être relancé à l'identique ; une phrase seule encore coupée → message
+    honnête (`too_long_msg`), jamais « surchargée »."""
     if not cfg.anthropic_api_key:
         raise BrainError("Clé Anthropic manquante (Réglages).")
     # DÉCOUPAGE INTERNE (cap 40) : un script long donnerait un JSON trop gros/tronqué. On le coupe
@@ -672,38 +716,55 @@ def _generate_plan_with_retry(
     # on découpe chaque tranche en plans, puis on recolle en une seule liste numérotée.
     sentences = _split_script_ideas(script, per_group=1)
     per_chunk = max(1, config_app.BRAIN_SHOTS_PER_BATCH * 2)  # ~2 phrases/plan → ≤ batch plans
-    if len(sentences) <= per_chunk:
-        return _one_plan_batch_with_retry(
-            cfg, product_name, ambiance, script, persona, max_attempts, call=call
-        )
-    out: list[dict[str, Any]] = []
-    for chunk in _batches(sentences, per_chunk):
-        out.extend(
-            _one_plan_batch_with_retry(
-                cfg, product_name, ambiance, " ".join(chunk), persona, max_attempts, call=call
+    chunks = _sentence_chunks(sentences, per_chunk, words_per_call)
+
+    def _run(chunk: list[str], text: str) -> list[dict[str, Any]]:
+        try:
+            return _one_plan_batch_with_retry(
+                cfg, product_name, ambiance, text, persona, max_attempts, call=call,
+                too_long_msg=too_long_msg,
             )
-        )
+        except _BrainTruncated as exc:
+            if len(chunk) <= 1:
+                providers._log_detail(f"Cerveau : réponse coupée même sur 1 phrase ({exc})")
+                raise BrainError(too_long_msg) from exc
+            mid = len(chunk) // 2
+            left, right = chunk[:mid], chunk[mid:]
+            return _run(left, " ".join(left)) + _run(right, " ".join(right))
+
+    if len(chunks) == 1:
+        return _run(chunks[0], script)   # une seule tranche : le script tel quel
+    out: list[dict[str, Any]] = []
+    for chunk in chunks:
+        out.extend(_run(chunk, " ".join(chunk)))
     return out
 
 
 def _one_plan_batch_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
     persona: str, max_attempts: int, call: BrainCallFn | None = None,
+    too_long_msg: str = TOO_LONG_MESSAGE,
 ) -> list[dict[str, Any]]:
+    """Un lot (tranche de script) → plans, avec relances. Une réponse COUPÉE (_BrainTruncated)
+    remonte tout de suite (l'appelant redécoupe) ; à l'épuisement, le message dit la VRAIE
+    cause : texte altéré, surcharge (429/529/5xx/réseau) ou réponse illisible/trop longue."""
     fn = call or _call_claude_plan  # résolu à l'appel (monkeypatch des tests OK)
     last_err = ""
     last_verbatim = False
-    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
+    last_transient = False
+    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON illisible)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
             shots = fn(cfg, product_name, ambiance, script, persona=persona, attempt=attempt)
+        except _BrainTruncated:
+            raise   # même lot = même coupure : inutile de relancer, on redécoupe plus petit
         except _BrainRetryable as exc:  # JSON illisible/incomplet / sans plans → on relance
-            last_err, last_verbatim = str(exc), False
+            last_err, last_verbatim, last_transient = str(exc), False, False
             continue
         except Exception as exc:  # réseau / 529 overloaded / 5xx : relance ; auth/400 : stop
             if _is_transient_brain_error(exc):
-                last_err, last_verbatim = str(exc), False
+                last_err, last_verbatim, last_transient = str(exc), False, True
                 continue
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
         # Garde-fou VERBATIM dans la boucle : on ne garde que les POINTS DE COUPE du modèle et on
@@ -714,9 +775,13 @@ def _one_plan_batch_with_retry(
         if aligned:
             return aligned
         last_err, last_verbatim = "les dialogues ne reconstituent pas le script (texte altéré)", True
+        last_transient = False
     if last_verbatim:
         raise BrainVerbatimError(f"Découpage refusé ({last_err}).")
-    raise BrainProviderError(_OVERLOADED_MESSAGE)
+    if last_transient:
+        raise BrainProviderError(_OVERLOADED_MESSAGE)
+    providers._log_detail(f"Cerveau : réponse illisible après {max_attempts} essais ({last_err})")
+    raise BrainError(too_long_msg)
 
 
 def _call_claude_plan(
@@ -1179,9 +1244,19 @@ def _call_claude_avatar_omni_plan(
     )
     return _call_claude_json(
         cfg, system=_omni_system(AVATAR_OMNI_SYSTEM_PROMPT, max_words), user=user,
-        max_tokens=min(16000, max(4000, len(script) * 2)), result_key="shots",
+        max_tokens=_omni_plan_max_tokens(script, max_words), result_key="shots",
         empty_msg="réponse du modèle sans plans exploitables",
     )
+
+
+def _omni_plan_max_tokens(script: str, max_words: int) -> int:
+    """max_tokens d'un lot Avatar IA : chaque plan (≤ max_words mots) porte ~2 longs prompts
+    anglais (~450 tokens) + son dialogue → on dimensionne sur le NOMBRE DE PLANS attendu."""
+    import math
+
+    words = config_app.spoken_word_count(script)
+    plans = math.ceil(words / max(1, int(max_words * 0.6))) + 1
+    return min(16000, max(4000, 1500 + plans * 450 + len(script)))
 
 
 def _call_claude_avatar_omni_visuals(
@@ -1276,6 +1351,9 @@ def generate_avatar_omni_plan(
             raw = _generate_plan_with_retry(
                 cfg, product, ambiance, script, persona=persona,
                 call=functools.partial(_call_claude_avatar_omni_plan, max_words=max_words),
+                # ≤ ~10 plans par appel (JSON fiable) ; message adapté aux modes Avatar IA
+                words_per_call=max_words * config_app.BRAIN_SHOTS_PER_BATCH,
+                too_long_msg=TOO_LONG_MESSAGE_OMNI,
             )
         raw = [
             s for s in raw
@@ -1308,6 +1386,410 @@ def generate_avatar_omni_plan(
         if (w := omni_dialogue_warning(int(s["n"]), str(s["dialogue"]), max_words, warn_kind))
     ]
     return {"ad": _slug(script), "shots": shots, "warnings": warnings, "max_words": max_words}
+
+
+# ============================================================ AVATAR IA — PERSONNAGES (FR → EN)
+# Les descriptions de personnages sont saisies en FRANÇAIS ; les prompts image/vidéo, eux, sont en
+# ANGLAIS. Claude les traduit UNE fois au moment du plan ; la version anglaise est stockée sur la
+# pub et c'est elle (jamais le texte français brut) qui part dans prompt_image et le prompt Omni.
+PERSONAS_TRANSLATE_SYSTEM_PROMPT = """\
+Tu traduis en ANGLAIS des descriptions de PERSONNAGES rédigées en français, pour des prompts de
+génération d'image et de vidéo photoréalistes. Garde TOUS les détails visuels (genre, âge, tenue,
+accessoires, coiffure, attitude), n'ajoute RIEN, n'invente rien, formule courte et descriptive
+(30 mots maximum par personnage), sans guillemets. Une description vide reste vide.
+Réponds UNIQUEMENT avec le JSON : {"characters":[{"id":1,"en":"..."},{"id":2,"en":"..."}]}
+"""
+
+
+def _clean_persona(text: str) -> str:
+    return " ".join(str(text or "").replace('"', "").split())[:300]
+
+
+def translate_personas(cfg: ProviderConfig, persona1: str, persona2: str = "") -> dict[str, str]:
+    """{p1, p2, p1_en, p2_en} : descriptions FR saisies + leur traduction ANGLAISE (Claude).
+
+    Simulation : aucune API → la « traduction » reprend le texte saisi (fichiers de démo)."""
+    p1, p2 = _clean_persona(persona1), _clean_persona(persona2)
+    out = {"p1": p1, "p2": p2, "p1_en": "", "p2_en": ""}
+    if not p1 and not p2:
+        return out
+    if cfg.dry_run:
+        out.update(p1_en=p1, p2_en=p2)
+        return out
+    if not cfg.anthropic_api_key:
+        raise BrainError("Clé Anthropic manquante (Réglages).")
+    user = (
+        f"PERSONNAGE 1 : {p1 or '(vide)'}\nPERSONNAGE 2 : {p2 or '(vide)'}\n\n"
+        "Traduis (JSON strict)."
+    )
+    last_transient = False
+    for attempt in range(_BRAIN_MAX_ATTEMPTS):
+        if attempt > 0:
+            _brain_backoff_sleep(attempt - 1)
+        try:
+            items = _call_claude_json(
+                cfg, system=PERSONAS_TRANSLATE_SYSTEM_PROMPT, user=user, max_tokens=800,
+                result_key="characters", empty_msg="traduction des personnages vide",
+            )
+        except _BrainRetryable:
+            last_transient = False
+            continue
+        except Exception as exc:  # noqa: BLE001 - 529/réseau : on relance ; auth/400 : stop
+            if _is_transient_brain_error(exc):
+                last_transient = True
+                continue
+            raise BrainProviderError(_friendly_anthropic(exc)) from exc
+        by_id = {str(it.get("id")): _clean_persona(it.get("en", "")) for it in items if isinstance(it, dict)}
+        en1, en2 = by_id.get("1", ""), by_id.get("2", "")
+        if (p1 and not en1) or (p2 and not en2):
+            continue   # traduction incomplète → on relance
+        out.update(p1_en=en1 if p1 else "", p2_en=en2 if p2 else "")
+        return out
+    if last_transient:
+        raise BrainProviderError(_OVERLOADED_MESSAGE)
+    raise BrainError("Traduction des personnages impossible pour le moment — réessaie.")
+
+
+def personas_brief(persona: str, personas: dict[str, str] | None) -> str:
+    """Brief persona envoyé au cerveau (modes auto / manuel) : persona libre + personnages EN."""
+    p = personas or {}
+    parts = [persona.strip()] if persona and persona.strip() else []
+    if p.get("p1_en"):
+        parts.append(f"PERSONNAGE 1 (celui qui PARLE) : {p['p1_en']}")
+    if p.get("p2_en"):
+        parts.append(f"PERSONNAGE 2 (MUET, présent dans le cadre) : {p['p2_en']}")
+    return "\n".join(parts)
+
+
+# ============================================================ AVATAR IA — DÉCOUPAGE CLIENT
+# Document du client :  BLOC N · [0:00–0:08] — TITRE <dialogue>
+#                        🎬 <direction de mise en scène>
+# Le dialogue est VERBATIM (tranches exactes du document) ; un bloc trop long est redécoupé en
+# sous-plans N.1, N.2… sur des phrases entières (puis, pour une phrase seule trop longue, sur
+# « : », « ; » ou « — ») ; Claude TRADUIT la direction 🎬 en prompts anglais, il n'invente rien.
+_CLIENT_BLOCK_RE = re.compile(r"^\s*BLOC\s+(\d+)\b(.*)$", re.IGNORECASE)
+_CLIENT_DIRECTION_MARK = "\U0001f3ac"   # 🎬
+_CLIENT_CLOSERS = "»\"”’)]"
+
+
+def _client_split_title(rest: str) -> tuple[str, str]:
+    """Sépare « TITRE EN MAJUSCULES » du début du dialogue (même ligne). Le titre = mots sans
+    minuscule ; le dialogue commence au 1er mot avec une minuscule, ou par « [ »."""
+    toks = list(re.finditer(r"\S+", rest))
+    for i, m in enumerate(toks):
+        t = m.group(0)
+        letters = [c for c in t if c.isalpha()]
+        if t.startswith("["):
+            return rest[: m.start()].strip(), rest[m.start():]
+        if any(c.islower() for c in letters):
+            return rest[: m.start()].strip(), rest[m.start():]
+        nxt = toks[i + 1].group(0) if i + 1 < len(toks) else ""
+        if len(letters) == 1 and any(c.islower() for c in nxt):   # « À partir… », « Y a… »
+            return rest[: m.start()].strip(), rest[m.start():]
+    return rest.strip(), ""
+
+
+def parse_client_doc(text: str) -> list[dict[str, Any]]:
+    """Document client → [{block_n, timecode, title, dialogue, direction}] (dans l'ordre).
+
+    Tolérant : un bloc commence par « BLOC N » ; timecode [..] et titre (après « — ») optionnels ;
+    tout ce qui suit la ligne titre jusqu'à « 🎬 » = dialogue ; la ligne 🎬 (et la suite, jusqu'au
+    bloc suivant) = direction. Le texte du dialogue est une tranche EXACTE du document."""
+    blocks: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    in_direction = False
+    for line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        m = _CLIENT_BLOCK_RE.match(line)
+        if m:
+            rest = m.group(2).strip()
+            rest = rest.lstrip("·•:.").strip()
+            timecode = ""
+            if rest.startswith("["):
+                end = rest.find("]")
+                if end != -1:
+                    timecode, rest = rest[1:end].strip(), rest[end + 1:].strip()
+            title, dialogue = "", rest
+            if rest[:1] in "—–-" and rest[1:2].isspace():
+                title, dialogue = _client_split_title(rest[1:].strip())
+            cur = {"block_n": int(m.group(1)), "timecode": timecode, "title": title,
+                   "dialogue_lines": [dialogue] if dialogue.strip() else [], "direction_lines": []}
+            blocks.append(cur)
+            in_direction = False
+            continue
+        if cur is None:
+            continue   # texte avant le 1er bloc (intro, notes) : ignoré
+        stripped = line.strip()
+        if stripped.startswith(_CLIENT_DIRECTION_MARK):
+            in_direction = True
+            stripped = stripped[len(_CLIENT_DIRECTION_MARK):].lstrip("️").strip()
+            if stripped:
+                cur["direction_lines"].append(stripped)
+            continue
+        if not stripped:
+            continue
+        (cur["direction_lines"] if in_direction else cur["dialogue_lines"]).append(line.strip())
+    if not blocks:
+        raise BrainError(
+            "Aucun bloc trouvé : chaque bloc du document client doit commencer par « BLOC 1 », "
+            "« BLOC 2 »… suivi du dialogue, puis d'une ligne « 🎬 » pour la mise en scène."
+        )
+    out = []
+    for b in blocks:
+        dialogue = "\n".join(b["dialogue_lines"]).strip()
+        if not dialogue:
+            raise BrainError(f"Bloc {b['block_n']} : aucun dialogue trouvé (texte avant « 🎬 »).")
+        out.append({
+            "block_n": b["block_n"], "timecode": b["timecode"], "title": b["title"],
+            "dialogue": dialogue, "direction": " ".join(b["direction_lines"]).strip(),
+        })
+    return out
+
+
+def _client_sentences(text: str) -> list[str]:
+    """Phrases VERBATIM ; un guillemet/parenthèse fermant reste avec sa phrase (« … maquiller. »)."""
+    parts = re.split(r"(\s+)", text.strip())
+    toks, seps = parts[0::2], parts[1::2]
+    closer = re.compile(rf"^[{re.escape(_CLIENT_CLOSERS)}]+[.!?…,;:]*$")
+    ends: list[bool] = []
+    for i, t in enumerate(toks):
+        if closer.match(t):
+            ends.append(bool(i and ends[i - 1]))
+        else:
+            ends.append(bool(re.search(rf"[.!?…][{re.escape(_CLIENT_CLOSERS)}]*$", t)))
+    out: list[str] = []
+    cur = ""
+    for i, t in enumerate(toks):
+        cur += t
+        nxt_closer = i + 1 < len(toks) and bool(closer.match(toks[i + 1]))
+        if ends[i] and not nxt_closer:
+            out.append(cur.strip())
+            cur = ""
+        elif i < len(seps):
+            cur += seps[i]
+    if cur.strip():
+        out.append(cur.strip())
+    return [s for s in out if s]
+
+
+def _split_block_dialogue(dialogue: str, max_words: int) -> list[str]:
+    """Sous-plans d'un bloc : phrases entières regroupées ≤ max_words ; une phrase seule trop
+    longue est coupée sur « : », « ; » ou « — » (jamais au milieu d'une proposition). Verbatim."""
+    units: list[str] = []
+    for sent in _client_sentences(dialogue):
+        if config_app.spoken_word_count(sent) > max_words:
+            units.extend(p for p in re.split(r"(?<=[:;—–])\s+", sent) if p.strip())
+        else:
+            units.append(sent)
+    groups: list[str] = []
+    for u in units:
+        if groups and config_app.spoken_word_count(groups[-1] + " " + u) <= max_words:
+            groups[-1] = groups[-1] + " " + u
+        else:
+            groups.append(u)
+    return groups
+
+
+AVATAR_OMNI_CLIENT_SYSTEM_PROMPT = """\
+Tu es directeur photo de pubs UGC vidéo verticales 9:16. Le CLIENT a DÉJÀ découpé sa pub en plans :
+pour chacun tu reçois son dialogue (déjà fixé : tu NE le changes PAS et tu ne le répètes pas) et SA
+DIRECTION DE MISE EN SCÈNE (🎬, en français). Ta SEULE tâche : TRADUIRE fidèlement cette direction
+en deux prompts EN ANGLAIS. Tu n'INVENTES PAS de mise en scène.
+
+RÈGLES :
+- LA DIRECTION DU CLIENT PRIME sur toute règle par défaut : si elle demande de compter sur les
+  doigts, de regarder l'autre personnage plutôt que la caméra, un contact physique, un objet tenu,
+  un geste précis… tu le fais, exactement, dans l'ordre indiqué. N'ajoute rien qu'elle ne demande
+  pas (seulement le minimum pour que l'image soit cohérente : décor, lumière, cadrage).
+- Un bloc découpé en plusieurs SOUS-PLANS (partie i/k) partage la MÊME direction : RÉPARTIS la
+  progression de l'action entre les sous-plans, dans l'ordre, en suivant le dialogue de chaque
+  sous-plan (ex. quatre gestes comptés sur les doigts : chaque sous-plan montre les gestes nommés
+  dans SON dialogue ; « quatre affaires » → les quatre doigts levés dans le sous-plan qui le dit).
+  Ne rejoue pas toute l'action dans chaque sous-plan. L'état de départ d'un sous-plan = l'état de
+  fin du précédent.
+- PERSONNAGES (descriptions fournies en anglais) : décris-les À L'IDENTIQUE dans TOUS les plans
+  (même formulation physique et vestimentaire). Le PERSONNAGE 1 est celui qui PARLE ; le
+  PERSONNAGE 2 (s'il est fourni) ne parle jamais. Personnes PHOTORÉALISTES et ADULTES, visages
+  génériques : jamais une personne réelle ou célèbre, jamais un mineur.
+- "prompt_image" : l'image fixe de DÉPART du plan : qui est dans le cadre et où, posture, objets,
+  cadrage, décor, lumière ; photo réaliste de tournage smartphone UGC, vertical 9:16. Aucun texte
+  incrusté, sous-titre ni watermark (l'étiquette du produit peut être lisible si la direction le
+  demande).
+- "prompt_motion" : ce qui BOUGE pendant CE plan (gestes, regards, expressions, réactions, caméra
+  sobre), dans l'ordre, fidèle à la direction et à la partie de l'action de ce sous-plan. Ne mets
+  PAS le dialogue. Le personnage 2 reste muet (réactions visibles seulement).
+- "refs_needed" : photos de référence utiles à ce plan parmi "visage" (visage du personnage 1),
+  "visage2" (visage du personnage 2), "produit", "decor", "style" ; [] si aucune.
+Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
+  {"shots":[{"prompt_image":"...","prompt_motion":"...","refs_needed":["visage"]}]}
+"""
+
+
+def _client_characters_en(personas: dict[str, str] | None) -> tuple[str, str]:
+    p = personas or {}
+    return str(p.get("p1_en") or ""), str(p.get("p2_en") or "")
+
+
+def _call_claude_client_visuals(
+    cfg: ProviderConfig, product_name: str, ambiance: str, plans: list[dict[str, Any]],
+    persona: str = "", attempt: int = 0, *, personas: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    p1, p2 = _client_characters_en(personas)
+    lines = []
+    for p in plans:
+        part = f" (partie {p['block_sub']}/{p['block_count']})" if p["block_count"] > 1 else ""
+        title = f" — {p['block_title']}" if p.get("block_title") else ""
+        lines.append(
+            f"[Plan {p['label']}] BLOC {p['block_n']}{part}{title}\n"
+            f"  Dialogue (fixé, ne pas changer) : {p['dialogue']}\n"
+            f"  Direction du client (FR) : {p['direction'] or '(aucune — cadrage sobre face caméra)'}"
+        )
+    correction = (
+        "\n\n[RAPPEL] Un objet par plan, dans l'ordre, JSON strict. Traduis la direction, "
+        "n'invente rien, ne touche pas aux dialogues." if attempt > 0 else ""
+    )
+    user = (
+        f"PERSONNAGE 1 (parle) : {p1 or '(non précisé : une personne UGC adulte, visage générique)'}\n"
+        f"PERSONNAGE 2 (muet) : {p2 or '(aucun)'}\n"
+        f"PRODUIT (visuel seulement) : {product_name.strip() or '(non précisé)'}\n"
+        f"AMBIANCE / DÉCOR : {ambiance or '(non précisé)'}\n\n"
+        "PLANS :\n" + "\n".join(lines) + f"\n\nÉcris UNIQUEMENT le JSON (un objet par plan).{correction}"
+    )
+    return _call_claude_json(
+        cfg, system=AVATAR_OMNI_CLIENT_SYSTEM_PROMPT, user=user,
+        max_tokens=min(16000, 1500 + 600 * len(plans)), result_key="shots",
+        empty_msg="visuels du découpage client manquants",
+    )
+
+
+def _client_canned_visual(
+    plan: dict[str, Any], personas: dict[str, str] | None, product: str,
+) -> tuple[str, str, list[str]]:
+    """Visuel déterministe (simulation, ou IA indisponible) : la direction du client est reprise
+    telle quelle (rien d'inventé), personnages décrits pareil sur tous les plans."""
+    p1, p2 = _client_characters_en(personas)
+    who = f"Character 1 (speaking): {p1 or 'an adult UGC creator with a generic, ordinary face'}"
+    if p2:
+        who += f"; Character 2 (silent): {p2}"
+    direction = plan.get("direction") or "sober framing, facing the camera"
+    part = (f" — part {plan['block_sub']}/{plan['block_count']} of the action"
+            if plan["block_count"] > 1 else "")
+    img = (f"Photorealistic vertical 9:16 smartphone UGC video frame. {who}. Client staging "
+           f"(French, follow it exactly): {direction}. Natural light, no text, no captions, "
+           "no watermark.")
+    motion = f"Follow the client staging exactly{part} (French): {direction}"
+    refs = ["visage", "visage2"] if p2 else ["visage"]
+    if product.strip():
+        refs.append("produit")
+    return img, motion, refs
+
+
+def _client_visual_batches(plans: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    """Lots de ≤ size plans SANS couper un bloc (ses sous-plans se répartissent l'action)."""
+    batches: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for n in dict.fromkeys(p["block_n"] for p in plans):
+        block = [p for p in plans if p["block_n"] == n]
+        if cur and len(cur) + len(block) > size:
+            batches.append(cur)
+            cur = []
+        cur.extend(block)
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def generate_avatar_omni_client_plan(
+    cfg: ProviderConfig, doc: str, personas: dict[str, str] | None = None, product: str = "",
+    ambiance: str = "", words_per_sec: float | None = None,
+) -> dict[str, Any]:
+    """Plan « Avatar IA » en DÉCOUPAGE CLIENT : blocs du document → plans (sous-plans N.1, N.2…
+    si un bloc dépasse MAX_WORDS), dialogues VERBATIM (garde-fou par bloc), visuels = traduction
+    de la direction 🎬 du client. Renvoie {"ad", "shots", "warnings", "max_words", "blocks"}."""
+    if len(doc or "") > MAX_SCRIPT_CHARS:
+        raise BrainError(
+            f"Document trop long ({len(doc)} caractères, max {MAX_SCRIPT_CHARS}). "
+            "Découpe-le en plusieurs pubs."
+        )
+    blocks = parse_client_doc(doc)
+    max_words = config_app.omni_max_words(words_per_sec)
+    plans: list[dict[str, Any]] = []
+    for b in blocks:
+        subs = realign_to_script(b["dialogue"], _split_block_dialogue(b["dialogue"], max_words))
+        if subs is None:   # défense en profondeur : les sous-plans sont des tranches du bloc
+            raise BrainVerbatimError(f"Bloc {b['block_n']} : découpage refusé (texte altéré).")
+        k = len(subs)
+        for j, d in enumerate(subs, 1):
+            plans.append({
+                "dialogue": d, "block_n": b["block_n"], "block_sub": j, "block_count": k,
+                "block_title": b["title"], "timecode": b["timecode"],
+                "direction": b["direction"],
+                "label": f"{b['block_n']}.{j}" if k > 1 else str(b["block_n"]),
+            })
+    if len(plans) > config_app.OBJET_MAX_SHOTS:
+        raise BrainError(
+            f"{len(plans)} plans (> {config_app.OBJET_MAX_SHOTS}). Réduis le document ou fais "
+            "plusieurs pubs."
+        )
+    warnings: list[str] = []
+    visuals: list[dict[str, Any]] = []
+    if not cfg.dry_run:
+        if not cfg.anthropic_api_key:
+            raise BrainError("Clé Anthropic manquante (Réglages).")
+        call = functools.partial(_call_claude_client_visuals, personas=personas)
+        for batch in _client_visual_batches(plans, config_app.BRAIN_SHOTS_PER_BATCH):
+            try:
+                got = _one_visuals_batch_with_retry(
+                    cfg, product, ambiance, batch, "", _BRAIN_MAX_ATTEMPTS, call=call,  # type: ignore[arg-type]
+                )
+            except _BrainRetryable:
+                got = []
+            if len(got) < len(batch):
+                labels = ", ".join(p["label"] for p in batch[len(got):])
+                warnings.append(
+                    f"Mise en scène non traduite (IA indisponible) pour le(s) plan(s) {labels} : "
+                    "la direction du client est envoyée telle quelle — régénère le plan plus tard."
+                )
+            visuals.extend(got[: len(batch)] + [{}] * (len(batch) - len(got)))
+    shots: list[dict[str, Any]] = []
+    for i, p in enumerate(plans):
+        v = visuals[i] if i < len(visuals) and isinstance(visuals[i], dict) else {}
+        c_img, c_motion, c_refs = _client_canned_visual(p, personas, product)
+        pi = scrub_brand_names(str(v.get("prompt_image", "")).strip() or c_img)
+        pm = scrub_brand_names(str(v.get("prompt_motion", "")).strip() or c_motion)
+        rn = _norm_refs_needed(v.get("refs_needed")) if v else None
+        shots.append({"n": i + 1, "prompt_image": pi, "prompt_motion": pm,
+                      "refs_needed": rn if rn is not None else c_refs, **p})
+    for s in shots:
+        w = omni_dialogue_warning(int(s["n"]), s["dialogue"], max_words, "phrase")
+        if w:
+            warnings.append(w.replace(f"Plan {s['n']} :", f"Plan {s['label']} :", 1))
+    bw = bracket_values_warning([s["dialogue"] for s in shots])
+    if bw:
+        warnings.append(bw)
+    return {"ad": _slug(blocks[0]["title"] or blocks[0]["dialogue"]), "shots": shots,
+            "warnings": warnings, "max_words": max_words, "blocks": len(blocks)}
+
+
+_BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
+
+
+def bracket_values(text: str) -> list[str]:
+    """Valeurs « [à valider] » d'un dialogue (ex. [97 %], [49,90 $])."""
+    return [f"[{m}]" for m in _BRACKET_RE.findall(text or "")]
+
+
+def strip_brackets(text: str) -> str:
+    """« [97 %] des femmes » → « 97 % des femmes » (texte envoyé à Omni ; la base garde les [ ])."""
+    return _BRACKET_RE.sub(lambda m: m.group(1), text or "")
+
+
+def bracket_values_warning(dialogues: list[str]) -> str:
+    vals = [v for d in dialogues for v in bracket_values(d)]
+    if not vals:
+        return ""
+    shown = ", ".join(dict.fromkeys(vals))
+    return (f"Valeurs à valider entre crochets : {shown} — elles seront dites SANS les crochets ; "
+            "vérifie-les (et retire les crochets du dialogue) avant d'animer.")
 
 
 # ============================================================ GARDE-FOU VERBATIM

@@ -371,23 +371,40 @@
             Google Omni génère la vidéo <b>et</b> la voix en une passe.
             <span class="ao-flag">🇫🇷 voix FR expérimentale</span> (Google n'évalue officiellement que l'anglais).</p>
           <h2>2. Ton script &amp; ta personne</h2>
-          <label>Script — ce que la personne DIT (VERBATIM, jamais réécrit)
+          <div class="ao-modes" role="radiogroup" aria-label="Mode de découpage">
+            <span class="lbl">Découpage :</span>
+            <label class="check"><input type="radio" name="aoMode" id="aoModeAuto" value="auto" checked /> Auto</label>
+            <label class="check"><input type="radio" name="aoMode" id="aoModeManual" value="manual" /> Manuel</label>
+            <label class="check"><input type="radio" name="aoMode" id="aoModeClient" value="client" /> Découpage client</label>
+          </div>
+          <p class="muted" style="margin-top:-4px">
+            <span class="aoModeHint" data-mode="auto">Auto : le cerveau découpe le script en plans
+              (phrases entières, verbatim).</span>
+            <span class="aoModeHint hidden" data-mode="manual">Manuel : sépare chaque plan par une
+              <b>ligne vide</b> (ou une ligne <b>« --- »</b>) ; chaque bloc devient un plan, dans l'ordre.
+              Rien n'est coupé.</span>
+            <span class="aoModeHint hidden" data-mode="client">Découpage client : colle le document du
+              client. Chaque bloc commence par <b>BLOC N</b> (timecode <b>[0:00–0:08]</b> et
+              <b>— TITRE</b> optionnels), suivi du dialogue, puis d'une ligne <b>🎬</b> pour la mise en
+              scène. Un bloc trop long est redécoupé en sous-plans (N.1, N.2…) sur des phrases entières ;
+              la mise en scène du client est traduite telle quelle (elle prime sur les règles par défaut).</span>
+          </p>
+          <label><span id="aoScriptLabel">Script — ce que la personne DIT (VERBATIM, jamais réécrit)</span>
             <textarea id="aoScript" rows="6"
               placeholder="Colle ici le texte exact de ta pub."></textarea>
           </label>
-          <label class="check">
-            <input type="checkbox" id="aoManual" />
-            Je découpe moi-même les plans
-          </label>
-          <p class="muted" style="margin-top:-4px">
-            Auto : le cerveau découpe le script en plans (phrases entières, verbatim).
-            <span class="aoManualOn hidden">Manuel : sépare chaque plan par une <b>ligne vide</b>
-            (ou une ligne <b>« --- »</b>) ; chaque bloc devient un plan, dans l'ordre. Rien n'est coupé.</span>
-          </p>
-          <label>Brief / persona <span class="muted">(qui parle, pour qui — oriente le visuel, pas le texte)</span>
+          <label>Brief / persona <span class="muted">(pour qui, quel ton — oriente le visuel, pas le texte)</span>
             <textarea id="aoPersona" rows="2"
-              placeholder="Ex. femme 35-45 ans, naturelle, ton sincère, cible mamans actives…"></textarea>
+              placeholder="Ex. ton sincère, cible femmes 50-65 ans…"></textarea>
           </label>
+          <div class="row grid2">
+            <label>Personnage 1 — parle <span class="muted">(en français, traduit automatiquement)</span>
+              <input type="text" id="aoPersona1" maxlength="300" placeholder="Ex. maquilleur homme, gants noirs" />
+            </label>
+            <label>Personnage 2 — muet <span class="muted">(optionnel)</span>
+              <input type="text" id="aoPersona2" maxlength="300" placeholder="Ex. femme ~60 ans, la modèle" />
+            </label>
+          </div>
           <div class="row grid2">
             <label>Produit <span class="muted">(optionnel)</span>
               <input type="text" id="aoProduct" placeholder="Ex. sérum visage à la vitamine C" />

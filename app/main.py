@@ -701,15 +701,29 @@ def create_app() -> FastAPI:
         cfg = load_provider_config()
         profile = config_app.normalize_voice_profile(body.voice_profile)
         wps = config_app.voice_words_per_sec(profile)
+        mode = body.mode if body.mode in ("auto", "manual", "client") else (
+            "manual" if body.manual else "auto"
+        )
         try:
-            result = brain.generate_avatar_omni_plan(
-                cfg, body.script, persona=body.persona, product=body.product,
-                ambiance=body.ambiance, manual=body.manual, words_per_sec=wps,
-            )
+            # Personnages saisis en FR → traduits en ANGLAIS une fois (stockés sur la pub ensuite).
+            personas = brain.translate_personas(cfg, body.persona1, body.persona2)
+            if mode == "client":
+                result = brain.generate_avatar_omni_client_plan(
+                    cfg, body.script, personas=personas, product=body.product,
+                    ambiance=body.ambiance, words_per_sec=wps,
+                )
+            else:
+                result = brain.generate_avatar_omni_plan(
+                    cfg, body.script, persona=brain.personas_brief(body.persona, personas),
+                    product=body.product, ambiance=body.ambiance, manual=(mode == "manual"),
+                    words_per_sec=wps,
+                )
         except brain.BrainProviderError as exc:
             raise HTTPException(502, str(exc)) from exc
         except brain.BrainError as exc:
             raise HTTPException(400, str(exc)) from exc
+        result["mode"] = mode
+        result["personas"] = personas
         for s in result["shots"]:
             s["duration_s"] = config_app.omni_clip_seconds(s.get("dialogue", ""), wps)
         result["estimate"] = _omni_estimate([s.get("dialogue", "") for s in result["shots"]], wps)
@@ -729,17 +743,30 @@ def create_app() -> FastAPI:
         confirm: bool = Form(False),
         ref_kinds: str = Form(""),
         voice_profile: str = Form(""),
+        personas: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
         """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
-        validation. La fiche voix est normalisée et ENREGISTRÉE dès maintenant (même voix partout)."""
+        validation. La fiche voix et les personnages (FR + EN) sont ENREGISTRÉS dès maintenant
+        (même voix et mêmes personnes sur tous les plans)."""
         cfg = load_provider_config()
         shots = _parse_avatar_omni_shots(shots_json)
         profile_json = _json(config_app.normalize_voice_profile(voice_profile))
+        personas_json = _json(_resolve_personas(cfg, personas))
+
+        def _on_ad(aid: int) -> None:
+            db.set_ad_voice_profile(aid, profile_json)
+            db.set_ad_personas(aid, personas_json)
+
+        def _on_clip(clip_id: int, s: dict[str, Any]) -> None:
+            fields = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
+            if fields:
+                db.update_clip(clip_id, **fields)
+
         return await _start_plan_images(
             cfg, "avatar_omni", ad_name, shots, files, ref_kinds, confirm,
             clip_script=lambda s: str(s.get("dialogue", "")),
-            on_ad=lambda aid: db.set_ad_voice_profile(aid, profile_json),
+            on_ad=_on_ad, on_clip=_on_clip,
         )
 
     @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
@@ -798,12 +825,18 @@ def create_app() -> FastAPI:
             lambda c: {
                 "dialogue": c.get("script") or "",
                 "duration_s": config_app.omni_clip_seconds(c.get("script") or "", wps),
+                **{k: c.get(k) for k in _BLOCK_FIELDS},
+                "label": _block_label(c),
             },
         )
         resp["warnings"] = [
             w for s in resp["shots"]
             if (w := brain.omni_dialogue_warning(int(s["n"]), s["dialogue"], max_words, "dialogue"))
         ]
+        bw = brain.bracket_values_warning([s["dialogue"] for s in resp["shots"]])
+        if bw:
+            resp["warnings"].append(bw)
+        resp["personas"] = pipeline.ad_personas(ad)
         resp["max_words"] = max_words
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
@@ -1416,6 +1449,9 @@ class AvatarOmniPlanIn(BaseModel):
     product: str = ""       # produit (optionnel, visuel)
     ambiance: str = ""
     manual: bool = False    # True = je découpe moi-même (blocs séparés par ligne vide / « --- »)
+    mode: str = ""          # "auto" | "manual" | "client" (prioritaire sur `manual`)
+    persona1: str = ""      # personnage 1 — PARLE (FR, traduit en EN par Claude)
+    persona2: str = ""      # personnage 2 — MUET, optionnel (FR, traduit en EN)
     voice_profile: dict[str, Any] = {}   # fiche voix (débit → MAX_WORDS et durées)
 
 
@@ -1541,8 +1577,58 @@ def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
         lambda n, pi, pm, s: _with_refs_needed({
             "n": n, "prompt_image": pi, "prompt_motion": pm,
             "dialogue": str(s.get("dialogue", "")).strip(),
+            **_block_fields(s),
         }, s),
     )
+
+
+# Découpage CLIENT : bloc d'origine d'un plan (stocké sur le clip, affiché dans la galerie).
+_BLOCK_FIELDS = ("block_n", "block_sub", "block_count", "block_title", "timecode", "direction")
+
+
+def _block_fields(s: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k in ("block_n", "block_sub", "block_count"):
+        try:
+            if s.get(k) not in (None, ""):
+                out[k] = int(s[k])
+        except (TypeError, ValueError):
+            pass
+    for k in ("block_title", "timecode", "direction"):
+        if str(s.get(k) or "").strip():
+            out[k] = str(s[k]).strip()[:2000]
+    return out
+
+
+def _block_label(c: dict[str, Any]) -> str:
+    """« 2.1 » pour un sous-plan du bloc 2, « 3 » pour un bloc non redécoupé, "" hors client."""
+    if not c.get("block_n"):
+        return ""
+    if int(c.get("block_count") or 1) > 1:
+        return f"{c['block_n']}.{c.get('block_sub') or 1}"
+    return str(c["block_n"])
+
+
+def _resolve_personas(cfg: Any, raw: str) -> dict[str, str]:
+    """Personnages reçus avec la génération : {p1, p2, p1_en, p2_en}. Traduction EN manquante
+    (texte FR modifié après le plan) → Claude la refait ; jamais de FR brut dans les prompts."""
+    import json
+
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except (TypeError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    p = {k: str(data.get(k) or "").strip() for k in ("p1", "p2", "p1_en", "p2_en")}
+    if (p["p1"] and not p["p1_en"]) or (p["p2"] and not p["p2_en"]):
+        try:
+            p = brain.translate_personas(cfg, p["p1"], p["p2"])
+        except brain.BrainProviderError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except brain.BrainError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return p
 
 
 def _with_refs_needed(shot: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
@@ -1698,7 +1784,7 @@ async def _save_ref_images(
     return saved
 
 
-_REF_KINDS = {"visage", "produit", "decor", "style"}
+_REF_KINDS = {"visage", "visage2", "produit", "decor", "style"}   # visage2 = personnage 2
 
 # Phrase type pour l'échantillon de voix (jalon 5) — courte, neutre, pour juger le timbre.
 _VOICE_SAMPLE_TEXT = "Bonjour, voici un aperçu de ma voix pour vos publicités."

@@ -69,6 +69,16 @@ qui génère la **voix et le lip-sync** dans la même passe.
 - **Fiche voix** (genre, âge, accent, timbre, débit) : enregistrée dès le Plan 1 et utilisée à
   l'identique sur tous les plans. Elle est **verrouillée après le 1er clip animé** ; le bouton
   « Déverrouiller » permet de la changer, mais les clips déjà faits garderont l'ancienne voix.
+- **Trois découpages** : **Auto** (le cerveau découpe ton script), **Manuel** (un bloc = un
+  plan, séparés par une ligne vide) et **Découpage client** : colle le document du client,
+  bloc par bloc — `BLOC N · [0:00–0:08] — TITRE <dialogue>` puis une ligne `🎬 <mise en scène>`
+  (timecode et titre optionnels). Le dialogue reste mot pour mot ; un bloc trop long est
+  redécoupé en sous-plans (N.1, N.2…) sur des phrases entières ; la mise en scène du client est
+  **traduite** (jamais inventée) et prime sur les règles par défaut. Les valeurs entre
+  crochets (`[97 %]`) sont surlignées « à valider » et dites sans les crochets.
+- **Personnages** : « Personnage 1 — parle » et « Personnage 2 — muet » (optionnel), saisis en
+  français et traduits en anglais par Claude au moment du plan ; les photos « visage » peuvent
+  être rattachées au personnage 1 ou 2.
 - Conseil : commence par **« Tester ce plan »** sur un seul plan avant d'animer toute la pub.
 
 ---

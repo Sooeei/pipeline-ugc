@@ -395,14 +395,16 @@ def generate_shooting_plan(
             f"Script découpé en {len(shots)} plans (> {config_app.OBJET_MAX_SHOTS}). "
             "Raccourcis le script ou fais plusieurs pubs."
         )
-    # Garde-fou VERBATIM (défense en profondeur, même en simulation) : la concat des dialogues
-    # doit reconstituer EXACTEMENT le script (sinon le cerveau a modifié le texte → refus).
-    if not dialogue_verbatim_ok(script, shots):
+    # Garde-fou VERBATIM (défense en profondeur, même en simulation) : les dialogues deviennent
+    # les tranches EXACTES du script original aux points de coupe du modèle ; si les dialogues ne
+    # s'alignent pas sur le script (texte réellement modifié) → refus.
+    aligned = _realign_shot_dialogues(script, shots)
+    if aligned is None:
         raise BrainVerbatimError(
             "Découpage refusé : la concaténation des dialogues ne reconstitue pas ton script "
             "à l'identique (le cerveau a modifié/inventé du texte)."
         )
-    return {"ad": _slug(product_name), "product": product_name, "shots": shots}
+    return {"ad": _slug(product_name), "product": product_name, "shots": aligned}
 
 
 # ---------------------------------------------------- MODE MANUEL (l'utilisateur découpe)
@@ -700,10 +702,13 @@ def _one_plan_batch_with_retry(
                 last_err, last_verbatim = str(exc), False
                 continue
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
-        # Garde-fou VERBATIM dans la boucle : si le modèle a altéré le script, on relance.
-        clean = _renumber_shots([s for s in shots if str(s.get("dialogue", "")).strip()])
-        if clean and dialogue_verbatim_ok(script, clean):
-            return shots
+        # Garde-fou VERBATIM dans la boucle : on ne garde que les POINTS DE COUPE du modèle et on
+        # découpe le script ORIGINAL (typographie normalisée par le modèle = OK) ; un vrai mot
+        # changé → alignement impossible → on relance.
+        kept = [s for s in shots if str(s.get("dialogue", "")).strip()]
+        aligned = _realign_shot_dialogues(script, kept) if kept else None
+        if aligned:
+            return aligned
         last_err, last_verbatim = "les dialogues ne reconstituent pas le script (texte altéré)", True
     if last_verbatim:
         raise BrainVerbatimError(f"Découpage refusé ({last_err}).")
@@ -1284,11 +1289,15 @@ def generate_avatar_omni_plan(
                 f"Script découpé en {len(shots)} plans (> {config_app.OBJET_MAX_SHOTS}). "
                 "Raccourcis le script ou fais plusieurs pubs."
             )
-        if not dialogue_verbatim_ok(script, shots):
+        # Dialogues = tranches EXACTES du script original (points de coupe du modèle) ; refus si
+        # le texte a réellement été modifié.
+        aligned = _realign_shot_dialogues(script, shots)
+        if aligned is None:
             raise BrainVerbatimError(
                 "Découpage refusé : la concaténation des dialogues ne reconstitue pas ton script "
                 "à l'identique (le cerveau a modifié/inventé du texte)."
             )
+        shots = aligned
         warn_kind = "phrase"
     warnings = [
         w for s in shots
@@ -1315,6 +1324,84 @@ def _parts_reconstruct(original: str, parts: list[str]) -> bool:
     with_space = _normalize_ws(" ".join(parts))
     without_space = _normalize_ws("".join(parts))
     return ref in (with_space, without_space)
+
+
+# ------------------------------------------------ ALIGNEMENT sur le script ORIGINAL (points de coupe)
+# Le modèle « normalise » souvent la typographie en recopiant les dialogues (’ → ', « » → ",
+# espace insécable → espace, … → ...). On ne fait donc PAS confiance à son texte : on ne garde
+# que ses POINTS DE COUPE, retrouvés par une comparaison NORMALISÉE, puis on découpe le script
+# ORIGINAL à ces positions. Les dialogues stockés sont des tranches exactes du texte utilisateur.
+# La normalisation ne sert qu'à COMPARER (jamais à stocker) ; un vrai mot changé → refus.
+_ALIGN_MAP = {
+    "’": "'", "‘": "'", "‚": "'", "‛": "'", "ʼ": "'", "′": "'",
+    "´": "'", "`": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"', "«": '"', "»": '"',
+    "‹": '"', "›": '"', "″": '"',
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-",
+    "−": "-",
+    "…": "...",
+}
+# Invisibles ignorés comme des espaces (str.isspace couvre déjà U+00A0, U+202F, U+2009…).
+_ALIGN_IGNORED = {"​", "‌", "‍", "⁠", "﻿", "­"}
+
+
+def _align_chars(text: str) -> list[tuple[str, int]]:
+    """Suite de caractères COMPARABLES (sans aucun blanc, typographie unifiée, accents décomposés
+    NFD) avec, pour chacun, l'index du caractère ORIGINAL dont il provient."""
+    import unicodedata
+
+    out: list[tuple[str, int]] = []
+    for i, ch in enumerate(text):
+        if ch.isspace() or ch in _ALIGN_IGNORED:
+            continue
+        for c in unicodedata.normalize("NFD", _ALIGN_MAP.get(ch, ch)):
+            out.append((c, i))
+    return out
+
+
+def realign_to_script(script: str, dialogues: list[str]) -> list[str] | None:
+    """Découpe le script ORIGINAL aux points de coupe des `dialogues` renvoyés par le modèle.
+
+    Chaque dialogue doit correspondre, dans l'ordre et sans trou, à la suite du script une fois
+    normalisés (blancs, apostrophes/guillemets typographiques, tirets, points de suspension,
+    accents composés/décomposés). Renvoie les tranches EXACTES du script (espaces de frontière
+    retirés), ou None si l'alignement échoue (mot/ponctuation réellement changé, ajouté, retiré,
+    réordonné) — l'appelant garde alors le refus."""
+    ref = _align_chars(script)
+    cuts: list[int] = []
+    pos = 0
+    for d in dialogues:
+        seq = [c for c, _ in _align_chars(d)]
+        if not seq or [c for c, _ in ref[pos:pos + len(seq)]] != seq:
+            return None
+        pos += len(seq)
+        cuts.append(pos)
+    if not cuts or pos != len(ref):
+        return None
+    out: list[str] = []
+    start = 0
+    for end in cuts:
+        if end < len(ref):
+            if ref[end][1] == ref[end - 1][1]:
+                return None   # coupe au milieu d'un caractère développé (ex. « … ») : refus
+            stop = ref[end][1]
+        else:
+            stop = len(script)
+        seg = script[start:stop].strip()
+        if not seg:
+            return None
+        out.append(seg)
+        start = stop
+    return out
+
+
+def _realign_shot_dialogues(script: str, shots: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Plans dont le `dialogue` est remplacé par la tranche EXACTE du script (voir
+    realign_to_script). None si l'alignement échoue."""
+    aligned = realign_to_script(script, [str(s.get("dialogue", "")) for s in shots])
+    if aligned is None:
+        return None
+    return [{**s, "dialogue": a} for s, a in zip(shots, aligned, strict=True)]
 
 
 def verbatim_ok(original: str, scenes: list[dict[str, Any]]) -> bool:

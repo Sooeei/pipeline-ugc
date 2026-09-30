@@ -673,23 +673,25 @@ def create_app() -> FastAPI:
         ad = db.get_ad(ad_id)
         if ad is None or ad.get("kind") != "objet":
             raise HTTPException(400, "Pub « Objet animé » introuvable.")
-        valides = [c for c in db.clips_for_ad(ad_id, status="valide") if c.get("image_path")]
-        if not valides:
+        # Candidats = exactement ceux que le pipeline anime : validés + échecs précédents avec image.
+        candidates = _animatable_clips(db.clips_for_ad(ad_id))
+        if not candidates:
             raise HTTPException(400, "Aucun plan validé à animer (valide d'abord les images).")
         if not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise avant d'animer (coût Grok).")
         if not cfg.dry_run and not (cfg.xai_api_key or "").strip():
             raise HTTPException(400, "Clé API xAI (Grok) manquante (Réglages).")
-        est = cost.estimate_objet(len(valides))
-        _check_spend_cap(cfg, est["usd_total"], body.confirm_over_cap)
-        # Scènes = les plans validés (pour que la barre de progression compte correctement).
-        anim_scenes = [{"n": int(c["scene_n"])} for c in valides]
+        # Coût VIDÉO seul (les images sont déjà faites), sur les vraies durées des dialogues.
+        est = _grok_video_estimate(cfg, candidates)
+        _check_spend_cap(cfg, est["usd_video"], body.confirm_over_cap)
+        # Scènes = les plans animés (pour que la barre de progression compte correctement).
+        anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
         job = jobs.manager.start(
             cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="objet_animate",
         )
         return {
             "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
-            "n_plans": len(valides), "usd_video": est["usd_video"],
+            "n_plans": len(candidates), "usd_video": est["usd_video"],
         }
 
     @app.post("/api/objet/resume/{ad_id}")
@@ -1364,10 +1366,35 @@ def _parse_shots(shots_json: str) -> list[dict[str, Any]]:
     (Grok fait voix + lip-sync)."""
     return _parse_shot_list(
         shots_json, "Plan de tournage",
-        lambda n, pi, pm, s: {
+        lambda n, pi, pm, s: _with_refs_needed({
             "n": n, "prompt_image": pi, "prompt_motion": pm,
             "dialogue": str(s.get("dialogue", "")).strip(),
-        },
+        }, s),
+    )
+
+
+def _with_refs_needed(shot: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Conserve les types de réfs du plan reçu (normalisés, filtrés sur _REF_KINDS) → le clip est
+    créé avec son `refs_needed`. Absent/illisible → clé absente (le plan reçoit toutes les réfs)."""
+    rn = config_app.normalize_refs_needed(raw.get("refs_needed"))
+    if rn is not None:
+        shot["refs_needed"] = [k for k in rn if k in _REF_KINDS]
+    return shot
+
+
+def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Plans qu'une animation (objet) va traiter : validés + échecs précédents, avec image —
+    exactement la sélection du pipeline (les plans « pret » ne sont jamais réanimés)."""
+    return [c for c in clips if c.get("image_path") and c.get("status") in ("valide", "echec")]
+
+
+def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any]:
+    """Coût vidéo Grok des plans à animer, sur les VRAIES durées (débit choisi dans Réglages)."""
+    pace = config_app.GROK_VOICE_PACES.get(
+        cfg.objet_voice_pace, config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]
+    )
+    return cost.estimate_grok_video(
+        [str(c.get("script") or "") for c in clips], pace["words_per_sec"]
     )
 
 
@@ -1400,10 +1427,10 @@ def _parse_mashup_shots(shots_json: str) -> list[dict[str, Any]]:
     """Plans « Mashup IA ». duration_s borné [KLING_MIN, KLING_MAX] ; aucune voix."""
     return _parse_shot_list(
         shots_json, "Plan Mashup",
-        lambda n, pi, pm, s: {
+        lambda n, pi, pm, s: _with_refs_needed({
             "n": n, "prompt_image": pi, "prompt_motion": pm,
             "duration_s": config_app.clamp_mashup_seconds(s.get("duration_s")),
-        },
+        }, s),
     )
 
 
@@ -1523,6 +1550,10 @@ def _regenerate_image(
         raise HTTPException(400, f"Ce plan n'appartient pas à {kind_label}.")
     if not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
+    # Cohérence : la référence (ancre, sinon 1er plan validé/animé) est passée en 1re image SI
+    # elle existe et n'est pas le plan régénéré (le préfixe de cohérence dépend du kind, pipeline).
+    ref = _consistency_ref(db.clips_for_ad(int(ad["id"])))
+    character_ref = str(ref["image_path"]) if ref and int(ref["id"]) != clip_id else ""
 
     edited = body.prompt_image.strip()
     if allow_prompt_edit and edited:
@@ -1538,6 +1569,7 @@ def _regenerate_image(
     job = jobs.manager.start(
         cfg, int(ad["id"]), str(ad["name"]), [shot], "",
         output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
+        character_ref=character_ref,
     )
     return {"ok": True, "job_id": job.id}
 
@@ -1582,13 +1614,13 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
                 "n": len(img_fail), "dry_run": cfg.dry_run}
 
     # --- Phase ANIMATION : réanimer les plans avec image non encore « pret » (skip pret automatique).
-    to_anim = [c for c in clips if c.get("image_path") and c.get("status") in ("valide", "echec")]
+    to_anim = _animatable_clips(clips)
     if not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise avant de réanimer (coût vidéo).")
     if kind == "objet":
         if not cfg.dry_run and not (cfg.xai_api_key or "").strip():
             raise HTTPException(400, "Clé API xAI (Grok) manquante (Réglages).")
-        est = cost.estimate_objet(len(to_anim))["usd_video"]
+        est = _grok_video_estimate(cfg, to_anim)["usd_video"]   # vraies durées Grok
         mode = "objet_animate"
     else:
         if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
@@ -1655,16 +1687,10 @@ def _set_clip_validation(clip_id: int, valide: bool) -> dict[str, Any]:
 
 
 def _consistency_ref(clips: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Plan de référence pour uniformiser : l'ANCRE choisie (jalon 2c) si elle existe et a une
-    image, sinon le premier plan VALIDÉ avec image (typiquement le Plan 1)."""
-    valides = [
-        c for c in sorted(clips, key=lambda c: c["scene_n"])
-        if c.get("status") == "valide" and c.get("image_path")
-    ]
-    for c in valides:
-        if c.get("is_anchor"):
-            return c
-    return valides[0] if valides else None
+    """Plan de référence pour uniformiser / régénérer / reprendre : l'ANCRE choisie (jalon 2c) si
+    elle a une image, sinon le premier plan VALIDÉ ou déjà ANIMÉ (« pret ») avec image, par numéro
+    (typiquement le Plan 1). « pret » compte : une fois le Plan 1 animé, il reste la référence."""
+    return pipeline.consistency_ref(clips, statuses=("valide", "pret"))
 
 
 def _json(obj: Any) -> str:

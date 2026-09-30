@@ -96,6 +96,21 @@ def estimate_objet(
     }
 
 
+
+def estimate_grok_video(
+    dialogues: list[str], words_per_sec: float | None = None
+) -> dict[str, Any]:
+    """Coût VIDÉO Grok (Objet animé) sur les VRAIES durées : chaque plan dure le temps naturel de
+    son dialogue au débit choisi (clip_seconds_for_dialogue), × 0,14 $/s + 0,01 $/image d'entrée
+    (comme record_grok_clip). Sans les images Nano Banana (déjà générées à ce stade)."""
+    secs = [config_app.clip_seconds_for_dialogue(d, words_per_sec) for d in dialogues or []]
+    usd = sum(
+        s * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE
+        for s in secs
+    )
+    return {"shots": len(secs), "seconds_total": sum(secs), "usd_video": round(usd, 2)}
+
+
 # ============================================================ COMPTABILISATION (générations RÉELLES)
 # Chaque fonction record_* enregistre UN événement de coût réel en base (jamais en simulation).
 def record_image(ad_id: int | None, model: str) -> None:

@@ -504,7 +504,8 @@ _BRAND_REPLACEMENTS: list[tuple[str, str]] = [
     (r"\bstudio ghibli\b", "hand-drawn animation"),
     (r"\bghibli\b", "hand-drawn animation"),
     (r"\bpixar\b", "animated-film"),
-    (r"\billumination\b", "animated-film"),
+    # « illumination » seul est un mot anglais courant (lumière) : on ne vise que le studio.
+    (r"\billumination\s+(?:entertainment|studios?)\b", "animated-film"),
     (r"\bdreamworks\b", "animated-film"),
     (r"\bdisney\b", "animated-film"),
     (r"\bhunter\s*x\s*hunter\b", "anime"),

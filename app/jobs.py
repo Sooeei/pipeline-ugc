@@ -66,7 +66,10 @@ class Job:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            done = sum(1 for v in self.scenes.values() if v.get("phase") in ("pret", "erreur"))
+            # Plan terminé : « pret » (voix/images), « clip » (animation réussie) ou « erreur ».
+            done = sum(
+                1 for v in self.scenes.values() if v.get("phase") in ("pret", "clip", "erreur")
+            )
             voices_done = sum(1 for v in self.scenes.values() if v.get("voice_ok"))
             return {
                 "id": self.id,

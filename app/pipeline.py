@@ -383,6 +383,22 @@ _MASHUP_CONSISTENCY = (
 )
 
 
+def consistency_ref(
+    clips: list[dict[str, Any]], statuses: tuple[str, ...] = ("valide",),
+) -> dict[str, Any] | None:
+    """Plan de RÉFÉRENCE (cohérence) : l'ANCRE choisie (jalon 2c) si elle a une image et un statut
+    dans `statuses`, sinon le premier plan (par numéro) de ce statut avec image (typiquement le
+    Plan 1 validé). Partagé par main (uniformiser / régénérer / reprendre)."""
+    eligible = [
+        c for c in sorted(clips, key=lambda c: int(c["scene_n"]))
+        if c.get("status") in statuses and c.get("image_path")
+    ]
+    for c in eligible:
+        if c.get("is_anchor"):
+            return c
+    return eligible[0] if eligible else None
+
+
 def generate_objet_images(
     cfg: ProviderConfig,
     ad_id: int,

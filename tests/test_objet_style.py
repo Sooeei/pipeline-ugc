@@ -17,7 +17,11 @@ def _all_prompts(shots):
 
 
 def test_scrub_brand_names_replaces_known_brands():
-    out = brain.scrub_brand_names("a cute Pixar-style 3D mascot, Illumination look, Ghibli vibe")
+    # §7d : seul le studio « Illumination Entertainment/Studios » est visé (le mot anglais
+    # « illumination » = lumière reste intact).
+    out = brain.scrub_brand_names(
+        "a cute Pixar-style 3D mascot, Illumination Entertainment look, Ghibli vibe"
+    )
     low = out.lower()
     assert "pixar" not in low and "illumination" not in low and "ghibli" not in low
 

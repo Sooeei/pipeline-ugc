@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import config_app, cost, db, media
+from . import brain, config_app, cost, db, media
 from .providers import (
     ProviderConfig,
     ProviderError,
@@ -28,6 +28,7 @@ from .providers import (
     heygen_upload_audio,
     kling_generate_video,
     nano_banana_generate_image,
+    omni_generate_video,
 )
 
 UpdateFn = Callable[[dict[str, Any]], None]
@@ -382,13 +383,27 @@ _MASHUP_CONSISTENCY = (
     "change the scene, framing and action described here: "
 )
 
+# Cohérence PERSONNE pour l'Avatar IA (Omni) : la 1re image de réf est la personne VERROUILLÉE
+# (Plan 1 validé / ancre). Même personne, seuls le cadrage, la pose et l'action changent.
+_AVATAR_CONSISTENCY = (
+    "IMPORTANT — PERSON CONSISTENCY: the FIRST reference image is the LOCKED person (same face, "
+    "hair, age, body, outfit, photographic UGC style and lighting). Do NOT change the person. "
+    "Only change framing, pose and action: "
+)
+
+# Préfixe de cohérence par type de pub (objet vivant = défaut).
+_CONSISTENCY_BY_KIND = {
+    "mashup": _MASHUP_CONSISTENCY,
+    "avatar_omni": _AVATAR_CONSISTENCY,
+}
+
 
 def consistency_ref(
     clips: list[dict[str, Any]], statuses: tuple[str, ...] = ("valide",),
 ) -> dict[str, Any] | None:
     """Plan de RÉFÉRENCE (cohérence) : l'ANCRE choisie (jalon 2c) si elle a une image et un statut
     dans `statuses`, sinon le premier plan (par numéro) de ce statut avec image (typiquement le
-    Plan 1 validé). Partagé par main (uniformiser / régénérer / reprendre)."""
+    Plan 1 validé). Partagé par main (uniformiser / régénérer / reprendre) et l'animation Omni."""
     eligible = [
         c for c in sorted(clips, key=lambda c: int(c["scene_n"]))
         if c.get("status") in statuses and c.get("image_path")
@@ -426,11 +441,11 @@ def generate_objet_images(
     ]
     model_id = _objet_image_model_id(cfg)
     # Consigne de cohérence adaptée au type : Mashup = look ultra-réaliste (SANS langage Pixar) ;
-    # Objet vivant = personnage-mascotte. Sinon aucune consigne (Plan 1).
+    # Avatar IA (Omni) = même personne ; Objet vivant = personnage-mascotte. Sinon aucune (Plan 1).
     prefix = ""
     if character_ref:
-        kind = (db.get_ad(ad_id) or {}).get("kind")
-        prefix = _MASHUP_CONSISTENCY if kind == "mashup" else _CHARACTER_CONSISTENCY
+        kind = str((db.get_ad(ad_id) or {}).get("kind") or "")
+        prefix = _CONSISTENCY_BY_KIND.get(kind, _CHARACTER_CONSISTENCY)
 
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
@@ -654,6 +669,115 @@ def animate_mashup_clips(
         ad_id, ad_name, clips, _render,
         parallel_cap=config_app.KLING_MAX_PARALLEL,
         log_kind="mashup", log_prefix=f"Animation Mashup « {ad_name} »",
+        set_status=(only_clip_id is None),
+        on_update=on_update,
+    )
+
+
+# ==================================================================== AVATAR IA (Omni)
+def _omni_quote_dialogue(dialogue: str) -> str:
+    """Le dialogue est inséré VERBATIM entre guillemets droits : ses guillemets droits INTERNES
+    deviennent des guillemets typographiques “ ” (alternance ouvrant/fermant). Rien d'autre."""
+    out: list[str] = []
+    opening = True
+    for ch in dialogue:
+        if ch == '"':
+            out.append("\u201c" if opening else "\u201d")
+            opening = not opening
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def build_omni_prompt(
+    prompt_motion: str,
+    dialogue: str,
+    voice_sheet: str,
+    seconds: int,
+    has_anchor: bool,
+    camera: str = config_app.OMNI_DEFAULT_CAMERA,
+    intro: str = config_app.OMNI_INTRO_GESTURE,
+) -> str:
+    """Prompt Google Omni d'UN plan, dans un ordre STRICT : caméra/scène unique → mouvement
+    (nettoyé des marques) → dialogue minuté + voix (ou silence) → interdits → ancre éventuelle.
+    Le DIALOGUE est inséré VERBATIM (jamais nettoyé ni reformulé)."""
+    parts = [f"<FIRST_FRAME> {camera}, in a single unbroken scene with no scene cuts."]
+    motion = brain.scrub_brand_names(prompt_motion or "")
+    if motion:
+        parts.append(motion)
+    text = (dialogue or "").strip()
+    if text:
+        parts.append(
+            f"[0-1s] {intro}, silent. [1-{seconds}s] The person says, spoken in French, in "
+            f"{voice_sheet}: \"{_omni_quote_dialogue(text)}\" Lips and expression stay in sync "
+            "with every word. The audio is their clear spoken voice up front over a quiet room "
+            "tone. No music."
+        )
+    else:
+        parts.append("No dialogue. The audio is a quiet natural room tone. No music.")
+    parts.append("No other speakers. No subtitles. No on-screen text.")
+    if has_anchor:
+        parts.append(
+            "<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it as a "
+            "reference, not as a literal frame."
+        )
+    return " ".join(parts)
+
+
+def animate_avatar_omni_clips(
+    cfg: ProviderConfig,
+    ad_id: int,
+    ad_name: str,
+    on_update: UpdateFn | None = None,
+    only_clip_id: int | None = None,
+) -> dict[str, Any]:
+    """Anime les plans VALIDÉS d'un Avatar IA (image→vidéo Google Omni, VOIX + LIP-SYNC natifs).
+
+    Même fiche voix (ads.voice_profile, telle que stockée) sur TOUS les plans ; durée de chaque
+    clip = temps naturel du dialogue au débit de la fiche + respiration d'intro (bornée 3-10 s).
+    L'ancre (ou le 1er plan validé) est envoyée en 2e image pour garder le même visage/la même
+    voix. `only_clip_id` → « Tester ce plan ». Plans « valide » ou « echec » (avec image)."""
+    all_clips = db.clips_for_ad(ad_id)
+    if only_clip_id is not None:
+        clips = [
+            c for c in all_clips
+            if int(c["id"]) == int(only_clip_id)
+            and c.get("image_path")
+            and c.get("status") in ("valide", "echec", "pret")
+        ]
+    else:
+        clips = [
+            c for c in all_clips
+            if c.get("image_path") and c.get("status") in ("valide", "echec")
+        ]
+    ad = db.get_ad(ad_id) or {}
+    profile = config_app.normalize_voice_profile(ad.get("voice_profile"))
+    wps = config_app.voice_words_per_sec(profile)
+    sheet = config_app.voice_sheet(profile)
+    # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
+    ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
+
+    def _render(c: dict[str, Any], mp4: Path) -> None:
+        n = int(c["scene_n"])
+        dialogue = str(c.get("script") or "").strip()   # VERBATIM
+        seconds = config_app.omni_clip_seconds(dialogue, wps)
+        has_anchor = ref is not None and int(ref["id"]) != int(c["id"])
+        prompt = build_omni_prompt(
+            str(c.get("motion_prompt", "")), dialogue, sheet, seconds, has_anchor,
+        )
+        res = omni_generate_video(
+            cfg, str(c["image_path"]), prompt, mp4, seconds,
+            anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
+            model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1,
+        )
+        db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
+        if not cfg.dry_run:
+            cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
+
+    return _animate_clips(
+        ad_id, ad_name, clips, _render,
+        parallel_cap=config_app.OMNI_MAX_PARALLEL,
+        log_kind="avatar_omni", log_prefix=f"Animation Avatar IA « {ad_name} »",
         set_status=(only_clip_id is None),
         on_update=on_update,
     )

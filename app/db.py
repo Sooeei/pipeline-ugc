@@ -96,13 +96,17 @@ CREATE TABLE IF NOT EXISTS voice_meta (
 # Colonnes ajoutées après coup : on les crée sur les bases existantes (ALTER si absentes).
 # SQLite n'a pas « ADD COLUMN IF NOT EXISTS » → on inspecte PRAGMA table_info.
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
-    "ads": [("kind", "TEXT NOT NULL DEFAULT 'avatar'")],
+    "ads": [
+        ("kind", "TEXT NOT NULL DEFAULT 'avatar'"),
+        ("voice_profile", "TEXT"),            # JSON : fiche voix Avatar IA (Omni)
+    ],
     "clips": [
         ("prompt_image", "TEXT"),
         ("image_path", "TEXT"),
         ("duration_s", "INTEGER DEFAULT 5"),  # durée du clip (Mashup / Kling)
         ("refs_needed", "TEXT"),              # JSON : types de réfs utiles à ce plan (jalon 2b)
         ("is_anchor", "INTEGER DEFAULT 0"),   # image validée = ancre de cohérence (jalon 2c)
+        ("interaction_id", "TEXT"),           # id de l'interaction Google Omni (Avatar IA)
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
@@ -322,6 +326,16 @@ def set_ad_status(ad_id: int, status: str) -> None:
         con.close()
 
 
+def set_ad_voice_profile(ad_id: int, voice_profile_json: str) -> None:
+    """Enregistre la fiche voix (JSON) d'une pub Avatar IA (Omni)."""
+    con = connect()
+    try:
+        con.execute("UPDATE ads SET voice_profile=? WHERE id=?", (voice_profile_json, ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
 def get_ad(ad_id: int) -> dict[str, Any] | None:
     con = connect()
     try:
@@ -397,7 +411,7 @@ def list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]:
 _ALLOWED_CLIP_COLS = {
     "scene_n", "script", "motion_prompt", "prompt_image", "image_path",
     "wav_path", "mp4_path", "status", "error", "duration_s",
-    "refs_needed", "is_anchor",
+    "refs_needed", "is_anchor", "interaction_id",
 }
 
 

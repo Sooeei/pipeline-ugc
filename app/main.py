@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
             "heygen_api_key_set": bool(s.get("heygen_api_key", "").strip()),
             "openrouter_api_key_set": bool(s.get("openrouter_api_key", "").strip()),
             "xai_api_key_set": bool(s.get("xai_api_key", "").strip()),
+            "gemini_api_key_set": bool(s.get("gemini_api_key", "").strip()),
             "anthropic_api_key_set": bool(s.get("anthropic_api_key", "").strip()),
             "gradium_model": s.get("gradium_model", config_app.DEFAULT_GRADIUM_MODEL),
             "heygen_voice_id": s.get("heygen_voice_id", ""),
@@ -164,6 +165,10 @@ def create_app() -> FastAPI:
         xai_key = prov._clean_key(body.xai_api_key)
         if xai_key:
             db.set_setting("xai_api_key", xai_key)
+        # Avatar IA (Omni) : clé Google (Gemini), nettoyée pareil (vide = garder).
+        gemini_key = prov._clean_key(body.gemini_api_key)
+        if gemini_key:
+            db.set_setting("gemini_api_key", gemini_key)
         if body.anthropic_api_key.strip():
             db.set_setting("anthropic_api_key", body.anthropic_api_key.strip())
 
@@ -176,11 +181,13 @@ def create_app() -> FastAPI:
             "[REGLAGES] reçu: "
             f"openrouter={_m(body.openrouter_api_key)} xai={_m(body.xai_api_key)} "
             f"gradium={_m(body.gradium_api_key)} heygen={_m(body.heygen_api_key)} "
-            f"anthropic={_m(body.anthropic_api_key)} | "
+            f"anthropic={_m(body.anthropic_api_key)} gemini={_m(body.gemini_api_key)} | "
             f"écrit: openrouter={'OUI' if openrouter_key else 'NON (gardé)'} "
-            f"xai={'OUI' if xai_key else 'NON (gardé)'} | "
+            f"xai={'OUI' if xai_key else 'NON (gardé)'} "
+            f"gemini={'OUI' if gemini_key else 'NON (gardé)'} | "
             f"DB après: openrouter_set={bool((db.get_setting('openrouter_api_key') or '').strip())} "
-            f"xai_set={bool((db.get_setting('xai_api_key') or '').strip())}",
+            f"xai_set={bool((db.get_setting('xai_api_key') or '').strip())} "
+            f"gemini_set={bool((db.get_setting('gemini_api_key') or '').strip())}",
             flush=True,
         )
         # La voix Gradium est gérée par label via /api/voices (comme les avatars).
@@ -418,6 +425,7 @@ def create_app() -> FastAPI:
         nano_banana = prov.nano_banana_check(cfg)
         grok = prov.grok_check(cfg)
         kling = prov.kling_check(cfg)
+        gemini = prov.omni_check(cfg)
         anthropic_res = brain.anthropic_check(cfg)
         return {
             "dry_run": cfg.dry_run,
@@ -426,6 +434,7 @@ def create_app() -> FastAPI:
             "nano_banana": nano_banana,
             "grok": grok,
             "kling": kling,
+            "gemini": gemini,
             "anthropic": anthropic_res,
         }
 
@@ -592,42 +601,11 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         cfg = load_provider_config()
         shots = _parse_shots(shots_json)
-
-        # Confirmation coûts : les images Nano Banana peuvent être payantes au-delà du quota gratuit.
-        if not cfg.dry_run and not confirm:
-            raise HTTPException(400, "Confirmation requise avant de générer des images.")
-        if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
-            raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
-
-        ad_id = db.create_ad(ad_name, "", _json(shots), kind="objet")
-        ref_paths = await _save_ref_images(ad_id, ad_name, files, _parse_ref_kinds(ref_kinds))
-
-        job_shots: list[dict[str, Any]] = []
-        for s in shots:
-            # script = DIALOGUE du plan (verbatim, éditable) ; motion_prompt + prompt_image.
-            rn = s.get("refs_needed")
-            clip_id = db.create_clip(
-                ad_id, int(s["n"]), str(s.get("dialogue", "")),
-                str(s["prompt_motion"]), prompt_image=str(s["prompt_image"]),
-                refs_needed=_json(rn) if isinstance(rn, list) else "",
-            )
-            job_shots.append({
-                "clip_id": clip_id, "n": int(s["n"]),
-                "prompt_image": s["prompt_image"], "refs_needed": rn,
-            })
-
-        # SÉQUENTIEL (option 1) : on ne génère QUE le Plan 1 (il définit le personnage). Les plans
-        # suivants restent « en_attente » et se génèrent APRÈS validation du Plan 1, à partir de
-        # son image (bouton « Générer les plans suivants » → /api/objet/consistency).
-        first_only = job_shots[:1]
-        job = jobs.manager.start(
-            cfg, ad_id, ad_name, first_only, "",
-            output_mode="objet_images", ref_paths=ref_paths,
+        # script = DIALOGUE du plan (verbatim, éditable) ; motion_prompt + prompt_image.
+        return await _start_plan_images(
+            cfg, "objet", ad_name, shots, files, ref_kinds, confirm,
+            clip_script=lambda s: str(s.get("dialogue", "")),
         )
-        return {
-            "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
-            "plans_total": len(job_shots), "generated_now": len(first_only),
-        }
 
     @app.post("/api/objet/regenerate-image/{clip_id}")
     def objet_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
@@ -715,6 +693,183 @@ def create_app() -> FastAPI:
         db.update_clip(clip_id, script=body.text)
         return {"ok": True}
 
+    # -------------------------------------------------- AVATAR IA (Omni : Nano Banana → Google Omni)
+    @app.post("/api/avatar-omni/plan")
+    def avatar_omni_plan(body: AvatarOmniPlanIn) -> dict[str, Any]:
+        """Découpe le script VERBATIM en plans ≤ MAX_WORDS (débit de la fiche voix) + visuels
+        d'une personne UGC. Estimation sur les VRAIES durées Omni de chaque dialogue."""
+        cfg = load_provider_config()
+        profile = config_app.normalize_voice_profile(body.voice_profile)
+        wps = config_app.voice_words_per_sec(profile)
+        try:
+            result = brain.generate_avatar_omni_plan(
+                cfg, body.script, persona=body.persona, product=body.product,
+                ambiance=body.ambiance, manual=body.manual, words_per_sec=wps,
+            )
+        except brain.BrainProviderError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except brain.BrainError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        for s in result["shots"]:
+            s["duration_s"] = config_app.omni_clip_seconds(s.get("dialogue", ""), wps)
+        result["estimate"] = _omni_estimate([s.get("dialogue", "") for s in result["shots"]], wps)
+        result["dry_run"] = cfg.dry_run
+        db.log_activity("avatar_omni", f"Plan Avatar IA : {len(result['shots'])} plans.")
+        return result
+
+    @app.post("/api/avatar-omni/estimate")
+    def avatar_omni_estimate(body: AvatarOmniEstimateIn) -> dict[str, Any]:
+        wps = config_app.voice_words_per_sec(body.voice_profile)
+        return _omni_estimate([str(s.get("dialogue") or "") for s in body.shots], wps)
+
+    @app.post("/api/avatar-omni/generate-images")
+    async def avatar_omni_generate_images(
+        ad_name: str = Form("avatar"),
+        shots_json: str = Form(...),
+        confirm: bool = Form(False),
+        ref_kinds: str = Form(""),
+        voice_profile: str = Form(""),
+        files: list[UploadFile] = File(default=[]),
+    ) -> dict[str, Any]:
+        """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
+        validation. La fiche voix est normalisée et ENREGISTRÉE dès maintenant (même voix partout)."""
+        cfg = load_provider_config()
+        shots = _parse_avatar_omni_shots(shots_json)
+        profile_json = _json(config_app.normalize_voice_profile(voice_profile))
+        return await _start_plan_images(
+            cfg, "avatar_omni", ad_name, shots, files, ref_kinds, confirm,
+            clip_script=lambda s: str(s.get("dialogue", "")),
+            on_ad=lambda aid: db.set_ad_voice_profile(aid, profile_json),
+        )
+
+    @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
+    def avatar_omni_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
+        return _regenerate_image(
+            clip_id, body, "avatar_omni", "un « Avatar IA »", allow_prompt_edit=True,
+        )
+
+    @app.post("/api/avatar-omni/validate/{clip_id}")
+    def avatar_omni_validate(clip_id: int, body: ValidateIn) -> dict[str, Any]:
+        return _set_clip_validation(clip_id, body.valide)
+
+    @app.post("/api/avatar-omni/dialogue/{clip_id}")
+    def avatar_omni_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
+        """Édite le DIALOGUE d'un plan (ce que la personne dit) — VERBATIM, jamais modifié. Renvoie
+        la nouvelle durée Omni et un avertissement si le dialogue dépasse MAX_WORDS."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        if (db.get_ad(int(clip["ad_id"])) or {}).get("kind") != "avatar_omni":
+            raise HTTPException(400, "Ce plan n'appartient pas à un « Avatar IA ».")
+        _check_voiceover_len(body.text, what="Texte", hint="")
+        db.update_clip(clip_id, script=body.text)
+        wps = config_app.voice_words_per_sec((db.get_ad(int(clip["ad_id"])) or {}).get("voice_profile"))
+        max_words = config_app.omni_max_words(wps)
+        warning = brain.omni_dialogue_warning(int(clip["scene_n"]), body.text, max_words, "dialogue")
+        return {
+            "ok": True, "duration_s": config_app.omni_clip_seconds(body.text, wps),
+            "max_words": max_words, "warning": warning or "",
+        }
+
+    @app.post("/api/avatar-omni/consistency/{ad_id}")
+    def avatar_omni_consistency(ad_id: int, body: AnimateIn) -> dict[str, Any]:
+        """Génère les AUTRES plans à partir du Plan 1 VALIDÉ (ou de l'ancre) : même personne."""
+        return _run_consistency(
+            ad_id, body, "avatar_omni",
+            "Avatar IA introuvable.",
+            "Valide d'abord le Plan 1 (la personne) avant de générer les plans suivants.",
+        )
+
+    @app.post("/api/avatar-omni/resume/{ad_id}")
+    def avatar_omni_resume(ad_id: int, body: AnimateIn) -> dict[str, Any]:
+        """Reprend un Avatar IA : relance uniquement les plans en échec (images ou animation)."""
+        return _resume_ad(ad_id, body, "avatar_omni")
+
+    @app.get("/api/avatar-omni/ad/{ad_id}")
+    def avatar_omni_ad(ad_id: int) -> dict[str, Any]:
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(404, "Pub introuvable.")
+        profile = config_app.normalize_voice_profile(ad.get("voice_profile"))
+        wps = config_app.voice_words_per_sec(profile)
+        max_words = config_app.omni_max_words(wps)
+        resp = _ad_shots_response(
+            ad_id,
+            lambda c: {
+                "dialogue": c.get("script") or "",
+                "duration_s": config_app.omni_clip_seconds(c.get("script") or "", wps),
+            },
+        )
+        resp["warnings"] = [
+            w for s in resp["shots"]
+            if (w := brain.omni_dialogue_warning(int(s["n"]), s["dialogue"], max_words, "dialogue"))
+        ]
+        resp["max_words"] = max_words
+        resp["voice_profile"] = profile
+        resp["voice_sheet"] = config_app.voice_sheet(profile)
+        resp["voice_locked"] = any(s["status"] == "pret" for s in resp["shots"])
+        return resp
+
+    @app.patch("/api/avatar-omni/voice/{ad_id}")
+    def avatar_omni_voice(ad_id: int, body: VoiceProfileIn) -> dict[str, Any]:
+        """Modifie la fiche voix. VERROUILLÉE dès qu'un clip est animé (« pret ») : `force` =
+        déverrouillage explicite (les clips déjà faits garderont l'ancienne voix)."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(400, "Avatar IA introuvable.")
+        locked = any(c.get("status") == "pret" for c in db.clips_for_ad(ad_id))
+        if locked and not body.force:
+            raise HTTPException(
+                409,
+                "Fiche voix verrouillée : des clips sont déjà animés avec cette voix. "
+                "Déverrouille-la pour la modifier (les clips déjà faits auront une autre voix).",
+            )
+        profile = config_app.normalize_voice_profile(body.voice_profile)
+        db.set_ad_voice_profile(ad_id, _json(profile))
+        return {
+            "ok": True, "voice_profile": profile,
+            "voice_sheet": config_app.voice_sheet(profile), "voice_locked": locked,
+        }
+
+    @app.post("/api/avatar-omni/animate/{ad_id}")
+    def avatar_omni_animate(ad_id: int, body: AvatarOmniAnimateIn) -> dict[str, Any]:
+        """Anime les plans validés via Google Omni (vidéo + VOIX + lip-sync). `clip_id` optionnel
+        → n'anime QUE ce plan (« Tester ce plan »). Confirmation de coût avant un run réel."""
+        cfg = load_provider_config()
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(400, "Avatar IA introuvable.")
+        clips = db.clips_for_ad(ad_id)
+        if body.clip_id is not None:
+            candidates = [
+                c for c in clips
+                if int(c["id"]) == int(body.clip_id)
+                and c.get("image_path")
+                and c.get("status") in ("valide", "echec", "pret")
+            ]
+            if not candidates:
+                raise HTTPException(400, "Valide ce plan avant de le tester.")
+        else:
+            candidates = _animatable_clips(clips)
+            if not candidates:
+                raise HTTPException(400, "Aucun plan validé à animer (valide d'abord les images).")
+        if not cfg.dry_run and not body.confirm:
+            raise HTTPException(400, "Confirmation requise avant d'animer (coût Google Omni).")
+        if not cfg.dry_run and not (cfg.gemini_api_key or "").strip():
+            raise HTTPException(400, "Clé API Google (Gemini) manquante (Réglages).")
+        est = _omni_clips_estimate(ad, candidates)
+        _check_spend_cap(cfg, est["usd_video"], body.confirm_over_cap)
+        anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
+        job = jobs.manager.start(
+            cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="avatar_omni_animate",
+            only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
+        )
+        return {
+            "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
+            "n_plans": len(candidates), "usd_video": est["usd_video"],
+            "seconds_total": est["seconds_total"], "tier1_warning": est["tier1_warning"],
+        }
+
     @app.post("/api/objet/consistency/{ad_id}")
     def objet_consistency(ad_id: int, body: AnimateIn) -> dict[str, Any]:
         """Uniformise le personnage : régénère les AUTRES plans à partir du Plan 1 VALIDÉ
@@ -761,37 +916,13 @@ def create_app() -> FastAPI:
         """Génère le Plan 1 (Nano Banana) — SÉQUENTIEL : les autres via /consistency après validation."""
         cfg = load_provider_config()
         shots = _parse_mashup_shots(shots_json)
-        if not cfg.dry_run and not confirm:
-            raise HTTPException(400, "Confirmation requise avant de générer des images.")
-        if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
-            raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
-
-        ad_id = db.create_ad(ad_name, "", _json(shots), kind="mashup")
-        ref_paths = await _save_ref_images(ad_id, ad_name, files, _parse_ref_kinds(ref_kinds))
-
-        job_shots: list[dict[str, Any]] = []
-        for s in shots:
-            rn = s.get("refs_needed")
-            clip_id = db.create_clip(
-                ad_id, int(s["n"]), "",  # script vide : Mashup n'a AUCUNE voix
-                str(s["prompt_motion"]), prompt_image=str(s["prompt_image"]),
-                refs_needed=_json(rn) if isinstance(rn, list) else "",
-            )
-            db.update_clip(clip_id, duration_s=config_app.clamp_mashup_seconds(s.get("duration_s")))
-            job_shots.append({
-                "clip_id": clip_id, "n": int(s["n"]),
-                "prompt_image": s["prompt_image"], "refs_needed": rn,
-            })
-
-        first_only = job_shots[:1]  # SÉQUENTIEL : Plan 1 seulement (fixe le style/perso)
-        job = jobs.manager.start(
-            cfg, ad_id, ad_name, first_only, "",
-            output_mode="objet_images", ref_paths=ref_paths, character_ref="",
+        return await _start_plan_images(
+            cfg, "mashup", ad_name, shots, files, ref_kinds, confirm,
+            clip_script=lambda s: "",  # script vide : Mashup n'a AUCUNE voix
+            on_clip=lambda cid, s: db.update_clip(
+                cid, duration_s=config_app.clamp_mashup_seconds(s.get("duration_s"))
+            ),
         )
-        return {
-            "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
-            "plans_total": len(job_shots), "generated_now": len(first_only),
-        }
 
     @app.post("/api/mashup/regenerate-image/{clip_id}")
     def mashup_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
@@ -935,12 +1066,12 @@ def create_app() -> FastAPI:
         # Les pubs audio (voix seules / voix off) ne sont pas des vidéos → hors bibliothèque.
         # On filtre par kind="audio" (robuste même en cours/échec) ET par statut terminal
         # (rétro-compat avec les anciennes bases où kind valait « avatar »).
-        # Objet/Mashup n'entrent en Bibliothèque vidéo qu'une fois animés (au moins un clip prêt).
+        # Objet/Mashup/Avatar IA n'entrent en Bibliothèque vidéo qu'une fois animés (≥ 1 clip prêt).
         ads = [
             a for a in db.list_ads_with_clips()
-            if a.get("kind") in ("avatar", "objet", "mashup")
+            if a.get("kind") in ("avatar", "objet", "mashup", "avatar_omni")
             and a.get("status") not in ("voix_seules", "voix_off")
-            and not (a.get("kind") in ("objet", "mashup") and not _has_video(a))
+            and not (a.get("kind") in ("objet", "mashup", "avatar_omni") and not _has_video(a))
         ]
         for ad in ads:
             for clip in ad["clips"]:
@@ -949,11 +1080,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/photos")
     def photos() -> dict[str, Any]:
-        """Galerie PHOTOS : toutes les images générées (Objet animé + Mashup), groupées par pub,
+        """Galerie PHOTOS : toutes les images générées (Objet animé, Mashup, Avatar IA), par pub,
         avec le clip vidéo correspondant s'il existe. Lecture seule des clips qui ont une image."""
         out: list[dict[str, Any]] = []
         for a in db.list_ads_with_clips():
-            if a.get("kind") not in ("objet", "mashup"):
+            if a.get("kind") not in ("objet", "mashup", "avatar_omni"):
                 continue
             images = [
                 {
@@ -970,7 +1101,7 @@ def create_app() -> FastAPI:
             if images:
                 out.append({
                     "id": a["id"], "name": a["name"], "created_at": a["created_at"],
-                    "status": a["status"], "images": images,
+                    "status": a["status"], "kind": a.get("kind"), "images": images,
                 })
         return {"ads": out}
 
@@ -1142,6 +1273,7 @@ class SettingsIn(BaseModel):
     heygen_api_key: str = ""
     openrouter_api_key: str = ""
     xai_api_key: str = ""
+    gemini_api_key: str = ""   # Avatar IA (Omni) — clé Google AI Studio
     gradium_model: str = ""
     heygen_voice_id: str = ""
     anthropic_api_key: str = ""
@@ -1278,6 +1410,31 @@ class AnchorIn(BaseModel):
     is_anchor: bool = True        # marque ce plan validé comme ancre de cohérence (jalon 2c)
 
 
+class AvatarOmniPlanIn(BaseModel):
+    script: str = ""        # texte VERBATIM que la personne dit (découpé, jamais réécrit)
+    persona: str = ""       # brief / persona / cible : guide la personne et le ton (visuel)
+    product: str = ""       # produit (optionnel, visuel)
+    ambiance: str = ""
+    manual: bool = False    # True = je découpe moi-même (blocs séparés par ligne vide / « --- »)
+    voice_profile: dict[str, Any] = {}   # fiche voix (débit → MAX_WORDS et durées)
+
+
+class AvatarOmniEstimateIn(BaseModel):
+    shots: list[dict[str, Any]] = []     # [{dialogue}]
+    voice_profile: dict[str, Any] = {}
+
+
+class VoiceProfileIn(BaseModel):
+    voice_profile: dict[str, Any] = {}
+    force: bool = False     # déverrouillage explicite (des clips sont déjà animés)
+
+
+class AvatarOmniAnimateIn(BaseModel):
+    confirm: bool = False
+    confirm_over_cap: bool = False   # confirmation explicite du dépassement du plafond de dépense
+    clip_id: int | None = None   # None = tous les plans validés ; sinon « Tester ce plan »
+
+
 # ------------------------------------------------------------------ util
 def _validate_scenes(scenes: list[dict[str, Any]]) -> None:
     """Valide et normalise les scènes en place : script présent, n entier et unique."""
@@ -1316,13 +1473,16 @@ def _media_url(mp4_path: str | None) -> str | None:
     return "/media/" + str(rel).replace("\\", "/")
 
 
-def _check_voiceover_len(script: str) -> None:
-    """Garde d'entrée : un script démesuré ferait trop de segments (à découper en plusieurs pubs)."""
+def _check_voiceover_len(
+    script: str, what: str = "Script", hint: str = "Découpe-le en plusieurs voix off.",
+) -> None:
+    """Garde d'entrée : un script démesuré ferait trop de segments (à découper en plusieurs pubs).
+    `what`/`hint` adaptent le message (ex. dialogue d'un plan Avatar IA : message neutre)."""
     if len(script) > brain.MAX_SCRIPT_CHARS:
         raise HTTPException(
             400,
-            f"Script trop long ({len(script)} caractères, max {brain.MAX_SCRIPT_CHARS}). "
-            "Découpe-le en plusieurs voix off.",
+            f"{what} trop long ({len(script)} caractères, max {brain.MAX_SCRIPT_CHARS})."
+            + (f" {hint}" if hint else ""),
         )
 
 
@@ -1373,6 +1533,18 @@ def _parse_shots(shots_json: str) -> list[dict[str, Any]]:
     )
 
 
+def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
+    """Plans « Avatar IA (Omni) ». dialogue = ce que la personne DIT, stocké VERBATIM (Omni fait
+    voix + lip-sync) ; refs_needed conservé."""
+    return _parse_shot_list(
+        shots_json, "Plan Avatar IA",
+        lambda n, pi, pm, s: _with_refs_needed({
+            "n": n, "prompt_image": pi, "prompt_motion": pm,
+            "dialogue": str(s.get("dialogue", "")).strip(),
+        }, s),
+    )
+
+
 def _with_refs_needed(shot: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """Conserve les types de réfs du plan reçu (normalisés, filtrés sur _REF_KINDS) → le clip est
     créé avec son `refs_needed`. Absent/illisible → clé absente (le plan reçoit toutes les réfs)."""
@@ -1383,8 +1555,8 @@ def _with_refs_needed(shot: dict[str, Any], raw: dict[str, Any]) -> dict[str, An
 
 
 def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Plans qu'une animation (objet) va traiter : validés + échecs précédents, avec image —
-    exactement la sélection du pipeline (les plans « pret » ne sont jamais réanimés)."""
+    """Plans qu'une animation (objet / avatar IA) va traiter : validés + échecs précédents, avec
+    image — exactement la sélection des pipelines (les plans « pret » ne sont jamais réanimés)."""
     return [c for c in clips if c.get("image_path") and c.get("status") in ("valide", "echec")]
 
 
@@ -1396,6 +1568,19 @@ def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any
     return cost.estimate_grok_video(
         [str(c.get("script") or "") for c in clips], pace["words_per_sec"]
     )
+
+
+def _omni_estimate(dialogues: list[str], words_per_sec: float) -> dict[str, Any]:
+    """Estimation Avatar IA sur les VRAIES durées Omni de chaque dialogue (fiche voix)."""
+    return cost.estimate_avatar_omni(
+        [config_app.omni_clip_seconds(d, words_per_sec) for d in dialogues]
+    )
+
+
+def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimation Omni des plans à animer, avec la fiche voix TELLE QUE STOCKÉE sur la pub."""
+    wps = config_app.voice_words_per_sec(ad.get("voice_profile"))
+    return _omni_estimate([str(c.get("script") or "") for c in clips], wps)
 
 
 def _norm_currency(value: str) -> str:
@@ -1432,6 +1617,56 @@ def _parse_mashup_shots(shots_json: str) -> list[dict[str, Any]]:
             "duration_s": config_app.clamp_mashup_seconds(s.get("duration_s")),
         }, s),
     )
+
+
+async def _start_plan_images(
+    cfg: Any, kind: str, ad_name: str, shots: list[dict[str, Any]],
+    files: list[UploadFile], ref_kinds: str, confirm: bool, *,
+    clip_script: Callable[[dict[str, Any]], str],
+    on_clip: Callable[[int, dict[str, Any]], None] | None = None,
+    on_ad: Callable[[int], None] | None = None,
+) -> dict[str, Any]:
+    """Commun Objet / Mashup / Avatar IA : contrôles (confirmation, clé OpenRouter), création de la
+    pub + des clips (refs_needed conservé), sauvegarde des réfs typées, puis job image du Plan 1
+    SEULEMENT (il fixe le personnage/la personne ; les suivants via /consistency après validation).
+    `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type."""
+    # Confirmation coûts : les images Nano Banana peuvent être payantes au-delà du quota gratuit.
+    if not cfg.dry_run and not confirm:
+        raise HTTPException(400, "Confirmation requise avant de générer des images.")
+    if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+        raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
+
+    ad_id = db.create_ad(ad_name, "", _json(shots), kind=kind)
+    if on_ad is not None:
+        on_ad(ad_id)
+    ref_paths = await _save_ref_images(ad_id, ad_name, files, _parse_ref_kinds(ref_kinds))
+
+    job_shots: list[dict[str, Any]] = []
+    for s in shots:
+        rn = s.get("refs_needed")
+        clip_id = db.create_clip(
+            ad_id, int(s["n"]), clip_script(s),
+            str(s["prompt_motion"]), prompt_image=str(s["prompt_image"]),
+            refs_needed=_json(rn) if isinstance(rn, list) else "",
+        )
+        if on_clip is not None:
+            on_clip(clip_id, s)
+        job_shots.append({
+            "clip_id": clip_id, "n": int(s["n"]),
+            "prompt_image": s["prompt_image"], "refs_needed": rn,
+        })
+
+    # SÉQUENTIEL : on ne génère QUE le Plan 1. Les plans suivants restent « en_attente » et se
+    # génèrent APRÈS validation du Plan 1, à partir de son image (« Générer les plans suivants »).
+    first_only = job_shots[:1]
+    job = jobs.manager.start(
+        cfg, ad_id, ad_name, first_only, "",
+        output_mode="objet_images", ref_paths=ref_paths, character_ref="",
+    )
+    return {
+        "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
+        "plans_total": len(job_shots), "generated_now": len(first_only),
+    }
 
 
 _REF_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -1536,7 +1771,7 @@ def _ad_shots_response(
 def _regenerate_image(
     clip_id: int, body: RegenerateIn, kind: str, kind_label: str, *, allow_prompt_edit: bool,
 ) -> dict[str, Any]:
-    """Régénère l'image d'UN plan (objet/mashup) : relance un job image sur ce seul clip.
+    """Régénère l'image d'UN plan (objet/mashup/avatar IA) : relance un job image sur ce seul clip.
 
     `allow_prompt_edit` (objet) : honore un prompt_image édité par l'utilisateur s'il est non
     vide ; sinon (mashup, ou édition vide) on réutilise le prompt_image existant du clip.
@@ -1550,7 +1785,7 @@ def _regenerate_image(
         raise HTTPException(400, f"Ce plan n'appartient pas à {kind_label}.")
     if not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
-    # Cohérence : la référence (ancre, sinon 1er plan validé/animé) est passée en 1re image SI
+    # Cohérence : la référence (ancre validée sinon 1er plan validé) est passée en 1re image SI
     # elle existe et n'est pas le plan régénéré (le préfixe de cohérence dépend du kind, pipeline).
     ref = _consistency_ref(db.clips_for_ad(int(ad["id"])))
     character_ref = str(ref["image_path"]) if ref and int(ref["id"]) != clip_id else ""
@@ -1590,7 +1825,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         raise HTTPException(400, "Aucun plan en échec à reprendre.")
     img_fail = [c for c in echec if not c.get("image_path")]
 
-    # --- Phase IMAGE : régénérer les images échouées (les deux pipelines passent par Nano Banana).
+    # --- Phase IMAGE : régénérer les images échouées (tous les pipelines passent par Nano Banana).
     if img_fail:
         if not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise (régénérer des images coûte des crédits).")
@@ -1622,6 +1857,11 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
             raise HTTPException(400, "Clé API xAI (Grok) manquante (Réglages).")
         est = _grok_video_estimate(cfg, to_anim)["usd_video"]   # vraies durées Grok
         mode = "objet_animate"
+    elif kind == "avatar_omni":
+        if not cfg.dry_run and not (cfg.gemini_api_key or "").strip():
+            raise HTTPException(400, "Clé API Google (Gemini) manquante (Réglages).")
+        est = _omni_clips_estimate(ad, to_anim)["usd_video"]    # vraies durées Omni
+        mode = "avatar_omni_animate"
     else:
         if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
             raise HTTPException(400, "Clé API OpenRouter (Kling) manquante (Réglages).")
@@ -1689,7 +1929,8 @@ def _set_clip_validation(clip_id: int, valide: bool) -> dict[str, Any]:
 def _consistency_ref(clips: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Plan de référence pour uniformiser / régénérer / reprendre : l'ANCRE choisie (jalon 2c) si
     elle a une image, sinon le premier plan VALIDÉ ou déjà ANIMÉ (« pret ») avec image, par numéro
-    (typiquement le Plan 1). « pret » compte : une fois le Plan 1 animé, il reste la référence."""
+    (typiquement le Plan 1). « pret » compte : une fois le Plan 1 animé, il reste la référence.
+    La sélection vit dans pipeline (partagée avec l'animation Avatar IA)."""
     return pipeline.consistency_ref(clips, statuses=("valide", "pret"))
 
 

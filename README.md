@@ -3,8 +3,10 @@
 Application **locale** (Windows) qui fabrique des pubs vidéo verticales 9:16. Interface simple
 en 5 sections : Tableau de bord, Nouvelle pub, Bibliothèque, Coûts, Réglages.
 
-**5 types de pub :**
+**6 types de pub :**
 - **Avatar** (HeyGen) — un avatar parle ton script.
+- **Avatar IA (Omni)** (Nano Banana → Google Gemini Omni) — une personne UGC générée dit ton
+  script face caméra (voix + lip-sync générés par Google). 🇫🇷 voix FR expérimentale.
 - **Objet animé** (Nano Banana → Grok) — un produit devient un personnage qui parle.
 - **Mashup IA** (Nano Banana → Kling/Veo) — b-roll ultra-réaliste, sans voix.
 - **Voix off** — juste une voix off (Gradium) à partir d'un script.
@@ -37,9 +39,37 @@ décoche « simulation ».
 | **HeyGen** | les vidéos avatar (crédits) | HeyGen → Settings → API |
 | **OpenRouter** | images (Nano Banana) + vidéos mashup (Kling/Veo) | openrouter.ai |
 | **xAI (Grok)** | animation « objet » (voix + lip-sync) | x.ai |
+| **Google (Gemini)** | « Avatar IA (Omni) » : vidéo + voix + lip-sync | aistudio.google.com (tier **payant**) |
 
 Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Anthropic + Gradium + HeyGen
 pour l'avatar). Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
+
+---
+
+## Avatar IA (Omni) — Google Gemini Omni
+
+Une personne UGC **photoréaliste générée** (jamais une vraie personne) dit ton script face caméra.
+Chaque plan = une image Nano Banana (OpenRouter) animée par **Google Omni** (`gemini-omni-1.1-flash`),
+qui génère la **voix et le lip-sync** dans la même passe.
+
+- **Clé** : Google AI Studio (aistudio.google.com → *Get API key*), à coller dans **Réglages →
+  Clé API Google (Gemini)**. Le **tier PAYANT est obligatoire** (la vidéo Omni n'est pas dans le
+  quota gratuit) : active la facturation sur le projet Google Cloud de la clé.
+- **Coût** : **0,10 $ par seconde** de vidéo en 720p (voix incluse). Un plan dure le temps de dire
+  son dialogue + 1 s de respiration, entre 3 et 10 s (≈ 22 mots max par plan au débit naturel).
+  L'estimation affichée avant l'animation se base sur ces vraies durées.
+- **Plafond Google (Tier 1)** : environ **10 $ par tranche de 10 min**. Au-delà, Google bloque
+  temporairement (erreur « trop de requêtes ») : attends quelques minutes puis **« Reprendre »**
+  relance uniquement les plans en échec. L'app prévient quand une animation dépasse 10 $.
+- **🇫🇷 Voix FR expérimentale** : Google n'évalue officiellement que l'anglais. Si Google refuse
+  la langue, l'app te le dit (réessaie, ou teste en anglais).
+- **Restrictions Google** : les **personnes mineures** sont refusées (Europe/Suisse/UK) et
+  **certaines personnes reconnaissables** sont refusées partout → l'app génère toujours un adulte
+  au visage générique ; si un plan est bloqué, régénère son image.
+- **Fiche voix** (genre, âge, accent, timbre, débit) : enregistrée dès le Plan 1 et utilisée à
+  l'identique sur tous les plans. Elle est **verrouillée après le 1er clip animé** ; le bouton
+  « Déverrouiller » permet de la changer, mais les clips déjà faits garderont l'ancienne voix.
+- Conseil : commence par **« Tester ce plan »** sur un seul plan avant d'animer toute la pub.
 
 ---
 

@@ -142,6 +142,11 @@ class JobManager:
                     summary = pipeline.animate_mashup_clips(
                         cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
                     )
+                elif output_mode == "avatar_omni_animate":
+                    # « Avatar IA (Omni) » — animation Google Omni (voix + lip-sync natifs) → clips.
+                    summary = pipeline.animate_avatar_omni_clips(
+                        cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
+                    )
                 else:
                     summary = pipeline.generate_ad(
                         cfg, ad_id, ad_name, scenes, avatar_id,

@@ -1,5 +1,6 @@
 """Encapsulation des fournisseurs : Gradium (voix), HeyGen (vidéo avatar),
-Nano Banana / OpenRouter (images), Grok / xAI et Kling / OpenRouter (animation).
+Nano Banana / OpenRouter (images), Grok / xAI et Kling / OpenRouter (animation),
+Google Gemini Omni (Avatar IA : vidéo + voix).
 
 Tout est paramétré par les réglages (DB) et pilotable en MODE SIMULATION (dry_run)
 pour tout tester sans clé et sans crédit.
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,6 +77,7 @@ class ProviderConfig:
     heygen_api_key: str = ""
     openrouter_api_key: str = ""  # Nano Banana via OpenRouter (images « Objet animé »)
     xai_api_key: str = ""         # Grok Imagine / xAI (animation « Objet animé »)
+    gemini_api_key: str = ""      # Google Gemini Omni (vidéo + voix « Avatar IA »)
     objet_image_model: str = config_app.DEFAULT_OBJET_IMAGE_MODEL  # modèle image Nano Banana
     objet_video_model: str = config_app.DEFAULT_OBJET_VIDEO_MODEL  # modèle vidéo Grok
     mashup_video_model: str = config_app.DEFAULT_MASHUP_VIDEO_MODEL  # modèle vidéo Kling (Mashup)
@@ -109,6 +112,7 @@ _PROVIDER_ACCOUNT = {
     "OpenRouter": "OpenRouter",
     "xAI": "xAI (Grok)",
     "Anthropic": "Anthropic (Claude)",
+    "Google": "Google (Gemini)",
 }
 
 
@@ -1021,6 +1025,325 @@ def kling_check(cfg: ProviderConfig) -> dict:
     except Exception as exc:  # noqa: BLE001
         _log_detail(f"OpenRouter/Kling check : {exc}")
         return {"ok": False, "message": _friendly_network("OpenRouter", exc)}
+
+
+# ============================================================ GOOGLE OMNI (Avatar IA : vidéo + voix)
+# API Gemini « interactions » : POST {OMNI_API_BASE}/interactions (header x-goog-api-key), appel
+# DIRECT synchrone (pas de background). Entrée = image du plan (FIRST_FRAME) + ancre optionnelle
+# (IMAGE_REF_0) + prompt texte. La vidéo (voix + lip-sync natifs) revient dans steps[].content[]
+# {type:"video"} : soit `data` (base64), soit `uri` (fichier à sonder puis télécharger).
+# ⚠️ Blocages Google (langue, mineurs, personne reconnaissable, filtres) → messages FR dédiés.
+_OMNI_MSG_LANGUAGE = (
+    "Google a refusé la langue du dialogue (le français n'est pas encore garanti sur Omni) — "
+    "réessaie ou teste en anglais."
+)
+_OMNI_MSG_MINOR = "Google refuse les personnes mineures en Europe — régénère avec un adulte."
+_OMNI_MSG_LIKENESS = (
+    "Google a bloqué ce plan : le visage ressemble à une personne réelle reconnaissable — "
+    "régénère l'image du plan avec un visage plus générique."
+)
+_OMNI_MSG_SAFETY = "Google a bloqué ce plan (filtres de sécurité) — reformule le visuel ou le dialogue."
+_OMNI_MINOR_RE = re.compile(r"\b(minors?|child|children|underage|kids?)\b", re.IGNORECASE)
+_OMNI_LIKENESS_RE = re.compile(
+    r"\b(recogni[sz]able|real[\s_-]+persons?|public[\s_-]+figures?|celebrit(?:y|ies)|likeness)\b",
+    re.IGNORECASE,
+)
+_OMNI_BLOCK_CODES = (
+    "safety", "prohibited_content", "image_safety", "image_prohibited_content", "spii",
+    "blocklist", "recitation", "image_recitation", "image_other", "content_blocked",
+)
+_OMNI_BLOCK_RE = re.compile(
+    r"(?<![a-z])(" + "|".join(sorted(_OMNI_BLOCK_CODES, key=len, reverse=True)) + r")(?![a-z])",
+    re.IGNORECASE,
+)
+_OMNI_FAILED_STATUSES = ("failed", "incomplete", "cancelled", "canceled")
+
+
+def _omni_block_message(code: Any, message: Any) -> str | None:
+    """Message FR d'un blocage Google Omni reconnu (code et/ou message, insensible à la casse),
+    sinon None (l'appelant choisit alors le message générique)."""
+    c = str(code or "").strip().lower()
+    m = str(message or "")
+    text = f"{c} {m}"
+    lang_msg = "language" in m.lower() and "support" in m.lower()   # « unsupported language »…
+    if re.search(r"(?<![a-z])language(?![a-z])", c) or lang_msg:
+        return _OMNI_MSG_LANGUAGE
+    # Codes Google du type CHILD_SAFETY / RECOGNIZABLE_PERSON : « _ » et « - » → espace, sinon
+    # \b ne sépare pas les mots (le « _ » est un caractère de mot pour les regex).
+    words = re.sub(r"[_-]+", " ", text.lower())
+    if _OMNI_MINOR_RE.search(words):
+        return _OMNI_MSG_MINOR
+    if _OMNI_LIKENESS_RE.search(words):
+        return _OMNI_MSG_LIKENESS
+    if c in _OMNI_BLOCK_CODES or _OMNI_BLOCK_RE.search(text):
+        return _OMNI_MSG_SAFETY
+    return None
+
+
+def _omni_file_id(uri: str) -> str:
+    """Id du fichier Google dans une URI « …/files/<id>:download?alt=media » ("" si absent)."""
+    mt = re.search(r"files/([^/:?]+)", uri or "")
+    return mt.group(1) if mt else ""
+
+
+def _omni_image_part(path: str | Path) -> dict[str, Any]:
+    """Image → part `{type:image, data:<b64>, mime_type}`. PNG/JPEG envoyés tels quels ; tout
+    autre format (ex. webp) est converti en PNG EN MÉMOIRE (Pillow) avant l'encodage."""
+    import base64
+    import io
+
+    p = Path(path)
+    raw = p.read_bytes()
+    ext = p.suffix.lower()
+    if ext == ".png" and raw[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif ext in (".jpg", ".jpeg") and raw[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    else:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as im:
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+        raw = buf.getvalue()
+        mime = "image/png"
+    return {"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mime_type": mime}
+
+
+def _omni_body(
+    prompt: str,
+    image_parts: list[dict[str, Any]],
+    seconds: int,
+    model_value: str = config_app.OMNI_MODEL,
+) -> dict[str, Any]:
+    """Corps de POST /interactions : images (plan puis ancre, 2 max) + prompt ; sortie vidéo 9:16."""
+    response_format: dict[str, Any] = {
+        "type": "video",
+        "aspect_ratio": config_app.ASPECT_RATIO,
+        "resolution": config_app.OMNI_RESOLUTION,
+        "delivery": "uri",
+    }
+    if config_app.OMNI_SEND_DURATION:
+        response_format["duration"] = f"{int(seconds)}s"
+    parts = list(image_parts[: config_app.OMNI_MAX_INPUT_IMAGES])
+    parts.append({"type": "text", "text": prompt})
+    return {
+        "model": model_value,
+        "input": parts,
+        "response_format": response_format,
+        "store": False,
+    }
+
+
+def _omni_extract_video(data: Any) -> tuple[bytes | None, str | None]:
+    """Parcourt steps[].content[] et renvoie (octets mp4, None) si `data` base64, (None, uri) si
+    livraison par URI, (None, None) si aucune vidéo."""
+    import base64
+    import binascii
+
+    if not isinstance(data, dict):
+        return None, None
+    steps = data.get("steps") or data.get("outputs") or []
+    if isinstance(steps, dict):
+        steps = [steps]
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        content = step.get("content")
+        items = content if isinstance(content, list) else [content] if isinstance(content, dict) else [step]
+        for item in items:
+            if not isinstance(item, dict) or str(item.get("type", "")).lower() != "video":
+                continue
+            b64 = item.get("data")
+            if isinstance(b64, str) and b64:
+                try:
+                    return base64.b64decode(b64), None
+                except (binascii.Error, ValueError):
+                    continue
+            uri = item.get("uri")
+            if isinstance(uri, str) and uri:
+                return None, uri
+    return None, None
+
+
+def _omni_errors_message(errors: Any) -> str | None:
+    """1er message de blocage reconnu dans `errors[]` (sinon None)."""
+    for err in errors if isinstance(errors, list) else []:
+        if isinstance(err, dict):
+            msg = _omni_block_message(err.get("code"), err.get("message"))
+            if msg:
+                return msg
+    return None
+
+
+def _omni_http_error(r: requests.Response, what: str) -> ProviderError:
+    """HTTP ≥ 400 → ProviderError FR (blocage reconnu sinon `_friendly_http`). Corps → app.log."""
+    _log_detail(f"Google Omni {what} {r.status_code} : {r.text[:400]}")
+    code: Any = ""
+    message: Any = ""
+    try:
+        err = (r.json() or {}).get("error") or {}
+        if isinstance(err, dict):
+            code = f"{err.get('code') or ''} {err.get('status') or ''}".strip()
+            message = err.get("message") or ""
+    except Exception:  # noqa: BLE001 - corps non JSON
+        pass
+    return ProviderError(_omni_block_message(code, message) or _friendly_http("Google", r.status_code))
+
+
+def _omni_download_file(uri: str, key: str, out_mp4: str) -> None:
+    """Vidéo livrée par URI : sonde GET /files/{id} jusqu'à ACTIVE, puis télécharge le mp4
+    (header clé). Tout le réseau est encadré : seules des ProviderError remontent."""
+    import time
+
+    headers = {"x-goog-api-key": key}
+    file_id = _omni_file_id(uri)
+    download_url = uri
+    if file_id:
+        download_url = f"{config_app.OMNI_API_BASE}/files/{file_id}:download?alt=media"
+        t0 = time.time()
+        while True:
+            try:
+                s = requests.get(
+                    f"{config_app.OMNI_API_BASE}/files/{file_id}", headers=headers, timeout=60
+                )
+            except Exception as exc:  # noqa: BLE001 - réseau
+                _log_detail(f"Google Omni statut fichier réseau : {exc}")
+                raise ProviderError(_friendly_network("Google", exc)) from exc
+            if s.status_code >= 400:
+                raise _omni_http_error(s, "statut fichier")
+            try:
+                info = s.json() or {}
+            except ValueError:
+                info = {}
+            if isinstance(info.get("file"), dict):
+                info = info["file"]
+            state = str(info.get("state") or "").upper()
+            if state in ("ACTIVE", ""):
+                break
+            if state == "FAILED":
+                _log_detail(f"Google Omni fichier FAILED : {str(info.get('error') or '')[:200]}")
+                raise ProviderError("La vidéo Google Omni n'a pas pu être finalisée — réessaie.")
+            if time.time() - t0 > config_app.OMNI_POLL_TIMEOUT:
+                _log_detail(f"Google Omni délai dépassé (fichier {file_id})")
+                raise ProviderError("La vidéo Google Omni met trop de temps — réessaie plus tard.")
+            time.sleep(config_app.OMNI_POLL_EVERY)
+    try:
+        with requests.get(download_url, headers=headers, stream=True, timeout=300) as d:
+            if d.status_code >= 400:
+                raise _omni_http_error(d, "téléchargement")
+            Path(out_mp4).parent.mkdir(parents=True, exist_ok=True)
+            with open(out_mp4, "wb") as f:
+                for chunk in d.iter_content(1 << 16):
+                    f.write(chunk)
+    except ProviderError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - réseau / écriture
+        _log_detail(f"Google Omni téléchargement : {exc}")
+        raise ProviderError(_friendly_network("Google", exc)) from exc
+
+
+def omni_generate_video(
+    cfg: ProviderConfig,
+    image_path: str | Path,
+    prompt: str,
+    out_mp4: str | Path,
+    seconds: int,
+    anchor_path: str | Path = "",
+    model_value: str = config_app.OMNI_MODEL,
+    label: str = "",
+    index: int = 0,
+) -> dict[str, str]:
+    """Anime l'IMAGE validée du plan AVEC voix + lip-sync (Google Omni) → .mp4.
+
+    Renvoie {"path", "interaction_id"}. Simulation : placeholder + id « SIMU_OMNI_<n> ».
+    Réel : POST /interactions synchrone (timeout OMNI_REQUEST_TIMEOUT), puis vidéo base64 ou URI.
+    Pas de relance automatique (429 → message « attends un instant »).
+    """
+    out_mp4 = str(out_mp4)
+    if cfg.dry_run:
+        path = media.make_placeholder_mp4(
+            out_mp4, seconds=2.0, label=f"SIMULATION omni {label} {index + 1}".strip()
+        )
+        return {"path": path, "interaction_id": f"SIMU_OMNI_{index + 1}"}
+
+    key = _clean_key(cfg.gemini_api_key)
+    if not key:
+        raise ProviderError("Clé API Google (Gemini) manquante — ajoute-la dans Réglages.")
+
+    try:
+        parts = [_omni_image_part(image_path)]
+    except Exception as exc:  # noqa: BLE001 - fichier absent / illisible
+        _log_detail(f"Google Omni image du plan illisible : {exc}")
+        raise ProviderError("Image du plan introuvable ou illisible — régénère l'image du plan.") from exc
+    if anchor_path and str(anchor_path) != str(image_path) and Path(anchor_path).is_file():
+        try:
+            parts.append(_omni_image_part(anchor_path))
+        except Exception as exc:  # noqa: BLE001 - ancre illisible : on continue sans
+            _log_detail(f"Google Omni ancre ignorée (illisible) : {exc}")
+    body = _omni_body(prompt, parts, seconds, model_value)
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+
+    try:
+        r = requests.post(
+            f"{config_app.OMNI_API_BASE}/interactions", headers=headers, json=body,
+            timeout=config_app.OMNI_REQUEST_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 - réseau
+        _log_detail(f"Google Omni réseau : {exc}")
+        raise ProviderError(_friendly_network("Google", exc)) from exc
+    if r.status_code >= 400:
+        raise _omni_http_error(r, "interaction")
+    try:
+        data = r.json()
+    except ValueError as exc:
+        _log_detail(f"Google Omni réponse non JSON : {r.text[:300]}")
+        raise ProviderError(_OMNI_MSG_SAFETY) from exc
+    if not isinstance(data, dict):
+        data = {}
+    interaction_id = str(data.get("id") or "")
+
+    status = str(data.get("status") or "").lower()
+    if status in _OMNI_FAILED_STATUSES:
+        _log_detail(f"Google Omni {status} ({interaction_id}) : {str(data.get('errors'))[:400]}")
+        raise ProviderError(_omni_errors_message(data.get("errors")) or _OMNI_MSG_SAFETY)
+
+    video, uri = _omni_extract_video(data)
+    if video is None and not uri:
+        _log_detail(f"Google Omni aucune vidéo ({interaction_id}) : {str(data)[:300]}")
+        raise ProviderError(_omni_errors_message(data.get("errors")) or _OMNI_MSG_SAFETY)
+    if video is not None:
+        try:
+            Path(out_mp4).parent.mkdir(parents=True, exist_ok=True)
+            with open(out_mp4, "wb") as f:
+                f.write(video)
+        except OSError as exc:
+            _log_detail(f"Google Omni écriture mp4 : {exc}")
+            raise ProviderError("Impossible d'enregistrer la vidéo sur le disque — réessaie.") from exc
+    else:
+        _omni_download_file(str(uri), key, out_mp4)
+    return {"path": out_mp4, "interaction_id": interaction_id}
+
+
+def omni_check(cfg: ProviderConfig) -> dict:
+    """Valide la clé Google (Gemini) sur le modèle Omni. Simulation : OK simulé."""
+    if cfg.dry_run:
+        return {"ok": True, "simulation": True, "message": "Simulation : clé non vérifiée."}
+    key = _clean_key(cfg.gemini_api_key)
+    if not key:
+        return {"ok": False, "message": "Aucune clé Google (Gemini) enregistrée (Réglages)."}
+    try:
+        r = _request_with_retries(
+            "GET", f"{config_app.OMNI_API_BASE}/models/{config_app.OMNI_MODEL}",
+            service="Google", headers={"x-goog-api-key": key},
+        )
+        if r.status_code < 400:
+            return {"ok": True, "simulation": False, "message": "Clé Google (Gemini) acceptée."}
+        _log_detail(f"Google check {r.status_code} : {r.text[:200]}")
+        return {"ok": False, "message": _friendly_http("Google", r.status_code)}
+    except Exception as exc:  # noqa: BLE001
+        _log_detail(f"Google check : {exc}")
+        return {"ok": False, "message": _friendly_network("Google", exc)}
 
 
 # ============================================================ util

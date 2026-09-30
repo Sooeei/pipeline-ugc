@@ -16,6 +16,7 @@ def load_provider_config() -> ProviderConfig:
         heygen_api_key=s.get("heygen_api_key", ""),
         openrouter_api_key=s.get("openrouter_api_key", ""),
         xai_api_key=s.get("xai_api_key", ""),
+        gemini_api_key=s.get("gemini_api_key", ""),
         objet_image_model=s.get("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL),
         objet_video_model=s.get("objet_video_model", config_app.DEFAULT_OBJET_VIDEO_MODEL),
         mashup_video_model=s.get("mashup_video_model", config_app.DEFAULT_MASHUP_VIDEO_MODEL),

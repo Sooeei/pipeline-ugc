@@ -224,6 +224,7 @@ label.check input { width: auto; margin: 0; }
 .photo .meta { padding: 8px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .photo .meta .vid { margin-left: auto; }
 .photo .small { font-size: 12px; }
+.muted.small { font-size: 12px; }
 .photo .pi { padding: 0 10px 10px; }
 .photo .pi summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .photo .pi-text { margin-top: 6px; font-size: 12px; color: var(--text); white-space: pre-wrap; max-height: 160px; overflow: auto; }
@@ -412,3 +413,30 @@ label.check input { width: auto; margin: 0; }
 .obj-shot .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .obj-shot .actions .btn { padding: 6px 10px; font-size: 13px; }
 .objet-phase2-note { margin-top: 14px; opacity: .8; }
+/* ---------- Avatar IA (Omni) ---------- */
+.style-badge {
+  display: inline-block; margin-top: 6px; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--warn); color: var(--warn);
+}
+.ao-flag { color: var(--warn); font-weight: 600; }
+.voice-sheet {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin: 6px 0 10px;
+}
+@media (max-width: 900px) { .voice-sheet { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ao-voice-block { margin: 12px 0; }
+.ao-voice-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.voice-lock { font-size: 12px; color: var(--muted); }
+.voice-lock.on { color: var(--warn); font-weight: 600; }
+.voice-lock.warn { color: var(--warn); }
+#aoVoiceSheet { font-style: italic; margin-bottom: 6px; }
+.ao-warnings {
+  margin: 10px 0; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid var(--warn); background: var(--panel-2); font-size: 13px;
+}
+.ao-warnings .ao-w-title { color: var(--warn); font-weight: 600; margin-bottom: 4px; }
+.ao-warnings ul { margin: 4px 0 6px 18px; padding: 0; }
+.ao-tier1 { margin-top: 8px; color: var(--warn); font-size: 13px; }
+.obj-shot .ao-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.obj-shot .ao-dur { color: var(--muted); }
+.obj-shot .ao-meta .dl { font-size: 12px; }
+.obj-shot .ao-err { font-size: 12px; color: var(--err); }

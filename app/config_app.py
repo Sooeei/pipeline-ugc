@@ -428,6 +428,113 @@ def mashup_cost_per_second(model_key: str) -> float:
     """Taux $/s estimé du modèle choisi (indicatif — usage.cost réel est prioritaire)."""
     return mashup_model_cfg(model_key)["cost_per_second_usd"]
 
+
+# ---------- Pipeline « Avatar IA (Omni) » (images Nano Banana + vidéo+voix Google Gemini Omni) ----------
+# Animation image→vidéo AVEC voix + lip-sync natifs via l'API Gemini « interactions » (clé Google
+# AI Studio, tier payant). Bloc SÉPARÉ : aucune entrée dans OBJET_VIDEO_MODELS (Grok seul).
+OMNI_MODEL = "gemini-omni-1.1-flash"   # GA (gemini-omni-flash-preview arrêté le 30/09/2026)
+OMNI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+OMNI_MIN_CLIP_SECONDS = 3
+OMNI_MAX_CLIP_SECONDS = 10
+OMNI_INTRO_SECONDS = 1                 # respiration muette avant la 1re réplique ([0-1s])
+OMNI_SILENT_CLIP_SECONDS = 4           # durée d'un plan sans dialogue
+OMNI_COST_PER_SECOND_USD = 0.10        # 720p (vidéo + voix)
+OMNI_MAX_PARALLEL = 2
+OMNI_RESOLUTION = "720p"
+OMNI_REQUEST_TIMEOUT = 600             # s — appel direct synchrone (pas de mode background)
+OMNI_POLL_EVERY = 5                    # s — sondage du fichier vidéo (livraison par URI)
+OMNI_POLL_TIMEOUT = 600
+OMNI_SEND_DURATION = False             # response_format.duration non documenté → non envoyé
+OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
+OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min (avertissement UI)
+OMNI_DEFAULT_ACCENT = "natural French accent from France"
+OMNI_DEFAULT_CAMERA = (
+    "Vertical 9:16 handheld smartphone UGC shot with subtle natural camera movement"
+)
+OMNI_INTRO_GESTURE = "The person looks into the lens with a small natural breath and a slight smile"
+_VOICE_TEXT_MAX = 120                  # longueur max d'un champ texte de la fiche voix
+
+
+def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
+    """Durée d'un clip Omni : temps naturel pour dire le dialogue + respiration d'intro, borné
+    [OMNI_MIN, OMNI_MAX]. Sans dialogue → OMNI_SILENT_CLIP_SECONDS."""
+    import math
+
+    words = len((dialogue or "").split())
+    if not words:
+        return OMNI_SILENT_CLIP_SECONDS
+    wps = words_per_sec or GROK_WORDS_PER_SEC
+    secs = math.ceil(words / wps) + OMNI_INTRO_SECONDS
+    return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
+
+
+def omni_max_words(words_per_sec: float | None = None) -> int:
+    """Nb de mots max d'un plan Omni (clip de 10 s moins l'intro), ex. 9 × 2,5 = 22."""
+    import math
+
+    wps = words_per_sec or GROK_WORDS_PER_SEC
+    return math.floor((OMNI_MAX_CLIP_SECONDS - OMNI_INTRO_SECONDS) * wps)
+
+
+def _voice_text(value: Any) -> str:
+    """Champ texte de fiche voix : sans guillemets droits, espaces normalisés, ≤ 120 car."""
+    s = " ".join(str(value or "").replace('"', "").split())
+    return s[:_VOICE_TEXT_MAX].strip()
+
+
+def normalize_voice_profile(raw: Any) -> dict[str, str]:
+    """Fiche voix Omni validée (dict ou JSON) : clés inconnues → défauts, textes tronqués.
+
+    Structure : {gender, age, accent, tone (clé GROK_VOICE_STYLES), pace (clé GROK_VOICE_PACES), extra}.
+    """
+    import json
+
+    data: Any = raw
+    if isinstance(raw, str | bytes):
+        try:
+            data = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    gender = str(data.get("gender") or "").strip().lower()
+    tone = str(data.get("tone") or "").strip()
+    pace = str(data.get("pace") or "").strip()
+    return {
+        "gender": gender if gender in ("female", "male") else "",
+        "age": _voice_text(data.get("age")),
+        "accent": _voice_text(data.get("accent")) or OMNI_DEFAULT_ACCENT,
+        "tone": tone if tone in GROK_VOICE_STYLES else DEFAULT_GROK_VOICE_STYLE,
+        "pace": pace if pace in GROK_VOICE_PACES else DEFAULT_GROK_VOICE_PACE,
+        "extra": _voice_text(data.get("extra")),
+    }
+
+
+def voice_words_per_sec(profile: Any) -> float:
+    """Débit (mots/s) de la fiche voix (clé `pace`)."""
+    p = normalize_voice_profile(profile)
+    return GROK_VOICE_PACES[p["pace"]]["words_per_sec"]
+
+
+def voice_sheet(profile: Any) -> str:
+    """Description DÉTERMINISTE de la voix insérée dans le prompt Omni (même voix sur tous les plans).
+
+    = timbre + genre/âge + accent + débit (+ précision libre)."""
+    p = normalize_voice_profile(profile)
+    parts = [GROK_VOICE_STYLES[p["tone"]]["tone"]]
+    speaker = {"female": "a female speaker", "male": "a male speaker"}.get(p["gender"], "a speaker")
+    if p["age"]:
+        speaker += f" around {p['age']} years old"
+    parts.append(f" of {speaker}")
+    accent = p["accent"]
+    if not accent.lower().startswith(("a ", "an ", "the ")):
+        accent = f"a {accent}"
+    parts.append(f", with {accent}")
+    parts.append(", speaking " + GROK_VOICE_PACES[p["pace"]]["directive"])
+    if p["extra"]:
+        parts.append(", " + p["extra"])
+    return "".join(parts)
+
 # En mode simulation, on ne touche à aucune API et on ne dépense aucun crédit.
 # Par défaut ON (True) tant que les vraies clés n'ont pas été testées.
 DEFAULT_DRY_RUN = True

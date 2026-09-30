@@ -8,8 +8,10 @@ Contraintes fortes :
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 from . import config_app, cost, providers
@@ -181,6 +183,11 @@ RÈGLES :
 - Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises :
   {"shots":[{"n":1,"prompt_image":"...","prompt_motion":"...","dialogue":"..."}]}
 """
+
+
+# Appel Claude « plan » ou « visuels » injectable dans les boucles de relance communes
+# (signature : cfg, product_name, ambiance, script|segments, persona=, attempt=).
+BrainCallFn = Callable[..., list[dict[str, Any]]]
 
 
 class BrainError(RuntimeError):
@@ -550,7 +557,10 @@ def _batches(items: list[Any], size: int) -> list[list[Any]]:
 def _manual_visuals_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, segments: list[str],
     persona: str = "", max_attempts: int = _BRAIN_MAX_ATTEMPTS,
+    call: BrainCallFn | None = None,
 ) -> list[dict[str, Any]]:
+    """Visuels du mode MANUEL (dialogues fournis). `call` = appel Claude propre au pipeline
+    (objet par défaut ; Avatar IA Omni fournit le sien) — mêmes relances, mêmes sous-lots."""
     if not cfg.anthropic_api_key:
         raise BrainError("Clé Anthropic manquante (Réglages).")
     # DÉCOUPAGE INTERNE : le cerveau ne rend pas 40 plans en un JSON fiable → on traite par
@@ -558,23 +568,24 @@ def _manual_visuals_with_retry(
     out: list[dict[str, Any]] = []
     for batch in _batches(segments, config_app.BRAIN_SHOTS_PER_BATCH):
         out.extend(
-            _one_visuals_batch_with_retry(cfg, product_name, ambiance, batch, persona, max_attempts)
+            _one_visuals_batch_with_retry(
+                cfg, product_name, ambiance, batch, persona, max_attempts, call=call
+            )
         )
     return out
 
 
 def _one_visuals_batch_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, segments: list[str],
-    persona: str, max_attempts: int,
+    persona: str, max_attempts: int, call: BrainCallFn | None = None,
 ) -> list[dict[str, Any]]:
+    fn = call or _call_claude_manual_visuals  # résolu à l'appel (monkeypatch des tests OK)
     last_err = ""
     for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
-            return _call_claude_manual_visuals(
-                cfg, product_name, ambiance, segments, persona=persona, attempt=attempt
-            )
+            return fn(cfg, product_name, ambiance, segments, persona=persona, attempt=attempt)
         except _BrainRetryable as exc:  # JSON illisible/incomplet / sans visuels → on relance
             last_err = str(exc)
             continue
@@ -644,7 +655,10 @@ def _call_claude_manual_visuals(
 def _generate_plan_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
     persona: str = "", max_attempts: int = _BRAIN_MAX_ATTEMPTS,
+    call: BrainCallFn | None = None,
 ) -> list[dict[str, Any]]:
+    """Découpage AUTO verbatim (script → plans). `call` = appel Claude propre au pipeline (objet
+    par défaut ; Avatar IA Omni fournit le sien) — mêmes tranches, relances et garde-fou."""
     if not cfg.anthropic_api_key:
         raise BrainError("Clé Anthropic manquante (Réglages).")
     # DÉCOUPAGE INTERNE (cap 40) : un script long donnerait un JSON trop gros/tronqué. On le coupe
@@ -653,28 +667,31 @@ def _generate_plan_with_retry(
     sentences = _split_script_ideas(script, per_group=1)
     per_chunk = max(1, config_app.BRAIN_SHOTS_PER_BATCH * 2)  # ~2 phrases/plan → ≤ batch plans
     if len(sentences) <= per_chunk:
-        return _one_plan_batch_with_retry(cfg, product_name, ambiance, script, persona, max_attempts)
+        return _one_plan_batch_with_retry(
+            cfg, product_name, ambiance, script, persona, max_attempts, call=call
+        )
     out: list[dict[str, Any]] = []
     for chunk in _batches(sentences, per_chunk):
         out.extend(
-            _one_plan_batch_with_retry(cfg, product_name, ambiance, " ".join(chunk), persona, max_attempts)
+            _one_plan_batch_with_retry(
+                cfg, product_name, ambiance, " ".join(chunk), persona, max_attempts, call=call
+            )
         )
     return out
 
 
 def _one_plan_batch_with_retry(
     cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
-    persona: str, max_attempts: int,
+    persona: str, max_attempts: int, call: BrainCallFn | None = None,
 ) -> list[dict[str, Any]]:
+    fn = call or _call_claude_plan  # résolu à l'appel (monkeypatch des tests OK)
     last_err = ""
     last_verbatim = False
     for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
-            shots = _call_claude_plan(
-                cfg, product_name, ambiance, script, persona=persona, attempt=attempt
-            )
+            shots = fn(cfg, product_name, ambiance, script, persona=persona, attempt=attempt)
         except _BrainRetryable as exc:  # JSON illisible/incomplet / sans plans → on relance
             last_err, last_verbatim = str(exc), False
             continue
@@ -919,6 +936,365 @@ def generate_mashup_plan(
             "ou fais plusieurs séries."
         )
     return {"ad": _slug(brief), "shots": shots, "ratio": ratio}
+
+
+# ============================================================ AVATAR IA (Omni : Nano Banana → Google Omni)
+# Une PERSONNE UGC photoréaliste (générée, jamais réelle) parle face caméra : chaque plan = une
+# image fixe (Nano Banana) animée par Google Omni qui génère la VOIX + le LIP-SYNC dans la même
+# passe. Un clip Omni dure au plus OMNI_MAX_CLIP_SECONDS → chaque dialogue ≤ {{MAX_WORDS}} mots.
+AVATAR_OMNI_SYSTEM_PROMPT = """\
+Tu es directeur artistique ET monteur de pubs UGC. On te donne un SCRIPT (le texte EXACT que la
+personne doit dire face caméra), éventuellement une PERSONA / CIBLE, un PRODUIT et une AMBIANCE.
+Tu écris un PLAN DE TOURNAGE pour une pub vidéo verticale 9:16 : chaque plan est d'abord une IMAGE
+fixe photoréaliste d'une personne UGC, puis animée en un clip où cette personne PARLE (la voix et
+le lip-sync sont générés ensemble, un clip dure AU PLUS 10 secondes).
+
+⚠️ RÈGLE ABSOLUE — DÉCOUPAGE VERBATIM DU SCRIPT (la plus importante) :
+- Tu DÉCOUPES le SCRIPT, tu ne le RÉÉCRIS JAMAIS. Le champ "dialogue" de chaque plan doit être
+  un EXTRAIT LITTÉRAL, MOT POUR MOT, du SCRIPT fourni — pas un résumé, pas une reformulation,
+  pas une phrase inventée. N'ajoute, ne retire, ne modifie AUCUN mot, AUCUNE ponctuation (y
+  compris les tournures familières/québécoises et ce qui ressemble à des fautes).
+- La CONCATÉNATION de tous les "dialogue", dans l'ordre, doit reconstituer EXACTEMENT le SCRIPT
+  d'origine (mêmes mots, même ponctuation, mêmes accents). C'est vérifié automatiquement : si
+  ça ne correspond pas au mot près, ta réponse est REJETÉE.
+- LONGUEUR MAX PAR PLAN : chaque "dialogue" fait AU PLUS {{MAX_WORDS}} mots (c'est ce qu'une
+  personne dit naturellement en un clip de 10 s). Coupe UNIQUEMENT entre des phrases ENTIÈRES,
+  jamais au milieu d'une phrase. Si UNE phrase seule dépasse {{MAX_WORDS}} mots, elle reste SEULE
+  dans son plan (ne la coupe pas, ne la raccourcis pas : elle sera signalée à l'utilisateur).
+- REGROUPE par IDÉE dans cette limite : un plan = une ou plusieurs phrases entières qui forment
+  un même moment (le hook, le problème, la découverte du produit, le bénéfice, l'appel à
+  l'action…). Évite les plans d'une seule phrase très courte, sauf le hook ou un moment fort.
+  Ne crée un nouveau plan que quand l'idée change OU que la limite de {{MAX_WORDS}} mots
+  l'impose. Garde l'ordre du script.
+
+RÈGLE ABSOLUE — LA PERSONNE (sécurité + cohérence) :
+- Une personne UGC PHOTORÉALISTE, ADULTE (clairement majeure, 25 ans ou plus en apparence), au
+  visage GÉNÉRIQUE et ordinaire, crédible comme une vraie créatrice/un vrai créateur de contenu.
+- JAMAIS une personne réelle, célèbre ou reconnaissable (pas de nom de star, d'influenceur, de
+  personnage public, pas de « qui ressemble à … »), JAMAIS un enfant ni un adolescent, même si le
+  script ou la persona en parle (reste sur l'adulte qui parle face caméra).
+- COHÉRENCE : c'est la MÊME personne dans TOUS les plans. Décris-la avec la MÊME courte
+  description physique (âge approximatif, cheveux, tenue) répétée à l'identique dans chaque
+  "prompt_image" ; seuls le cadrage, la pose et l'action changent.
+- La PERSONA / CIBLE guide le choix de la personne (âge, style, univers) et le ton, le PRODUIT et
+  l'AMBIANCE guident le décor et la lumière — n'écris JAMAIS ces champs tels quels comme du texte à
+  afficher, ce sont des GUIDES de style.
+
+Pour CHAQUE plan, tu écris deux prompts EN ANGLAIS :
+- "prompt_image" : l'image fixe du plan. Structure conseillée : « Photorealistic vertical 9:16
+  smartphone UGC video frame: [cadrage] of [description de la personne, identique partout],
+  [pose/action, regard caméra], [décor réel cohérent avec l'ambiance], [lumière naturelle],
+  realistic skin texture, authentic handheld UGC look, no text, no captions, no watermark ».
+  VARIE LES CADRAGES d'un plan à l'autre (ne répète pas deux fois de suite le même) : face cam
+  serrée (close-up, visage et épaules), plan taille (medium waist-up shot), produit en main (la
+  personne tient le produit près du visage ou de la poitrine, bien visible), et rarement un B-roll
+  du produit (gros plan produit / mains) — réservé à un dialogue court, la personne parle alors
+  hors champ. Quand la personne est à l'image, son VISAGE et sa BOUCHE sont bien visibles et
+  nets (elle va parler, lip-sync). AUCUN texte, sous-titre, logo inventé ou watermark à l'image.
+- "prompt_motion" : le mouvement de la personne PENDANT QU'ELLE PARLE (image-to-video), format
+  [partie du corps] + [action] + [émotion/intensité], UN geste + UNE expression maximum, court.
+  Objectif : un vrai acteur UGC, naturel, jamais robotique. Règles impératives :
+  • FACE CAMÉRA, TOUJOURS. Corps ET visage orientés vers l'objectif, regard sur la caméra dans
+    TOUS les plans. N'écris JAMAIS de profil, trois-quarts, rotation, ni « turn », « look away »,
+    « to the side », « over the shoulder », « glance away ».
+  • PAS DE GESTES DE COMPTAGE SUR LES DOIGTS (« hold up two fingers », « count on fingers »,
+    « raise a finger »…) : les mains IA les rendent mal. Pour une énumération, reste sur
+    l'expression du visage, un léger hochement ou une posture ouverte.
+  • MAINS SOBRES. Privilégie tête, regard, épaules et expression du visage. Les gestes de mains
+    marqués sont RARES et espacés ; sur un plan produit en main, la main tient le produit
+    stable. La personne ne sur-gesticule JAMAIS.
+  • MICRO-MOUVEMENTS VARIÉS : change de micro-comportement à CHAQUE plan (léger mouvement de tête,
+    petit transfert du poids du corps, épaules qui se détendent, sourcil qui bouge, respiration
+    visible, courte pause naturelle, micro-inclinaison de la tête).
+  • N'écris PAS le clignement des yeux (déjà naturel ; l'écrire donne des clignements forcés).
+  • NE mets PAS le dialogue ici (il est fourni à part) ni de description de voix.
+- "dialogue" : l'EXTRAIT LITTÉRAL du SCRIPT pour ce plan (cf. RÈGLE ABSOLUE). Ne mets PAS de
+  guillemets autour, ne reformule pas, ne coupe pas au milieu d'une phrase.
+- "refs_needed" : les types de photos de référence utiles à CE plan, parmi "visage", "produit",
+  "decor", "style". Plan avec la personne → au moins ["visage"] (+ "produit" si le produit est à
+  l'image, + "decor"/"style" si utile). B-roll produit sans la personne → ["produit"]. Plan
+  purement décor sans personne ni produit → [].
+
+RÈGLES :
+- Progression logique (hook face cam serré → problème → produit en main → bénéfice → appel à
+  l'action), cadrages variés, même personne, même décor cohérent.
+- Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises :
+  {"shots":[{"n":1,"prompt_image":"...","prompt_motion":"...","dialogue":"...","refs_needed":["visage"]}]}
+"""
+
+# Mode MANUEL : les DIALOGUES sont déjà découpés par l'utilisateur — le cerveau ne fait QUE le visuel.
+AVATAR_OMNI_MANUAL_SYSTEM_PROMPT = """\
+Tu es directeur artistique de pubs UGC. Les DIALOGUES sont DÉJÀ découpés (fournis, un par plan) :
+tu NE les changes PAS, tu ne les répètes même pas. Pour CHAQUE plan (dans l'ORDRE), tu écris
+SEULEMENT le VISUEL d'une personne UGC qui dit ce dialogue face caméra (clip de 10 s maximum,
+repère : {{MAX_WORDS}} mots par plan au plus — ne touche pas au texte même s'il est plus long).
+LA PERSONNE : PHOTORÉALISTE, ADULTE (25 ans ou plus en apparence), visage GÉNÉRIQUE et ordinaire.
+JAMAIS une personne réelle, célèbre ou reconnaissable, JAMAIS un enfant ni un adolescent. C'est la
+MÊME personne dans TOUS les plans : répète à l'identique sa courte description physique (âge
+approximatif, cheveux, tenue) ; la PERSONA / CIBLE guide ce choix, le PRODUIT et l'AMBIANCE guident
+le décor et la lumière (ce sont des guides, jamais du texte à afficher).
+- "prompt_image" (EN ANGLAIS) : « Photorealistic vertical 9:16 smartphone UGC video frame:
+  [cadrage] of [la personne], [pose/action, regard caméra], [décor réel], [lumière naturelle],
+  realistic skin texture, authentic handheld UGC look, no text, no captions, no watermark ».
+  VARIE les cadrages d'un plan à l'autre : face cam serrée, plan taille, produit en main (bien
+  visible), rarement un B-roll produit. Visage et bouche nets quand la personne est à l'image.
+  Aucun texte, sous-titre, logo inventé ou watermark.
+- "prompt_motion" (EN ANGLAIS) : [partie du corps] + [action] + [émotion], UN geste + UNE
+  expression, court. FACE CAMÉRA TOUJOURS (jamais de profil, « turn », « look away »). Aucun
+  geste de comptage sur les doigts. Mains sobres (gestes marqués rares ; produit tenu stable).
+  Micro-mouvements VARIÉS d'un plan à l'autre (tête, épaules, sourcil, respiration, pause).
+  N'écris pas le clignement des yeux. NE mets PAS le dialogue.
+- "refs_needed" : parmi "visage", "produit", "decor", "style" — personne à l'image → au moins
+  ["visage"] ; B-roll produit → ["produit"] ; décor seul → [].
+Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
+  {"shots":[{"prompt_image":"...","prompt_motion":"...","refs_needed":["visage"]}]}
+"""
+
+# Gabarits VISUELS canned (simulation / visuel manquant, 0 token) : (prompt_image, prompt_motion,
+# refs_needed). Au moins 3 cadrages ALTERNÉS. Le DIALOGUE n'est jamais canned (segment verbatim).
+_AVATAR_OMNI_PERSON = (
+    "the same friendly adult UGC creator in their thirties with a natural, generic everyday face "
+    "(not a celebrity), shoulder-length hair and a casual outfit"
+)
+_CANNED_AVATAR_OMNI: list[tuple[str, str, list[str]]] = [
+    ("Photorealistic vertical 9:16 smartphone UGC video frame: close-up face-cam shot of {who}, "
+     "looking straight into the lens with a warm natural expression, face and mouth clearly "
+     "visible, in a real setting evoking {a}, soft natural window light, realistic skin "
+     "texture, authentic handheld UGC look, no text, no captions, no watermark.",
+     "Faces the camera the whole time; a small natural head movement and relaxed shoulders, "
+     "warm sincere expression.",
+     ["visage"]),
+    ("Photorealistic vertical 9:16 smartphone UGC video frame: medium waist-up shot of {who} "
+     "facing the camera with a relaxed open posture, in a real setting evoking {a}, soft natural "
+     "daylight, realistic skin texture, authentic handheld UGC look, no text, no captions, "
+     "no watermark.",
+     "Faces the camera; a slight weight shift and a gentle eyebrow raise for emphasis, hands "
+     "resting low and still, confident and natural.",
+     ["visage", "decor"]),
+    ("Photorealistic vertical 9:16 smartphone UGC video frame: {who} holding {p} near the chest, "
+     "the product clearly visible and facing the camera, eyes on the lens, in a real setting "
+     "evoking {a}, soft natural light, realistic skin texture, authentic handheld UGC look, "
+     "no text, no captions, no watermark.",
+     "Faces the camera and holds the product steady at chest height; a soft smile and a short "
+     "natural pause, minimal hand movement.",
+     ["visage", "produit"]),
+]
+
+
+def omni_dialogue_warning(n: int, dialogue: str, max_words: int, kind: str = "phrase") -> str | None:
+    """Avertissement FR si le dialogue d'un plan dépasse `max_words` (clip Omni de 10 s max).
+    `kind` : "phrase" (découpage auto : phrase seule trop longue), "bloc" (mode manuel : bloc
+    trop long, on ne coupe rien), "dialogue" (galerie : dialogue édité)."""
+    words = len((dialogue or "").split())
+    if words <= max_words:
+        return None
+    secs = config_app.OMNI_MAX_CLIP_SECONDS
+    head = f"Plan {n} : {words} mots (max {max_words} pour un clip de {secs} s)"
+    if kind == "bloc":
+        return (f"{head} — coupe ce bloc en deux (ligne vide) ou raccourcis-le, sinon la fin "
+                "risque d'être coupée ou dite trop vite.")
+    if kind == "dialogue":
+        return f"{head} — raccourcis ce dialogue, sinon la fin risque d'être coupée ou dite trop vite."
+    if _count_sentences(dialogue) > 1:   # le cerveau a regroupé trop de phrases dans ce plan
+        return (f"{head} — ce plan regroupe trop de phrases : relance le découpage ou passe en "
+                "découpage manuel, sinon la fin risque d'être coupée ou dite trop vite.")
+    return (f"{head} — cette phrase est trop longue pour un seul plan : raccourcis-la dans ton "
+            "script, sinon la fin risque d'être coupée ou dite trop vite.")
+
+
+def _omni_system(prompt: str, max_words: int) -> str:
+    return prompt.replace("{{MAX_WORDS}}", str(max_words))
+
+
+def _group_sentences_max_words(script: str, max_words: int) -> list[str]:
+    """Découpe VERBATIM par phrases entières, regroupées tant que le plan reste ≤ max_words mots.
+    Une phrase seule trop longue reste seule (jamais coupée). Concat == script (aux espaces près)."""
+    sentences = _split_script_ideas(script, per_group=1)
+    out: list[str] = []
+    for sent in sentences:
+        if out and len((out[-1] + " " + sent).split()) <= max_words:
+            out[-1] = out[-1] + " " + sent
+        else:
+            out.append(sent)
+    return out
+
+
+def _canned_avatar_omni_visual(
+    i: int, product: str, ambiance: str
+) -> tuple[str, str, list[str]]:
+    img, motion, refs = _CANNED_AVATAR_OMNI[i % len(_CANNED_AVATAR_OMNI)]
+    scene_amb, _ = _parse_context(ambiance)
+    amb = scene_amb or "a bright, lived-in home interior"
+    p = product.strip() or "the product"
+    return img.format(who=_AVATAR_OMNI_PERSON, a=amb, p=p), motion, list(refs)
+
+
+def _simulate_avatar_omni_plan(
+    script: str, product: str, ambiance: str, max_words: int
+) -> list[dict[str, Any]]:
+    """Plan local (simulation, 0 token) : dialogues VERBATIM regroupés ≤ max_words + visuels canned."""
+    shots: list[dict[str, Any]] = []
+    for i, seg in enumerate(_group_sentences_max_words(script, max_words)):
+        pi, pm, refs = _canned_avatar_omni_visual(i, product, ambiance)
+        shots.append({"n": i + 1, "prompt_image": pi, "prompt_motion": pm,
+                      "dialogue": seg, "refs_needed": refs})
+    return shots
+
+
+def _avatar_omni_user(product: str, ambiance: str, persona: str) -> str:
+    return (
+        f"PRODUIT (optionnel, visuel seulement) : {product.strip() or '(non précisé)'}\n"
+        f"AMBIANCE / DÉCOR (visuel seulement) : {ambiance or '(non précisé)'}\n"
+        f"PERSONA / CIBLE (choix de la personne + ton, jamais du texte) : "
+        f"{persona or '(non précisé)'}\n"
+    )
+
+
+def _call_claude_avatar_omni_plan(
+    cfg: ProviderConfig, product_name: str, ambiance: str, script: str,
+    persona: str = "", attempt: int = 0, *, max_words: int,
+) -> list[dict[str, Any]]:
+    correction = ""
+    if attempt > 0:
+        correction = (
+            "\n\n[RAPPEL] Ta sortie précédente était invalide. (1) chaque \"dialogue\" est un "
+            "extrait EXACT mot pour mot du SCRIPT et leur CONCATÉNATION est IDENTIQUE au script. "
+            f"(2) au plus {max_words} mots par plan, coupés entre des phrases entières. "
+            "Réponds UNIQUEMENT avec le JSON."
+        )
+    user = (
+        _avatar_omni_user(product_name, ambiance, persona)
+        + f"MOTS MAX PAR PLAN : {max_words}\n\n"
+        f"SCRIPT à DÉCOUPER VERBATIM (les \"dialogue\" doivent le reconstituer mot pour mot) :\n"
+        f"{script}\n\nÉcris le plan de tournage (JSON strict).{correction}"
+    )
+    return _call_claude_json(
+        cfg, system=_omni_system(AVATAR_OMNI_SYSTEM_PROMPT, max_words), user=user,
+        max_tokens=min(16000, max(4000, len(script) * 2)), result_key="shots",
+        empty_msg="réponse du modèle sans plans exploitables",
+    )
+
+
+def _call_claude_avatar_omni_visuals(
+    cfg: ProviderConfig, product_name: str, ambiance: str, segments: list[str],
+    persona: str = "", attempt: int = 0, *, max_words: int,
+) -> list[dict[str, Any]]:
+    seg_txt = "\n".join(f"[Plan {i + 1}] {seg}" for i, seg in enumerate(segments))
+    correction = (
+        "\n\n[RAPPEL] Un objet par plan, dans l'ordre, JSON strict. Ne touche pas aux dialogues."
+        if attempt > 0 else ""
+    )
+    user = (
+        _avatar_omni_user(product_name, ambiance, persona)
+        + f"\nPLANS (dialogues DÉJÀ définis, NE PAS les changer) :\n{seg_txt}\n\n"
+        f"Écris UNIQUEMENT le JSON des visuels (un objet par plan, MÊME ordre).{correction}"
+    )
+    return _call_claude_json(
+        cfg, system=_omni_system(AVATAR_OMNI_MANUAL_SYSTEM_PROMPT, max_words), user=user,
+        max_tokens=4000, result_key="shots", empty_msg="visuels manuels manquants",
+    )
+
+
+def _avatar_omni_manual_shots(
+    cfg: ProviderConfig, product: str, ambiance: str, persona: str,
+    segments: list[str], max_words: int,
+) -> list[dict[str, Any]]:
+    """Un plan par SEGMENT de l'utilisateur : visuel du cerveau (ou canned), dialogue = segment."""
+    visuals: list[dict[str, Any]] | None = None
+    if not cfg.dry_run:
+        try:
+            visuals = _manual_visuals_with_retry(
+                cfg, product, ambiance, segments, persona=persona,
+                call=functools.partial(_call_claude_avatar_omni_visuals, max_words=max_words),
+            )
+        except _BrainRetryable:
+            visuals = None  # visuels illisibles → repli canned (le dialogue reste MON texte)
+    shots: list[dict[str, Any]] = []
+    for i, seg in enumerate(segments):
+        v = visuals[i] if visuals and i < len(visuals) else {}
+        c_img, c_motion, c_refs = _canned_avatar_omni_visual(i, product, ambiance)
+        pi = str(v.get("prompt_image", "")).strip() or c_img
+        pm = str(v.get("prompt_motion", "")).strip() or c_motion
+        rn = _norm_refs_needed(v.get("refs_needed")) if v else None
+        shots.append({"n": i + 1, "prompt_image": pi, "prompt_motion": pm, "dialogue": seg,
+                      "refs_needed": rn if rn is not None else c_refs})
+    return shots
+
+
+def generate_avatar_omni_plan(
+    cfg: ProviderConfig, script: str, persona: str = "", product: str = "",
+    ambiance: str = "", manual: bool = False, words_per_sec: float | None = None,
+) -> dict[str, Any]:
+    """Plan « Avatar IA (Omni) » : {"ad", "shots":[{n, prompt_image, prompt_motion, dialogue,
+    refs_needed}], "warnings", "max_words"}.
+
+    - AUTO : le cerveau DÉCOUPE le script VERBATIM (concat == script) en plans ≤ MAX_WORDS mots
+      (MAX_WORDS = omni_max_words(débit de la fiche voix)), coupés sur des phrases entières.
+    - MANUEL : chaque bloc (ligne vide / « --- ») = un plan, rien n'est coupé ni modifié.
+    `warnings` = plans dont le dialogue dépasse MAX_WORDS. persona/produit/ambiance guident le
+    VISUEL seulement ; le nettoyage des marques ne touche jamais le dialogue."""
+    if not script.strip():
+        raise BrainError("Script vide : écris le texte que ton avatar doit dire.")
+    if len(script) > MAX_SCRIPT_CHARS:
+        raise BrainError(
+            f"Script trop long ({len(script)} caractères, max {MAX_SCRIPT_CHARS}). "
+            "Découpe-le en plusieurs pubs."
+        )
+    max_words = config_app.omni_max_words(words_per_sec)
+
+    if manual:
+        segments = _split_script_manual(script)
+        if not segments:
+            raise BrainError(
+                "Découpage manuel vide : sépare tes plans par une ligne vide (ou une ligne « --- »)."
+            )
+        if len(segments) > config_app.OBJET_MAX_SHOTS:
+            raise BrainError(
+                f"{len(segments)} plans (> {config_app.OBJET_MAX_SHOTS}). Réduis le nombre de blocs."
+            )
+        shots = _renumber_shots(
+            _avatar_omni_manual_shots(cfg, product, ambiance, persona, segments, max_words),
+            default_refs=["visage"],
+        )
+        # Garde-fou verbatim MANUEL : les dialogues des plans == MES segments, mot pour mot.
+        if [s["dialogue"] for s in shots] != segments:
+            raise BrainVerbatimError("Découpage manuel altéré (les dialogues ne sont pas mes segments).")
+        warn_kind = "bloc"
+    else:
+        if cfg.dry_run:
+            raw = _simulate_avatar_omni_plan(script, product, ambiance, max_words)
+        else:
+            raw = _generate_plan_with_retry(
+                cfg, product, ambiance, script, persona=persona,
+                call=functools.partial(_call_claude_avatar_omni_plan, max_words=max_words),
+            )
+        raw = [
+            s for s in raw
+            if str(s.get("prompt_image", "")).strip()
+            and str(s.get("prompt_motion", "")).strip()
+            and str(s.get("dialogue", "")).strip()
+        ]
+        if not raw:
+            raise BrainError("Le cerveau n'a produit aucun plan exploitable.")
+        # Rattache une phrase courte isolée au plan précédent SANS dépasser MAX_WORDS (verbatim gardé).
+        raw = _regroup_short_segments(raw, max_plan_words=max_words)
+        shots = _renumber_shots(raw, default_refs=["visage"])
+        if len(shots) > config_app.OBJET_MAX_SHOTS:
+            raise BrainError(
+                f"Script découpé en {len(shots)} plans (> {config_app.OBJET_MAX_SHOTS}). "
+                "Raccourcis le script ou fais plusieurs pubs."
+            )
+        if not dialogue_verbatim_ok(script, shots):
+            raise BrainVerbatimError(
+                "Découpage refusé : la concaténation des dialogues ne reconstitue pas ton script "
+                "à l'identique (le cerveau a modifié/inventé du texte)."
+            )
+        warn_kind = "phrase"
+    warnings = [
+        w for s in shots
+        if (w := omni_dialogue_warning(int(s["n"]), str(s["dialogue"]), max_words, warn_kind))
+    ]
+    return {"ad": _slug(script), "shots": shots, "warnings": warnings, "max_words": max_words}
 
 
 # ============================================================ GARDE-FOU VERBATIM
@@ -1254,7 +1630,12 @@ def _simulate_shooting_plan(
     return shots
 
 
-def _renumber_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _renumber_shots(
+    shots: list[dict[str, Any]], default_refs: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Renumérote + nettoie le VISUEL (marques). `default_refs` = types de réfs si le plan n'en
+    précise pas (objet vivant : « produit » ; Avatar IA Omni : « visage »)."""
+    default = list(default_refs) if default_refs is not None else ["produit"]
     out: list[dict[str, Any]] = []
     for i, s in enumerate(shots, 1):
         shot: dict[str, Any] = {
@@ -1267,7 +1648,7 @@ def _renumber_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Jalon 2b : ne pas perdre les types de réfs. Objet vivant = le personnage EST le produit
         # → défaut « produit » si le plan n'en précise pas (corrigeable par plan dans la galerie).
         rn = _norm_refs_needed(s.get("refs_needed"))
-        shot["refs_needed"] = rn if rn is not None else ["produit"]
+        shot["refs_needed"] = rn if rn is not None else list(default)
         out.append(shot)
     return out
 

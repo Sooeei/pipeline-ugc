@@ -25,6 +25,29 @@
       (audio_asset_id/audio_url, motion_prompt/custom_motion_prompt, dimension/aspect_ratio)
 - [ ] Lancer la pub complète (17 scènes)
 
+## Avatar IA (Omni) — Google Gemini Omni
+Fait ✅
+- [x] Fondations : config Omni (durées 3-10 s, 0,10 $/s 720p), provider `omni_generate_video`
+      (base64 ou URI + polling), messages de blocage FR, clé Google en Réglages + test connexion
+- [x] Cerveau : découpage VERBATIM ≤ MAX_WORDS (22/18/27 mots selon le débit), mode manuel,
+      avertissements, visuels personne UGC adulte générique
+- [x] Fiche voix (voice_profile) stockée, réutilisée partout, verrouillée après le 1er clip
+- [x] Routes `/api/avatar-omni/*`, Bibliothèque / Photos / ZIP, coûts (service « gemini »)
+- [x] Correctifs globaux §7 (refs_needed conservé, cohérence à la régénération, snapshot « clip »,
+      « illumination », estimation objet sur vraies durées Grok)
+- [x] Tests `tests/test_avatar_omni.py` (dry_run + requests mocké) — 3 bugs documentés en xfail
+
+À faire (test live — clé Google tier payant)
+- [ ] 1er test réel conseillé : **1 seul plan** (« Tester ce plan »), dialogue FR ~15 mots, 720p
+      → ≈ 7-8 s ≈ **0,70-0,80 $**
+- [ ] Valider `OMNI_SEND_DURATION` (config_app, défaut False) : la durée suit-elle bien les
+      timecodes du prompt ? Sinon essayer `response_format.duration` = True
+- [ ] Valider la forme RÉELLE des blocages Google (HTTP 400 / status failed + errors[] / sortie
+      vide, codes exacts) et ajuster `_omni_block_message` (ex. codes avec underscore, cf. xfail)
+- [ ] Comparer le coût réel (console Google) au coût estimé/enregistré (0,10 $/s)
+- [ ] Corriger les bugs xfail de `tests/test_avatar_omni.py` (référence de cohérence ignorée
+      quand les plans validés sont déjà « pret » ; codes de blocage avec underscore)
+
 ## Idées futures (non bloquantes)
 - [ ] Purge des vieux jobs en mémoire (fuite négligeable en usage local)
 - [ ] Masquer les clés dans l'UI (app 100 % locale : non bloquant)

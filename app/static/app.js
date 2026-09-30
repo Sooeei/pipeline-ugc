@@ -114,6 +114,7 @@ async function loadSettings() {
   setKeyField("openrouterKey", s.openrouter_api_key_set);
   setKeyField("xaiKey", s.xai_api_key_set);
   setKeyField("anthropicKey", s.anthropic_api_key_set);
+  if ($("geminiKey")) setKeyField("geminiKey", s.gemini_api_key_set);
   $("gradiumModel").value = s.gradium_model || "default";
   $("heygenVoiceId").value = s.heygen_voice_id || "";
   $("brainModel").value = s.brain_model || "claude-sonnet-5";
@@ -167,6 +168,7 @@ async function loadSettings() {
   fillSelect("objetVoicePace", s.objet_voice_paces, s.objet_voice_pace);
   fillSelect("objetStyle", s.objet_styles, s.objet_style);
   fillSelect("audioFormat", s.audio_formats, s.audio_format);
+  aoFillVoiceSelects();   // timbre/débit de la fiche voix « Avatar IA » (mêmes listes que Grok)
   $("dryRun").checked = !!s.dry_run;
   if ($("spendCap")) $("spendCap").value = s.spend_cap_usd ?? 25;
   setModeBadge(!!s.dry_run);
@@ -240,6 +242,7 @@ $("saveSettings").addEventListener("click", async () => {
     gradium_model: $("gradiumModel").value.trim(),
     heygen_voice_id: $("heygenVoiceId").value.trim(),
     anthropic_api_key: $("anthropicKey").value.trim(),
+    gemini_api_key: ($("geminiKey") && $("geminiKey").value.trim()) || "",   // vide = garder
     brain_model: $("brainModel").value.trim(),
     cost_mode: $("costModeDefault").value,
     objet_image_model: $("objetImageModel").value,
@@ -548,6 +551,8 @@ $("testConn").addEventListener("click", async () => {
     html += line("HeyGen", h);
     html += line("Nano Banana (images Objet animé)", nb);
     html += line("Grok (animation Objet animé)", grok);
+    if (r.kling) html += line("Kling (Mashup)", r.kling);
+    if (r.gemini) html += line("Google Gemini (Avatar IA Omni)", r.gemini);
     html += line("Anthropic (cerveau)", a);
     if (h.avatars && h.avatars.length) {
       html += `<div class="muted">${h.avatars.length} avatars trouvés sur le compte.</div>`;
@@ -652,6 +657,8 @@ function applyStyleFlow(style) {
   $("objetFlow").classList.toggle("hidden", style !== "objet_vivant");
   $("voixoffFlow").classList.toggle("hidden", style !== "voix_off");
   $("mashupFlow").classList.toggle("hidden", style !== "mashup");
+  $("avatarOmniFlow").classList.toggle("hidden", style !== "avatar_omni");
+  if (style === "avatar_omni") aoEnsureVoiceSelects();
 }
 
 // -- Étape 3 : cerveau IA --
@@ -1377,18 +1384,24 @@ function renderOverviewBanner(gallery, r, kind, adId) {
   gallery.before(banner);
 }
 
+// Segment d'URL de l'API par kind de pub (le kind « avatar_omni » est servi sous /api/avatar-omni).
+const KIND_API = { objet: "objet", mashup: "mashup", avatar_omni: "avatar-omni" };
+
 async function resumeFailedPlans(kind, adId) {
   const dryRun = currentSettings && currentSettings.dry_run;
   if (!dryRun) {
+    const omniNote = kind === "avatar_omni"
+      ? "\n\nAvatar IA : si l'animation est relancée, Google Omni facture ~0,10 $/s (quota Tier 1 : 10 $ par tranche de 10 min)."
+      : "";
     const ok = await showModal({
       title: "Reprendre les plans en échec",
-      message: "Relance UNIQUEMENT les plans en échec (les plans déjà prêts ne sont pas retouchés). Étape payante. Continuer ?",
+      message: "Relance UNIQUEMENT les plans en échec (les plans déjà prêts ne sont pas retouchés). Étape payante. Continuer ?" + omniNote,
       confirmText: "Reprendre", cancelText: "Annuler", danger: true,
     });
     if (!ok) return;
   }
   const post = (over) =>
-    api("/api/" + kind + "/resume/" + adId, {
+    api("/api/" + (KIND_API[kind] || kind) + "/resume/" + adId, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ confirm: true, confirm_over_cap: !!over }),
     });
@@ -1409,7 +1422,10 @@ async function resumeFailedPlans(kind, adId) {
     }
   }
   toast(`Reprise lancée (${res.phase === "images" ? "régénération d'images" : "animation"}, ${res.n} plan(s)).`);
-  const reload = () => (kind === "objet" ? loadObjGallery(adId) : loadMashGallery(adId));
+  const reload = () =>
+    kind === "objet" ? loadObjGallery(adId)
+    : kind === "avatar_omni" ? (loadAoGallery(adId), loadLibrary())
+    : loadMashGallery(adId);
   pollResumeJob(res.job_id, reload);
 }
 
@@ -1846,9 +1862,12 @@ async function loadLibraryVideos() {
   const avatar = r.ads.filter((a) => a.kind === "avatar");
   const objet = r.ads.filter((a) => a.kind === "objet");
   const mashup = r.ads.filter((a) => a.kind === "mashup");
+  const omni = r.ads.filter((a) => a.kind === "avatar_omni");
   renderClipAds($("libAvatarContent"), avatar, "Aucune vidéo avatar (HeyGen) pour l’instant.");
   renderClipAds($("libObjetContent"), objet, "Aucun clip objet animé (Grok) pour l’instant.");
   renderClipAds($("libMashupContent"), mashup, "Aucun clip Mashup IA pour l’instant.");
+  if ($("libAvatarOmniContent"))
+    renderClipAds($("libAvatarOmniContent"), omni, "Aucun clip Avatar IA (Omni) pour l’instant.");
 }
 
 // Voix off : pubs audio (Voix seules + Voix off) avec lecteur + téléchargement du .wav.
@@ -1889,7 +1908,7 @@ async function loadVoicesLibrary() {
 }
 
 async function loadLibTab(tab) {
-  if (tab === "avatar" || tab === "objet" || tab === "mashup") await loadLibraryVideos();
+  if (tab === "avatar" || tab === "objet" || tab === "mashup" || tab === "avatar_omni") await loadLibraryVideos();
   else if (tab === "voices") await loadVoicesLibrary();
   else if (tab === "photos") await loadPhotos();
 }
@@ -1921,7 +1940,7 @@ async function loadPhotos() {
   const root = $("photosContent");
   root.innerHTML = "";
   if (!r.ads.length) {
-    root.innerHTML = '<p class="muted">Aucune image générée pour l’instant (objet animé).</p>';
+    root.innerHTML = '<p class="muted">Aucune image générée pour l’instant (objet animé, mashup, avatar IA).</p>';
     return;
   }
   r.ads.forEach((ad) => {
@@ -1982,6 +2001,7 @@ const COST_COLORS = {
   heygen: "#f59e0b",
   gradium: "#a855f7",
   anthropic: "#ec4899",
+  gemini: "#84cc16",
 };
 const COST_COLOR_FALLBACK = ["#14b8a6", "#eab308", "#f97316", "#64748b"];
 
@@ -2817,6 +2837,706 @@ async function pollMashAnimJob(jobId) {
   }
 }
 
+// ================================================ AVATAR IA (Omni : Nano Banana -> Google Gemini Omni)
+// Une personne IA (adulte, visage générique) dit le script VERBATIM ; Omni fait vidéo + voix.
+// Préfixe d'ids « ao ». Fiche voix : « aoV* » (avant génération) et « aoEV* » (éditable en galerie).
+let aoRefsFiles = [];
+let aoRefsKinds = [];
+let aoShots = [];            // plan de tournage (réponse /plan)
+let aoAdId = null;
+let aoLastEstimate = null;   // estimation du plan (cout_omni_par_seconde_usd, …)
+let aoGalleryShots = [];     // derniers plans reçus de GET /ad (durées Omni réelles)
+let aoVoiceLocked = false;   // au moins un clip « pret » → fiche voix verrouillée
+let aoVoiceUnlocked = false; // l'utilisateur a explicitement déverrouillé (→ force:true)
+const AO_API = "/api/avatar-omni";
+const AO_DEFAULT_RATE = 0.10;        // $/s (720p) — même formule que le backend
+const AO_TIER1_USD = 10;             // quota Google Tier 1 : 10 $ / 10 min
+const AO_DEFAULT_ACCENT = "natural French accent from France";
+const AO_VOICE_FIELDS = ["Gender", "Age", "Accent", "Tone", "Pace", "Extra"];
+
+function aoRate() {
+  const r = aoLastEstimate && Number(aoLastEstimate.cout_omni_par_seconde_usd);
+  return r > 0 ? r : AO_DEFAULT_RATE;
+}
+
+// Remplit les menus timbre/débit des deux fiches voix (listes serveur objet_voice_styles/paces).
+function aoFillVoiceSelects() {
+  const s = currentSettings;
+  if (!s) return;
+  const fill = (id, items, preferred) => {
+    const sel = $(id);
+    if (!sel) return;
+    const keep = sel.value;
+    sel.innerHTML = "";
+    (items || []).forEach((m) => {
+      const o = document.createElement("option");
+      o.value = m.key;
+      o.textContent = m.label;
+      sel.appendChild(o);
+    });
+    const keys = (items || []).map((m) => m.key);
+    const want = [keep, ...preferred].find((k) => k && keys.includes(k));
+    if (want) sel.value = want;
+  };
+  ["aoV", "aoEV"].forEach((p) => {
+    fill(p + "Tone", s.objet_voice_styles, ["douce", s.objet_voice_style]);
+    fill(p + "Pace", s.objet_voice_paces, ["naturel", s.objet_voice_pace]);
+  });
+}
+
+async function aoEnsureVoiceSelects() {
+  try {
+    if (!currentSettings) currentSettings = await api("/api/settings");
+    if (!$("aoVTone").options.length) aoFillVoiceSelects();
+  } catch (e) { toast(e.message); }
+}
+
+function aoReadVoice(prefix) {
+  const v = (f) => ($(prefix + f) ? $(prefix + f).value : "");
+  return {
+    gender: v("Gender"),
+    age: v("Age").trim(),
+    accent: v("Accent").trim() || AO_DEFAULT_ACCENT,
+    tone: v("Tone"),
+    pace: v("Pace"),
+    extra: v("Extra").trim(),
+  };
+}
+
+function aoWriteVoice(prefix, p) {
+  p = p || {};
+  const set = (f, val) => {
+    const el = $(prefix + f);
+    if (!el || val == null) return;
+    if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === String(val))) return;
+    el.value = String(val);
+  };
+  set("Gender", p.gender || "");
+  set("Age", p.age || "");
+  set("Accent", p.accent || AO_DEFAULT_ACCENT);
+  if (p.tone) set("Tone", p.tone);
+  if (p.pace) set("Pace", p.pace);
+  set("Extra", p.extra || "");
+}
+
+function aoSetVoiceEditable(editable) {
+  AO_VOICE_FIELDS.forEach((f) => { const el = $("aoEV" + f); if (el) el.disabled = !editable; });
+  $("aoVoiceSaveBtn").disabled = !editable;
+}
+
+// État de la fiche voix en galerie (verrou si des clips sont déjà animés avec cette voix).
+function aoRenderVoiceBlock(r) {
+  aoVoiceLocked = !!r.voice_locked;
+  if (!aoVoiceLocked) aoVoiceUnlocked = false;
+  aoWriteVoice("aoEV", r.voice_profile || {});
+  $("aoVoiceSheet").textContent = r.voice_sheet ? "Consigne envoyée à Google : " + r.voice_sheet : "";
+  const lock = $("aoVoiceLock");
+  const unlockBtn = $("aoVoiceUnlockBtn");
+  if (aoVoiceLocked && !aoVoiceUnlocked) {
+    lock.textContent = "🔒 Verrouillée — des clips sont déjà animés avec cette voix";
+    lock.className = "voice-lock on";
+    unlockBtn.classList.remove("hidden");
+    aoSetVoiceEditable(false);
+  } else {
+    lock.textContent = aoVoiceUnlocked ? "🔓 Déverrouillée — les clips déjà faits garderont l'ancienne voix" : "Modifiable";
+    lock.className = "voice-lock" + (aoVoiceUnlocked ? " warn" : "");
+    unlockBtn.classList.add("hidden");
+    aoSetVoiceEditable(true);
+  }
+}
+
+async function aoConfirmUnlock() {
+  return showModal({
+    title: "Déverrouiller la fiche voix ?",
+    message:
+      "Des clips sont déjà animés avec la voix actuelle. Si tu la modifies, les clips déjà faits " +
+      "auront une autre voix que les suivants (il faudrait les réanimer pour tout harmoniser).\n\nDéverrouiller quand même ?",
+    confirmText: "Déverrouiller", cancelText: "Annuler", danger: true,
+  });
+}
+
+$("aoVoiceUnlockBtn").addEventListener("click", async () => {
+  if (!(await aoConfirmUnlock())) return;
+  aoVoiceUnlocked = true;
+  const sheet = $("aoVoiceSheet").textContent;
+  aoRenderVoiceBlock({ voice_locked: true, voice_profile: aoReadVoice("aoEV"), voice_sheet: "" });
+  $("aoVoiceSheet").textContent = sheet;   // on garde la consigne actuelle affichée
+  toast("Fiche voix déverrouillée : modifie-la puis « Enregistrer la voix ».");
+});
+
+$("aoVoiceSaveBtn").addEventListener("click", async () => {
+  if (!aoAdId) return toast("Génère d'abord le Plan 1.");
+  const patch = (force) =>
+    api(AO_API + "/voice/" + aoAdId, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voice_profile: aoReadVoice("aoEV"), force: !!force }),
+    });
+  let res;
+  try {
+    res = await patch(aoVoiceUnlocked);
+  } catch (e) {
+    if (!/verrouill/i.test(e.message)) return toast(e.message);
+    if (!(await aoConfirmUnlock())) return;
+    aoVoiceUnlocked = true;
+    try { res = await patch(true); } catch (e2) { return toast(e2.message); }
+  }
+  toast("Fiche voix enregistrée ✓");
+  // Déverrouillage valable pour CETTE sauvegarde seulement : la prochaine modification d'une
+  // voix déjà utilisée redemandera confirmation.
+  aoVoiceUnlocked = false;
+  aoRenderVoiceBlock({
+    voice_locked: res.voice_locked, voice_profile: res.voice_profile, voice_sheet: res.voice_sheet,
+  });
+  // Le débit change la durée Omni des plans → on met à jour durées + estimation SANS re-rendre
+  // les cartes (préserve les prompts image édités et pas encore régénérés).
+  aoRefreshDurations();
+});
+
+async function aoRefreshDurations() {
+  try {
+    const ad = await api(AO_API + "/ad/" + aoAdId);
+    aoGalleryShots = ad.shots || [];
+    aoGalleryShots.forEach((s) => {
+      const card = document.querySelector(`#aoGallery .obj-shot[data-clip="${s.clip_id}"]`);
+      const dur = card && card.querySelector(".ao-dur");
+      if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
+    });
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words);
+    aoRenderAnimEstimate();
+  } catch (_) { /* non bloquant */ }
+}
+
+// --- Réfs typées (visage / produit / décor / style) : dropzone + vignettes ---
+function renderAoRefs() {
+  const box = $("aoRefsPreview");
+  box.innerHTML = "";
+  aoRefsFiles.forEach((f, idx) => {
+    const cell = document.createElement("div");
+    cell.className = "ref-thumb";
+    const img = document.createElement("img");
+    img.alt = f.name;
+    const rd = new FileReader();
+    rd.onload = () => (img.src = String(rd.result));
+    rd.readAsDataURL(f);
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ref-remove";
+    rm.title = "Retirer cette image";
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      aoRefsFiles.splice(idx, 1);
+      aoRefsKinds.splice(idx, 1);
+      renderAoRefs();
+    });
+    cell.appendChild(img);
+    cell.appendChild(rm);
+    cell.appendChild(refKindSelect(aoRefsKinds[idx], (v) => { aoRefsKinds[idx] = v; }));
+    box.appendChild(cell);
+  });
+}
+
+function addAoRefs(fileList) {
+  Array.from(fileList || [])
+    .filter((f) => f.type.startsWith("image/"))
+    .forEach((f) => {
+      if (!aoRefsFiles.some((x) => x.name === f.name && x.size === f.size)) {
+        aoRefsFiles.push(f);
+        aoRefsKinds.push("");
+      }
+    });
+  renderAoRefs();
+}
+
+(function initAoDropzone() {
+  const dz = $("aoDropzone");
+  const input = $("aoRefs");
+  if (!dz || !input) return;
+  const open = () => input.click();
+  dz.addEventListener("click", (ev) => { if (ev.target !== input) open(); });
+  $("aoRefsBtn").addEventListener("click", (ev) => { ev.stopPropagation(); open(); });
+  dz.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
+  });
+  input.addEventListener("change", (ev) => { addAoRefs(ev.target.files); input.value = ""; });
+  ["dragenter", "dragover"].forEach((e) =>
+    dz.addEventListener(e, (ev) => { ev.preventDefault(); ev.stopPropagation(); dz.classList.add("dragover"); })
+  );
+  ["dragleave", "dragend"].forEach((e) =>
+    dz.addEventListener(e, (ev) => { ev.preventDefault(); dz.classList.remove("dragover"); })
+  );
+  dz.addEventListener("drop", (ev) => {
+    ev.preventDefault(); ev.stopPropagation(); dz.classList.remove("dragover");
+    addAoRefs(ev.dataTransfer && ev.dataTransfer.files);
+  });
+})();
+
+$("aoManual").addEventListener("change", () => {
+  document.querySelectorAll(".aoManualOn").forEach((el) =>
+    el.classList.toggle("hidden", !$("aoManual").checked)
+  );
+});
+
+function aoRenderWarnings(boxId, warnings, maxWords) {
+  const box = $(boxId);
+  const list = (warnings || []).filter(Boolean);
+  if (!list.length) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.innerHTML =
+    `<div class="ao-w-title">⚠ Répliques trop longues${maxWords ? ` (max ~${esc(maxWords)} mots par plan, soit 10 s)` : ""}</div>` +
+    "<ul>" + list.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>" +
+    `<div class="muted small">Au-delà, Google risque de couper la phrase. Raccourcis le dialogue ou découpe-le.</div>`;
+  box.classList.remove("hidden");
+}
+
+function aoTier1Html(usdVideo, flag) {
+  if (!(flag || usdVideo > AO_TIER1_USD)) return "";
+  return `<div class="ao-tier1">⚠ Plus de ${AO_TIER1_USD} $ de vidéo : au Tier 1, Google limite à ${AO_TIER1_USD} $ ` +
+    `par tranche de 10 min et peut bloquer temporairement. Les plans en échec se reprennent ensuite via ` +
+    `« Reprendre les plans en échec ».</div>`;
+}
+
+// -- Étape 3 : plan de tournage --
+$("aoPlanBtn").addEventListener("click", async () => {
+  const script = $("aoScript").value;   // VERBATIM
+  const manual = $("aoManual").checked;
+  const msg = $("aoPlanMsg");
+  if (!script.trim()) return toast("Écris le script (ce que la personne doit dire).");
+  msg.innerHTML = manual ? "🎬 Préparation de tes plans…" : "🎬 Découpage du script en plans…";
+  $("aoPlanBtn").disabled = true;
+  try {
+    const r = await api(AO_API + "/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        script,
+        persona: $("aoPersona").value.trim(),
+        product: $("aoProduct").value.trim(),
+        ambiance: $("aoAmbiance").value.trim(),
+        manual,
+        voice_profile: aoReadVoice("aoV"),
+      }),
+    });
+    aoShots = r.shots || [];
+    if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
+    msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
+    renderAoPlan(aoShots, r);
+  } catch (e) {
+    msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
+  } finally {
+    $("aoPlanBtn").disabled = false;
+  }
+});
+
+const AO_REF_LABEL = { visage: "Visage", produit: "Produit", decor: "Décor", style: "Style" };
+
+function renderAoPlan(shots, r) {
+  aoLastEstimate = r.estimate || null;
+  const list = $("aoPlanList");
+  list.innerHTML = "";
+  shots.forEach((s) => {
+    const refs = Array.isArray(s.refs_needed) ? s.refs_needed : [];
+    const refsTxt = refs.length ? refs.map((k) => AO_REF_LABEL[k] || k).join(", ") : "plan neutre";
+    const div = document.createElement("div");
+    div.className = "scene-card";
+    div.innerHTML =
+      `<div><span class="n">Plan ${esc(s.n)}</span> <span class="muted">réfs : ${esc(refsTxt)}</span></div>` +
+      `<div class="motion">💬 ${s.dialogue ? esc(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+      `<div class="script">🖼️ ${esc(s.prompt_image)}</div>` +
+      `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>`;
+    list.appendChild(div);
+  });
+  aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words);
+  const e = r.estimate || {};
+  $("aoEstimate").innerHTML =
+    `<b>Coût estimé :</b> ${usd(e.usd_total)} ` +
+    `<span class="muted">(images ${usd(e.usd_images)} · vidéo + voix Omni ${usd(e.usd_video)} ` +
+    `pour ~${Math.round(e.seconds_total || 0)} s, ${e.shots || shots.length} plan(s) à ~${usd(aoRate())}/s)</span>` +
+    (r.max_words ? `<div class="card-sub">Max ~${esc(r.max_words)} mots par plan avec ce débit.</div>` : "") +
+    `<div class="card-sub">Payé seulement en mode réel. En simulation : $0. La vidéo n'est payée que sur les plans validés.</div>` +
+    aoTier1Html(Number(e.usd_video) || 0, e.tier1_warning);
+  $("aoPlanArea").classList.remove("hidden");
+}
+
+// -- Étape 4 : Plan 1 (la personne) --
+$("aoGenImagesBtn").addEventListener("click", async () => {
+  if (!aoShots.length) return toast("Génère d'abord le plan.");
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (!dryRun) {
+    if (!(currentSettings && currentSettings.openrouter_api_key_set))
+      return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
+    const perImg = (aoLastEstimate && aoLastEstimate.usd_images && aoShots.length)
+      ? aoLastEstimate.usd_images / aoShots.length : 0.04;
+    const ok = await showModal({
+      title: "Mode réel — Plan 1 (la personne)",
+      message: `On génère UNIQUEMENT le Plan 1 (≈ ${usd(perImg)}, 1 image Nano Banana). Tu le valides, puis tu génères les plans suivants. Continuer ?`,
+      confirmText: "Générer le Plan 1", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+  }
+  const fd = new FormData();
+  fd.append("ad_name", $("aoAdName").value.trim() || "avatar_ia");
+  fd.append("shots_json", JSON.stringify(aoShots));
+  fd.append("confirm", "true");
+  fd.append("ref_kinds", JSON.stringify(aoRefsKinds));
+  fd.append("voice_profile", JSON.stringify(aoReadVoice("aoV")));
+  aoRefsFiles.forEach((f) => fd.append("files", f, f.name));
+  let res;
+  try {
+    res = await api(AO_API + "/generate-images", { method: "POST", body: fd });
+  } catch (e) {
+    return toast(e.message);
+  }
+  aoAdId = res.ad_id;
+  aoVoiceUnlocked = false;
+  aoShowImgProgress();
+  pollSceneJob(res.job_id, {
+    ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
+    onEnd: () => loadAoGallery(aoAdId),
+  });
+});
+
+function aoShowImgProgress() {
+  $("aoProgress").classList.remove("hidden");
+  $("aoSceneProgress").innerHTML = "";
+  $("aoProgFill").style.width = "0%";
+  $("aoProgCount").textContent = "";
+}
+
+// Suivi générique d'un job : la liste est RECONSTRUITE depuis j.scenes (vrais numéros de plan).
+async function pollSceneJob(jobId, o) {
+  try {
+    const j = await api("/api/jobs/" + jobId);
+    const ul = $(o.ul);
+    ul.innerHTML = "";
+    (j.scenes || []).forEach((sc) => {
+      const li = document.createElement("li");
+      const cls = sc.status === "ok" ? "ok" : sc.status === "echec" ? "echec" : sc.phase === "en_attente" ? "" : "en_cours";
+      li.innerHTML =
+        `<div class="sp-row"><span class="dot ${cls}"></span><span>Plan ${esc(sc.n)}</span>` +
+        `<span class="phase">${esc(PHASE_LABEL[sc.phase] || sc.phase || "")}</span></div>` +
+        (sc.status === "echec"
+          ? `<div class="scene-err" style="display:block" title="${esc(sc.message || "")}">⚠ ${esc(prettyError(sc.message))}</div>`
+          : "");
+      ul.appendChild(li);
+    });
+    const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
+    $(o.fill).style.width = pct + "%";
+    $(o.count).textContent = `${j.done ?? 0}/${j.total ?? 0} ${o.unit || ""}`;
+    if (j.state === "en_cours" || j.state === "en_attente") {
+      setTimeout(() => pollSceneJob(jobId, o), 800);
+    } else {
+      if (j.state === "echec" && !o.onFail) {
+        toast(prettyError((j.summary && j.summary.message) || "Échec de la génération."));
+      }
+      if (j.state === "echec" && o.onFail) o.onFail(j);
+      if (o.onEnd) o.onEnd(j);
+    }
+  } catch (e) {
+    toast("Suivi interrompu : " + e.message);
+  }
+}
+
+// -- Étape 5 : galerie de validation --
+async function loadAoGallery(adId) {
+  if (!adId) return;
+  let r;
+  try {
+    r = await api(AO_API + "/ad/" + adId);
+  } catch (e) {
+    return toast(e.message);
+  }
+  $("aoValidation").classList.remove("hidden");
+  aoGalleryShots = r.shots || [];
+  aoRenderVoiceBlock(r);
+  aoRenderWarnings("aoWarnings", r.warnings, r.max_words);
+  const g = $("aoGallery");
+  renderOverviewBanner(g, r, "avatar_omni", adId);
+  g.innerHTML = "";
+  aoGalleryShots.forEach((s) => g.appendChild(aoShotCard(s)));
+  aoRenderAnimEstimate();
+}
+
+// Plans candidats à l'animation = comme le backend : image + statut valide/echec.
+function aoCandidates() {
+  return aoGalleryShots.filter((s) => s.image_url && (s.status === "valide" || s.status === "echec"));
+}
+
+function aoSumSeconds(shots) {
+  return shots.reduce((t, s) => t + (Number(s.duration_s) || 0), 0);
+}
+
+function aoRenderAnimEstimate() {
+  const c = aoCandidates();
+  const secs = aoSumSeconds(c);
+  const usdVid = secs * aoRate();
+  $("aoAnimEstimate").innerHTML = c.length
+    ? `≈ <b>${usd(usdVid)}</b> <span class="muted">(${c.length} plan(s) · ~${secs} s de vidéo + voix à ~${usd(aoRate())}/s)</span>` +
+      aoTier1Html(usdVid, false)
+    : `<span class="muted">Aucun plan validé pour l'instant.</span>`;
+}
+
+function aoShotCard(s) {
+  const card = document.createElement("div");
+  const valid = s.status === "valide";
+  const done = s.status === "pret";
+  card.className = "obj-shot" + (valid || done ? " valide" : "");
+  card.dataset.clip = String(s.clip_id);
+  const badge = done
+    ? '<span class="badge ok">animé ✓</span>'
+    : valid
+    ? '<span class="badge ok">validé ✓</span>'
+    : s.status === "echec"
+    ? '<span class="badge ko">échec</span>'
+    : '<span class="badge">à valider</span>';
+  const bust = s.image_url ? (s.image_url.includes("?") ? "&" : "?") + "t=" + Date.now() : "";
+  const thumb = s.image_url
+    ? `<img class="thumb" src="${esc(s.image_url)}${bust}" alt="plan ${esc(s.n)}" />`
+    : `<div class="thumb empty">${esc(s.error || "pas d'image")}</div>`;
+  const vbust = s.video_url ? (s.video_url.includes("?") ? "&" : "?") + "t=" + Date.now() : "";
+  const clip = s.video_url
+    ? `<a class="dl" href="${esc(s.video_url)}${vbust}" target="_blank" rel="noopener">🎬 Voir le clip</a>`
+    : "";
+  const err = s.image_url && s.error ? `<div class="ao-err" title="${esc(s.error)}">⚠ ${esc(prettyError(s.error))}</div>` : "";
+  card.innerHTML =
+    thumb +
+    `<div class="body">` +
+    `<div class="head"><span class="n">Plan ${esc(s.n)}</span>${badge}</div>` +
+    `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
+    err +
+    `<div class="lbl">Visuel (prompt image, éditable — pris en compte à la régénération)</div>` +
+    `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
+    `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>` +
+    `<div class="lbl">💬 Dialogue — ce que la personne DIT (verbatim)</div>` +
+    `<textarea class="vo" placeholder="Laisse vide = plan sans parole">${esc(s.dialogue || "")}</textarea>` +
+    `<div class="actions">` +
+    (done ? "" : `<button class="btn primary btn-valid">${valid ? "Dévalider" : "Valider"}</button>`) +
+    `<button class="btn btn-regen">Régénérer</button>` +
+    `<button class="btn small btn-test" title="Anime uniquement ce plan">Tester ce plan</button>` +
+    `</div></div>`;
+
+  card.querySelector(".body").insertBefore(planRefsControls(s), card.querySelector(".actions"));
+
+  // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
+  const voEl = card.querySelector(".vo");
+  voEl.addEventListener("blur", async () => {
+    const text = voEl.value;
+    if (text === (s.dialogue || "")) return;
+    try {
+      const res = await api(AO_API + "/dialogue/" + s.clip_id, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      s.dialogue = text;
+      if (res && res.duration_s) s.duration_s = res.duration_s;
+      await aoRefreshMeta(s, card);
+      if (s.status === "pret") toast("Dialogue enregistré — ce clip est déjà animé : « Tester ce plan » pour le réanimer avec ce texte.");
+    } catch (e) { toast(e.message); }
+  });
+
+  const validBtn = card.querySelector(".btn-valid");
+  if (validBtn) validBtn.addEventListener("click", async () => {
+    try {
+      const res = await api(AO_API + "/validate/" + s.clip_id, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ valide: !valid }),
+      });
+      s.status = res.status;
+      // Garde la liste de la galerie synchrone (elle peut contenir un autre objet pour ce plan).
+      const g = aoGalleryShots.find((x) => x.clip_id === s.clip_id);
+      if (g) g.status = res.status;
+      card.replaceWith(aoShotCard(s));
+      aoRenderAnimEstimate();
+    } catch (e) { toast(e.message); }
+  });
+
+  card.querySelector(".btn-regen").addEventListener("click", async () => {
+    const prompt_image = card.querySelector(".pi").value.trim();
+    const dryRun = currentSettings && currentSettings.dry_run;
+    if (!dryRun) {
+      const ok = await showModal({
+        title: "Régénérer l'image",
+        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
+        confirmText: "Régénérer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+    }
+    card.classList.add("busy");
+    try {
+      const res = await api(AO_API + "/regenerate-image/" + s.clip_id, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt_image, confirm: true }),
+      });
+      const j = await waitJobDone(res.job_id);
+      if (j && j.state === "echec") toast(prettyError((j.summary && j.summary.message) || "Régénération en échec."));
+      // Ne recharge QUE cette carte (préserve les prompts édités des autres).
+      const ad = await api(AO_API + "/ad/" + aoAdId);
+      aoGalleryShots = ad.shots || aoGalleryShots;
+      const updated = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
+      if (updated) card.replaceWith(aoShotCard(updated));
+      else card.classList.remove("busy");
+      aoRenderAnimEstimate();
+    } catch (e) {
+      card.classList.remove("busy");
+      toast(e.message);
+    }
+  });
+
+  card.querySelector(".btn-test").addEventListener("click", () => {
+    if (!s.image_url || !["valide", "echec", "pret"].includes(s.status))
+      return toast("Valide ce plan avant de le tester.");
+    aoLaunchAnimation([s], s.clip_id);
+  });
+
+  return card;
+}
+
+// Rafraîchit durée + avertissements après une édition de dialogue, sans re-rendre la galerie.
+async function aoRefreshMeta(s, card) {
+  try {
+    const ad = await api(AO_API + "/ad/" + aoAdId);
+    const fresh = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
+    if (fresh) {
+      s.duration_s = fresh.duration_s;
+      const g = aoGalleryShots.find((x) => x.clip_id === s.clip_id);
+      if (g) { g.duration_s = fresh.duration_s; g.dialogue = fresh.dialogue; }
+    }
+    const dur = card.querySelector(".ao-dur");
+    if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words);
+    aoRenderAnimEstimate();
+  } catch (_) { /* non bloquant */ }
+}
+
+$("aoRefreshBtn").addEventListener("click", () => loadAoGallery(aoAdId));
+
+// Plans suivants : depuis l'ancre (ou le 1er plan validé) — même personne, cadrages variés.
+$("aoConsistencyBtn").addEventListener("click", async () => {
+  if (!aoAdId) return toast("Génère et valide d'abord le Plan 1.");
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (!dryRun) {
+    if (!(currentSettings && currentSettings.openrouter_api_key_set))
+      return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
+    const ok = await showModal({
+      title: "Générer les plans suivants",
+      message: "Génère les plans suivants à partir de ton plan validé (MÊME personne) + tes photos de référence, via Nano Banana. Continuer ?",
+      confirmText: "Générer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+  }
+  let res;
+  try {
+    res = await api(AO_API + "/consistency/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
+    });
+  } catch (e) { return toast(e.message); }
+  toast(`Génération de ${res.n ?? "?"} plan(s) suivant(s)…`);
+  aoShowImgProgress();
+  pollSceneJob(res.job_id, {
+    ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
+    onEnd: () => loadAoGallery(aoAdId),
+  });
+});
+
+$("aoAnimateBtn").addEventListener("click", () => {
+  if (!aoAdId) return toast("Génère et valide d'abord tes plans.");
+  const c = aoCandidates();
+  if (!c.length) return toast("Aucun plan validé à animer (valide d'abord les images).");
+  aoLaunchAnimation(c, null);
+});
+
+// Lance l'animation Omni (tous les candidats, ou un seul plan si clipId) — modale de coût AVANT
+// l'appel payant (estimation = Σ durées Omni × $/s, même formule que le backend), puis 402 plafond.
+async function aoLaunchAnimation(shots, clipId) {
+  // Galerie RELUE juste avant la modale : statuts et durées à jour (validations faites depuis,
+  // régénérations…) → l'estimation affichée correspond à ce que le backend va réellement animer.
+  try {
+    const ad = await api(AO_API + "/ad/" + aoAdId);
+    aoGalleryShots = ad.shots || [];
+    shots = clipId
+      ? aoGalleryShots.filter((s) => s.clip_id === clipId && s.image_url && ["valide", "echec", "pret"].includes(s.status))
+      : aoCandidates();
+    aoRenderAnimEstimate();
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (!shots.length) {
+    return toast(clipId ? "Valide ce plan avant de le tester." : "Aucun plan validé à animer (valide d'abord les images).");
+  }
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (!dryRun) {
+    if (!(currentSettings && currentSettings.gemini_api_key_set))
+      return toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
+    const secs = aoSumSeconds(shots);
+    const usdVid = secs * aoRate();
+    const tier1 = usdVid > AO_TIER1_USD
+      ? `\n\n⚠ Plus de ${AO_TIER1_USD} $ : au Tier 1, Google limite à ${AO_TIER1_USD} $ par tranche de 10 min et peut bloquer temporairement. Les plans en échec se reprennent ensuite via « Reprendre les plans en échec ».`
+      : "";
+    const ok = await showModal({
+      title: clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
+      message:
+        (clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) +
+        ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s) — estimé ≈ ${usd(usdVid)} pour ~${secs} s. Continuer ?` + tier1,
+      confirmText: clipId ? "Tester" : "Animer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+  }
+  const post = (over) =>
+    api(AO_API + "/animate/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign(
+        { confirm: true, confirm_over_cap: !!over }, clipId ? { clip_id: clipId } : {}
+      )),
+    });
+  let res;
+  try {
+    res = await post(false);
+  } catch (e) {
+    if (!/plafond/i.test(e.message)) return toast(e.message);
+    const ok = await showModal({
+      title: "⚠ Dépassement du plafond de dépense",
+      message: e.message + "\n\nConfirmer et animer malgré le plafond ?",
+      confirmText: "Dépasser et animer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+    try { res = await post(true); } catch (e2) { return toast(e2.message); }
+  }
+  // Coût revérifié par le backend (vraies durées Omni).
+  if (res.usd_video != null) {
+    $("aoAnimEstimate").innerHTML =
+      `Lancé : ≈ <b>${usd(res.usd_video)}</b> <span class="muted">(${res.n_plans ?? shots.length} plan(s) · ` +
+      `~${res.seconds_total ?? aoSumSeconds(shots)} s${res.dry_run ? " · simulation : $0" : ""})</span>` +
+      (res.dry_run ? "" : aoTier1Html(Number(res.usd_video) || 0, res.tier1_warning));
+  }
+  toast(clipId ? "Animation du plan lancée…" : "Animation lancée…");
+  $("aoAnimProgress").classList.remove("hidden");
+  $("aoAnimSceneProgress").innerHTML = "";
+  $("aoAnimProgFill").style.width = "0%";
+  $("aoAnimProgCount").textContent = `0/${res.n_plans || shots.length} clips`;
+  pollSceneJob(res.job_id, {
+    ul: "aoAnimSceneProgress", fill: "aoAnimProgFill", count: "aoAnimProgCount", unit: "clips",
+    onFail: (j) => showModal({
+      title: "Animation — échec",
+      message: prettyError((j.summary && j.summary.message) || "L'animation a échoué."),
+      confirmText: "OK", cancelText: "",
+    }),
+    onEnd: (j) => {
+      if (j.state !== "echec") {
+        const sm = j.summary || {};
+        const nFail = Number(sm.echec || 0);
+        showModal({
+          title: "🎬 Clips Avatar IA",
+          message:
+            `${sm.ok ?? j.done ?? 0} clip(s) prêt(s) → Bibliothèque, onglet « 🧑 Avatar IA ».` +
+            (nFail ? `\n${nFail} plan(s) en échec : utilise « Reprendre les plans en échec » au-dessus de la galerie.` : ""),
+          confirmText: "OK", cancelText: "",
+        });
+      }
+      loadAoGallery(aoAdId);
+      loadLibrary();
+    },
+  });
+}
+
 // Navigue vers une section en réutilisant le gestionnaire de clic de la barre latérale.
 function gotoSection(sec) {
   const btn = document.querySelector(`.nav-item[data-section="${sec}"]`);
@@ -2843,6 +3563,7 @@ async function maybeOnboarding() {
         "<li><b>HeyGen</b> — les vidéos avatar</li>" +
         "<li><b>OpenRouter</b> — images (Nano Banana) + vidéos mashup (Kling/Veo)</li>" +
         "<li><b>xAI (Grok)</b> — animation « objet » (voix + lip-sync)</li>" +
+        "<li><b>Google (Gemini)</b> — « Avatar IA » Omni (vidéo + voix ; clé Google AI Studio, tier payant)</li>" +
         "</ul>" +
         "<p class='muted'>Tu ne paies que ce que TU génères en mode réel. Décoche « simulation » " +
         "dans Réglages seulement quand tu es prêt.</p>",

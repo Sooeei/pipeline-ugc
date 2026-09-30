@@ -78,6 +78,11 @@
             <div class="style-emoji">🎬</div><div class="style-name">Mashup IA</div>
             <div class="style-tag">disponible</div>
           </button>
+          <button class="style-card" data-style="avatar_omni">
+            <div class="style-emoji">🧑</div><div class="style-name">Avatar IA (Omni)</div>
+            <div class="style-tag">disponible</div>
+            <div class="style-badge" title="Google n'évalue officiellement que l'anglais : le français fonctionne mais reste expérimental">🇫🇷 voix FR expérimentale</div>
+          </button>
         </div>
 
         <!-- ============ FLUX AVATAR ============ -->
@@ -359,6 +364,151 @@
             </div>
           </div>
         </div><!-- /mashupFlow -->
+
+        <!-- ============ FLUX AVATAR IA (Omni : Nano Banana → Google Gemini Omni, vidéo + voix) ============ -->
+        <div id="avatarOmniFlow" class="hidden">
+          <p class="muted">Une personne IA photoréaliste (adulte, visage générique) dit ton script face caméra.
+            Google Omni génère la vidéo <b>et</b> la voix en une passe.
+            <span class="ao-flag">🇫🇷 voix FR expérimentale</span> (Google n'évalue officiellement que l'anglais).</p>
+          <h2>2. Ton script &amp; ta personne</h2>
+          <label>Script — ce que la personne DIT (VERBATIM, jamais réécrit)
+            <textarea id="aoScript" rows="6"
+              placeholder="Colle ici le texte exact de ta pub."></textarea>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="aoManual" />
+            Je découpe moi-même les plans
+          </label>
+          <p class="muted" style="margin-top:-4px">
+            Auto : le cerveau découpe le script en plans (phrases entières, verbatim).
+            <span class="aoManualOn hidden">Manuel : sépare chaque plan par une <b>ligne vide</b>
+            (ou une ligne <b>« --- »</b>) ; chaque bloc devient un plan, dans l'ordre. Rien n'est coupé.</span>
+          </p>
+          <label>Brief / persona <span class="muted">(qui parle, pour qui — oriente le visuel, pas le texte)</span>
+            <textarea id="aoPersona" rows="2"
+              placeholder="Ex. femme 35-45 ans, naturelle, ton sincère, cible mamans actives…"></textarea>
+          </label>
+          <div class="row grid2">
+            <label>Produit <span class="muted">(optionnel)</span>
+              <input type="text" id="aoProduct" placeholder="Ex. sérum visage à la vitamine C" />
+            </label>
+            <label>Nom de la pub <span class="muted">(optionnel)</span>
+              <input type="text" id="aoAdName" placeholder="Ex. serum_rentree" />
+            </label>
+          </div>
+          <label>Ambiance / décor <span class="muted">(optionnel)</span>
+            <textarea id="aoAmbiance" rows="2"
+              placeholder="Ex. salle de bain lumineuse le matin, lumière naturelle douce…"></textarea>
+          </label>
+          <label for="aoDropzone">Photos de référence <span class="muted">(optionnel — indique le type : visage, produit, décor, style)</span></label>
+          <div id="aoDropzone" class="dropzone" tabindex="0" role="button"
+               aria-label="Glisser-déposer ou sélectionner des images">
+            <input type="file" id="aoRefs" accept="image/*" multiple class="hidden" />
+            <span class="dropzone-icon">🖼️</span>
+            <span class="dropzone-text">Glisse-dépose une ou plusieurs images ici (optionnel)</span>
+            <button type="button" class="btn small" id="aoRefsBtn">Sélect. fichiers</button>
+          </div>
+          <div id="aoRefsPreview" class="refs-preview"></div>
+
+          <h2>3. Fiche voix <span class="muted" style="font-size:13px;font-weight:400">— la même voix sur tous les plans</span></h2>
+          <div class="voice-sheet">
+            <label>Genre
+              <select id="aoVGender">
+                <option value="">Non précisé</option>
+                <option value="female">Femme</option>
+                <option value="male">Homme</option>
+              </select>
+            </label>
+            <label>Âge <input type="text" id="aoVAge" placeholder="Ex. 35-45" maxlength="120" /></label>
+            <label>Accent <span class="muted">(en anglais)</span>
+              <input type="text" id="aoVAccent" value="natural French accent from France" maxlength="120" /></label>
+            <label>Timbre <select id="aoVTone"></select></label>
+            <label>Débit <select id="aoVPace"></select></label>
+            <label>Précision libre <span class="muted">(optionnel, en anglais)</span>
+              <input type="text" id="aoVExtra" placeholder="Ex. slightly husky, smiling voice" maxlength="120" /></label>
+          </div>
+          <div class="row">
+            <button class="btn primary" id="aoPlanBtn">🎬 Générer le plan</button>
+          </div>
+          <div id="aoPlanMsg" class="test-result"></div>
+
+          <!-- Étape 4 : plan + avertissements + coût -->
+          <div id="aoPlanArea" class="hidden">
+            <h2>4. Plan de tournage</h2>
+            <div id="aoPlanWarnings" class="ao-warnings hidden"></div>
+            <div class="scenes-preview" id="aoPlanList"></div>
+            <div class="estimate" id="aoEstimate"></div>
+            <p class="muted">Séquentiel : on génère d'abord le <b>Plan 1</b> (il fixe la personne).
+              Tu le valides, puis tu génères les plans suivants — tu ne paies les autres que quand la
+              personne te plaît.</p>
+            <div class="row">
+              <button class="btn primary" id="aoGenImagesBtn">🖼️ Générer le Plan 1 (la personne)</button>
+            </div>
+          </div>
+
+          <!-- Progression de la génération d'images -->
+          <div id="aoProgress" class="hidden">
+            <h2>Génération des images</h2>
+            <div class="progressbar"><div class="progressbar-fill" id="aoProgFill"></div></div>
+            <div class="prog-count" id="aoProgCount"></div>
+            <ul class="scene-progress" id="aoSceneProgress"></ul>
+          </div>
+
+          <!-- Étape 5 : validation + fiche voix + animation -->
+          <div id="aoValidation" class="hidden">
+            <h2>5. Validation des plans</h2>
+            <p class="muted">Valide chaque image. <b>Rien n'est animé tant que tu n'as pas validé.</b>
+              Valide d'abord le <b>Plan 1</b> (ou marque un plan ⚓ ancre), puis
+              « Générer les plans suivants » : même personne, cadrages variés.</p>
+
+            <div class="card-block ao-voice-block">
+              <div class="ao-voice-head">
+                <b>🎙️ Fiche voix de la pub</b>
+                <span id="aoVoiceLock" class="voice-lock"></span>
+              </div>
+              <div class="voice-sheet">
+                <label>Genre
+                  <select id="aoEVGender">
+                    <option value="">Non précisé</option>
+                    <option value="female">Femme</option>
+                    <option value="male">Homme</option>
+                  </select>
+                </label>
+                <label>Âge <input type="text" id="aoEVAge" maxlength="120" /></label>
+                <label>Accent <input type="text" id="aoEVAccent" maxlength="120" /></label>
+                <label>Timbre <select id="aoEVTone"></select></label>
+                <label>Débit <select id="aoEVPace"></select></label>
+                <label>Précision libre <input type="text" id="aoEVExtra" maxlength="120" /></label>
+              </div>
+              <div class="muted small" id="aoVoiceSheet"></div>
+              <div class="row">
+                <button class="btn small" id="aoVoiceSaveBtn" type="button">💾 Enregistrer la voix</button>
+                <button class="btn small danger-outline hidden" id="aoVoiceUnlockBtn" type="button">🔓 Déverrouiller</button>
+              </div>
+            </div>
+
+            <div id="aoWarnings" class="ao-warnings hidden"></div>
+            <div id="aoGallery" class="obj-gallery"></div>
+            <div class="row">
+              <button class="btn" id="aoRefreshBtn">↻ Rafraîchir</button>
+              <button class="btn primary" id="aoConsistencyBtn">▶️ Générer les plans suivants (depuis le plan validé)</button>
+            </div>
+
+            <h2>6. Animer les plans validés</h2>
+            <p class="muted">Seuls les plans <b>validés</b> (et ceux en échec à reprendre) sont animés :
+              Google Omni fait la vidéo <b>et</b> la voix (lip-sync) — environ 0,10 $ par seconde.
+              Les clips numérotés arrivent dans la Bibliothèque (onglet « 🧑 Avatar IA »).</p>
+            <div class="estimate" id="aoAnimEstimate"></div>
+            <div class="row">
+              <button class="btn primary" id="aoAnimateBtn">🎬 Animer les plans validés</button>
+            </div>
+            <div id="aoAnimProgress" class="hidden">
+              <div class="progressbar"><div class="progressbar-fill" id="aoAnimProgFill"></div></div>
+              <div class="prog-count" id="aoAnimProgCount"></div>
+              <ul class="scene-progress" id="aoAnimSceneProgress"></ul>
+            </div>
+          </div>
+        </div><!-- /avatarOmniFlow -->
       </section>
 
       <!-- ---- BIBLIOTHÈQUE (sous-sections par type) ---- -->
@@ -371,12 +521,14 @@
           <button class="subtab active" data-libtab="avatar">🎬 Avatar</button>
           <button class="subtab" data-libtab="objet">📦 Objet animé</button>
           <button class="subtab" data-libtab="mashup">🎬 Mashup IA</button>
+          <button class="subtab" data-libtab="avatar_omni">🧑 Avatar IA</button>
           <button class="subtab" data-libtab="voices">🎙️ Voix off</button>
           <button class="subtab" data-libtab="photos">🖼️ Photos</button>
         </div>
         <div class="lib-panel" data-libpanel="avatar"><div id="libAvatarContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="objet"><div id="libObjetContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="mashup"><div id="libMashupContent"></div></div>
+        <div class="lib-panel hidden" data-libpanel="avatar_omni"><div id="libAvatarOmniContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="voices"><div id="libVoicesContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
       </section>
@@ -442,6 +594,8 @@
             <input type="password" id="openrouterKey" /></label>
           <label>Clé API xAI (Grok) — animation « Objet animé »
             <input type="password" id="xaiKey" /></label>
+          <label>Clé API Google (Gemini) — Avatar IA Omni <span class="muted">(Google AI Studio, tier payant)</span>
+            <input type="password" id="geminiKey" /></label>
           <label>Clé API Anthropic (cerveau IA) <input type="password" id="anthropicKey" /></label>
           <label>Modèle du cerveau (Claude) <input type="text" id="brainModel" /></label>
           <label>Modèle Gradium <input type="text" id="gradiumModel" /></label>

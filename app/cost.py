@@ -96,7 +96,6 @@ def estimate_objet(
     }
 
 
-
 def estimate_grok_video(
     dialogues: list[str], words_per_sec: float | None = None
 ) -> dict[str, Any]:
@@ -109,6 +108,26 @@ def estimate_grok_video(
         for s in secs
     )
     return {"shots": len(secs), "seconds_total": sum(secs), "usd_video": round(usd, 2)}
+
+
+def estimate_avatar_omni(seconds_list: list[int]) -> dict[str, Any]:
+    """Coût estimé « Avatar IA (Omni) » en DOLLARS : Nano Banana (1 image/plan) + Google Omni
+    (vidéo + voix, à la seconde). `seconds_list` = durée Omni RÉELLE de chaque plan."""
+    secs = [max(0, int(s or 0)) for s in seconds_list or []]
+    n = len(secs)
+    seconds_total = sum(secs)
+    usd_images = round(n * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
+    usd_video = round(seconds_total * config_app.OMNI_COST_PER_SECOND_USD, 2)
+    return {
+        "shots": n,
+        "seconds_total": seconds_total,
+        "usd_images": usd_images,
+        "usd_video": usd_video,
+        "usd_total": round(usd_images + usd_video, 2),
+        "cout_omni_par_seconde_usd": config_app.OMNI_COST_PER_SECOND_USD,
+        # Plafond Google Tier 1 (10 $ / 10 min) : au-delà, Google peut bloquer temporairement.
+        "tier1_warning": usd_video > config_app.OMNI_TIER1_WINDOW_USD,
+    }
 
 
 # ============================================================ COMPTABILISATION (générations RÉELLES)
@@ -133,6 +152,13 @@ def record_kling_clip(
     secs = max(0.0, float(seconds))
     usd = float(usd_cost) if usd_cost and usd_cost > 0 else secs * config_app.mashup_cost_per_second(model)
     db.add_cost_event("kling", "second", secs, usd=usd, ad_id=ad_id, detail=model)
+
+
+def record_omni_clip(ad_id: int | None, seconds: float) -> None:
+    """1 clip Google Omni (Avatar IA : vidéo + voix) facturé à la SECONDE. JAMAIS en simulation."""
+    secs = max(0.0, float(seconds))
+    usd = secs * config_app.OMNI_COST_PER_SECOND_USD
+    db.add_cost_event("gemini", "second", secs, usd=usd, ad_id=ad_id, detail="omni video+voix")
 
 
 def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:
@@ -165,11 +191,12 @@ _SERVICE_LABELS = {
     "openrouter": "OpenRouter — images Nano Banana",
     "grok": "Grok / xAI — animation + voix",
     "kling": "Kling (OpenRouter) — animation Mashup",
+    "gemini": "Google Gemini — Avatar IA Omni (vidéo + voix)",
     "heygen": "HeyGen — avatar (crédits)",
     "gradium": "Gradium — voix",
     "anthropic": "Anthropic — cerveau",
 }
-_SERVICE_ORDER = ["openrouter", "grok", "kling", "heygen", "gradium", "anthropic"]
+_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "anthropic"]
 
 
 def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
@@ -184,6 +211,8 @@ def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
     if svc == "grok":
         return f"{n('second')} clip(s) · {round(q('second'))} s"
     if svc == "kling":
+        return f"{n('second')} clip(s) · {round(q('second'))} s"
+    if svc == "gemini":
         return f"{n('second')} clip(s) · {round(q('second'))} s"
     if svc == "heygen":
         return f"{n('credit')} clip(s) · {round(q('credit'))} crédits"

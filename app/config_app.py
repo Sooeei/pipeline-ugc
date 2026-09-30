@@ -453,7 +453,8 @@ OMNI_MAX_TOTAL_SECONDS = 40
 OMNI_EXTENSION_RETURNS = "auto"
 OMNI_SEND_DURATION = False            # response_format.duration non documenté → non envoyé
 OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
-OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min (avertissement UI)
+OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min
+OMNI_TIER1_WINDOW_SECONDS = 600        # → « Animer » espace les plans pour rester dessous
 OMNI_DEFAULT_ACCENT = "natural French accent from France"
 # Accent de la fiche voix (sélecteur) → consigne envoyée à Omni. Le champ libre « accent »,
 # s'il est rempli, a la PRIORITÉ sur ce choix.

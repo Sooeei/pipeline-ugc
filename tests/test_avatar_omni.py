@@ -510,7 +510,7 @@ def test_omni_base64_response_writes_mp4(monkeypatch, omni_env, capsys):
 
     monkeypatch.setattr(providers.requests, "post", fake_post)
     res = providers.omni_generate_video(cfg, img, "PROMPT", out, 7, anchor_path=img)
-    assert res == {"path": str(out), "interaction_id": "v1_abc"}
+    assert res == {"path": str(out), "interaction_id": "v1_abc", "usage": {}}
     assert out.read_bytes() == b"MP4DATA"
     body = sent["json"]
     assert sent["url"] == f"{config_app.OMNI_API_BASE}/interactions"

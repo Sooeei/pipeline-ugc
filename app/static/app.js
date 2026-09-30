@@ -943,7 +943,7 @@ function initSceneProgress(scenes) {
 const PHASE_LABEL = {
   en_attente: "en attente", voix: "voix off…", voix_ok: "voix ✓ (attente vidéo)",
   upload: "envoi audio…", rendu: "rendu vidéo…", image: "image…", animation: "animation…",
-  clip: "clip ✓", pret: "prêt ✓", erreur: "échec",
+  clip: "clip ✓", pret: "prêt ✓", erreur: "échec", attente_tier1: "pause Tier 1",
 };
 
 // Traduit une erreur brute (Gradium/HeyGen) en message court et lisible.
@@ -3184,11 +3184,20 @@ function aoRenderWarnings(boxId, warnings, maxWords) {
   box.classList.remove("hidden");
 }
 
+// Pauses (min) pour rester sous le plafond Tier 1 — même formule que cost.tier1_wait_minutes.
+function aoTier1WaitMin(usdVideo) {
+  return usdVideo > AO_TIER1_USD ? (Math.ceil(usdVideo / AO_TIER1_USD) - 1) * 10 : 0;
+}
+
+function aoTier1Text(usdVideo) {
+  return `Plus de ${AO_TIER1_USD} $ de vidéo : au Tier 1, Google limite à ${AO_TIER1_USD} $ par tranche ` +
+    `de 10 min. Les plans seront ESPACÉS automatiquement (≈ ${aoTier1WaitMin(usdVideo)} min de pause ` +
+    `au total, « prochain plan dans X min » dans le suivi) — laisse l'app ouverte.`;
+}
+
 function aoTier1Html(usdVideo, flag) {
   if (!(flag || usdVideo > AO_TIER1_USD)) return "";
-  return `<div class="ao-tier1">⚠ Plus de ${AO_TIER1_USD} $ de vidéo : au Tier 1, Google limite à ${AO_TIER1_USD} $ ` +
-    `par tranche de 10 min et peut bloquer temporairement. Les plans en échec se reprennent ensuite via ` +
-    `« Reprendre les plans en échec ».</div>`;
+  return `<div class="ao-tier1">⏳ ${esc(aoTier1Text(usdVideo))}</div>`;
 }
 
 // -- Étape 3 : plan de tournage --
@@ -3334,7 +3343,9 @@ async function pollSceneJob(jobId, o) {
         `<span class="phase">${esc(PHASE_LABEL[sc.phase] || sc.phase || "")}</span></div>` +
         (sc.status === "echec"
           ? `<div class="scene-err" style="display:block" title="${esc(sc.message || "")}">⚠ ${esc(prettyError(sc.message))}</div>`
-          : "");
+          : sc.phase === "attente_tier1" && sc.message
+            ? `<div class="scene-wait">⏳ ${esc(sc.message)}</div>`
+            : "");
       ul.appendChild(li);
     });
     const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
@@ -3607,9 +3618,7 @@ async function aoLaunchAnimation(shots, clipId) {
       return toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
     const secs = aoSumSeconds(shots);
     const usdVid = secs * aoRate();
-    const tier1 = usdVid > AO_TIER1_USD
-      ? `\n\n⚠ Plus de ${AO_TIER1_USD} $ : au Tier 1, Google limite à ${AO_TIER1_USD} $ par tranche de 10 min et peut bloquer temporairement. Les plans en échec se reprennent ensuite via « Reprendre les plans en échec ».`
-      : "";
+    const tier1 = usdVid > AO_TIER1_USD ? `\n\n⏳ ${aoTier1Text(usdVid)}` : "";
     const ok = await showModal({
       title: clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
       message:

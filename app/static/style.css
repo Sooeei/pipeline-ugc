@@ -186,6 +186,7 @@ label.check input { width: auto; margin: 0; }
 .scene-progress li { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .scene-progress .sp-row { display: flex; align-items: center; gap: 12px; }
 .scene-progress .phase { margin-left: auto; font-size: 13px; }
+.scene-progress .scene-wait { color: var(--muted); font-size: 12px; padding-left: 21px; }
 .scene-progress .scene-err { display: none; color: var(--err); font-size: 12px; padding-left: 21px; word-break: break-word; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot.en_cours { background: var(--warn); }

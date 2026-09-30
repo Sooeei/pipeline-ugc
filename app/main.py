@@ -725,8 +725,8 @@ def create_app() -> FastAPI:
         result["mode"] = mode
         result["personas"] = personas
         for s in result["shots"]:
-            s["duration_s"] = config_app.omni_clip_seconds(s.get("dialogue", ""), wps)
-        result["estimate"] = _omni_estimate([s.get("dialogue", "") for s in result["shots"]], wps)
+            s["duration_s"] = _shot_omni_seconds(s, wps)   # client : SOMME des tours
+        result["estimate"] = _omni_estimate(result["shots"], wps)
         result["dry_run"] = cfg.dry_run
         db.log_activity("avatar_omni", f"Plan Avatar IA : {len(result['shots'])} plans.")
         return result
@@ -734,7 +734,7 @@ def create_app() -> FastAPI:
     @app.post("/api/avatar-omni/estimate")
     def avatar_omni_estimate(body: AvatarOmniEstimateIn) -> dict[str, Any]:
         wps = config_app.voice_words_per_sec(body.voice_profile)
-        return _omni_estimate([str(s.get("dialogue") or "") for s in body.shots], wps)
+        return _omni_estimate(body.shots, wps)
 
     @app.post("/api/avatar-omni/generate-images")
     async def avatar_omni_generate_images(
@@ -1513,7 +1513,7 @@ class AvatarOmniPlanIn(BaseModel):
 
 
 class AvatarOmniEstimateIn(BaseModel):
-    shots: list[dict[str, Any]] = []     # [{dialogue}]
+    shots: list[dict[str, Any]] = []     # [{dialogue, segments?}] — client : Σ des tours
     voice_profile: dict[str, Any] = {}
 
 
@@ -1747,11 +1747,19 @@ def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any
     )
 
 
-def _omni_estimate(dialogues: list[str], words_per_sec: float) -> dict[str, Any]:
-    """Estimation Avatar IA sur les VRAIES durées Omni de chaque dialogue (fiche voix)."""
-    return cost.estimate_avatar_omni(
-        [config_app.omni_clip_seconds(d, words_per_sec) for d in dialogues]
-    )
+def _shot_omni_seconds(s: dict[str, Any], words_per_sec: float) -> int:
+    """Durée Omni d'un plan (non encore en base) : somme de ses tours (découpage client) ou
+    durée de son dialogue (un seul clip ≤ 10 s)."""
+    segs = [x for x in (s.get("segments") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+    if segs:
+        return pipeline.segments_seconds(segs, words_per_sec)
+    return config_app.omni_clip_seconds(str(s.get("dialogue") or ""), words_per_sec)
+
+
+def _omni_estimate(shots: list[dict[str, Any]], words_per_sec: float) -> dict[str, Any]:
+    """Estimation Avatar IA sur les VRAIES durées Omni de chaque plan (fiche voix) ; un plan
+    client compte la SOMME de ses tours."""
+    return cost.estimate_avatar_omni([_shot_omni_seconds(s, words_per_sec) for s in shots])
 
 
 def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:

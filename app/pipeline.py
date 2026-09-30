@@ -7,8 +7,10 @@ autres. Émet des événements de progression via `on_update`.
 from __future__ import annotations
 
 import html
+import math
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -751,6 +753,18 @@ def build_omni_prompt(
     return " ".join(parts)
 
 
+def _log_omni_turn(plan_n: int, turn: int, turns: int, requested_s: int, mp4_path: str,
+                   usage: Any) -> None:
+    """Journal d'un tour Omni RÉEL : durée demandée, durée de la vidéo renvoyée (le clip complet
+    ou seulement la suite ?) et facturation si l'API la renvoie."""
+    got = media.mp4_duration(mp4_path)
+    got_txt = f"{got:.1f} s" if got is not None else "durée inconnue (ffprobe absent)"
+    msg = (f"Plan {plan_n} tour {turn}/{turns} : {requested_s} s demandées, vidéo renvoyée "
+           f"{got_txt}, facturation API : {usage or 'non renvoyée'}")
+    _log_detail(f"Omni {msg}")
+    db.log_activity("avatar_omni", msg)
+
+
 def _assemble_chain(parts: list[str], expected_seconds: int, out_mp4: Path) -> None:
     """UN mp4 par plan. Si la vidéo du dernier tour contient TOUT le clip (doc non explicite →
     mesurée par ffprobe en mode "auto"), on la garde ; sinon on concatène les tours (sans
@@ -822,15 +836,87 @@ def clip_segments(c: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(data, list) else []
 
 
+def segments_seconds(segs: list[dict[str, Any]], words_per_sec: float | None) -> int:
+    """Durée d'une chaîne Omni = SOMME de ses tours (1er tour avec respiration d'intro)."""
+    return sum(
+        config_app.omni_segment_seconds(str(s["text"]), words_per_sec, first=(i == 0))
+        for i, s in enumerate(segs)
+    )
+
+
 def clip_omni_seconds(c: dict[str, Any], words_per_sec: float | None) -> int:
     """Durée Omni d'un plan : somme de ses segments (découpage client) ou durée de son dialogue."""
     segs = clip_segments(c)
     if segs:
-        return sum(
-            config_app.omni_segment_seconds(str(s["text"]), words_per_sec, first=(i == 0))
-            for i, s in enumerate(segs)
-        )
+        return segments_seconds(segs, words_per_sec)
     return config_app.omni_clip_seconds(str(c.get("script") or ""), words_per_sec)
+
+
+class Tier1Pacer:
+    """Google Tier 1 : au plus `budget_usd` de vidéo LANCÉE par fenêtre glissante de `window_s`.
+    Chaque plan réserve son coût estimé au moment où il part ; s'il ferait dépasser la fenêtre,
+    il ATTEND (on_wait(secondes restantes) appelé régulièrement) au lieu de prendre des 429.
+    `history` = dépenses Omni déjà faites [(horodatage, $)] (runs précédents encore dans la
+    fenêtre). Thread-safe ; horloge et sommeil injectables (tests)."""
+
+    def __init__(
+        self, budget_usd: float, window_s: float,
+        history: list[tuple[float, float]] | None = None,
+        clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
+        tick_s: float = 15.0,
+    ) -> None:
+        self.budget = float(budget_usd)
+        self.window = float(window_s)
+        self._spent = list(history or [])
+        self._clock, self._sleep, self._tick = clock, sleep, tick_s
+        self._lock = threading.Lock()
+
+    def wait_s(self, usd: float) -> float:
+        """Secondes à attendre avant de pouvoir lancer `usd` de vidéo (0 = maintenant)."""
+        with self._lock:
+            return self._wait_locked(usd, self._clock())
+
+    def _wait_locked(self, usd: float, now: float) -> float:
+        self._spent = [(t, u) for t, u in self._spent if now - t < self.window]
+        excess = sum(u for _, u in self._spent) + usd - self.budget
+        if excess <= 1e-9 or not self._spent:   # un plan seul > budget part quand la fenêtre est vide
+            return 0.0
+        freed = 0.0
+        for t, u in sorted(self._spent):
+            freed += u
+            if freed >= excess - 1e-9:
+                return max(0.0, t + self.window - now)
+        return self.window
+
+    def acquire(self, usd: float, on_wait: Callable[[float], None] | None = None) -> None:
+        """Bloque jusqu'à ce que `usd` tienne dans la fenêtre, puis le réserve."""
+        while True:
+            with self._lock:
+                now = self._clock()
+                wait = self._wait_locked(usd, now)
+                if wait <= 0:
+                    self._spent.append((now, float(usd)))
+                    return
+            if on_wait:
+                on_wait(wait)
+            self._sleep(min(wait, self._tick))
+
+
+def omni_tier1_pacer(cfg: ProviderConfig) -> Tier1Pacer | None:
+    """Pacer Tier 1 d'un run RÉEL (None en simulation : rien n'est facturé), amorcé avec les
+    dépenses Omni déjà enregistrées dans la fenêtre en cours."""
+    if cfg.dry_run:
+        return None
+    window = config_app.OMNI_TIER1_WINDOW_SECONDS
+    return Tier1Pacer(config_app.OMNI_TIER1_WINDOW_USD, window,
+                      history=db.omni_spend_since(time.time() - window))
+
+
+def tier1_wait_message(wait_s: float) -> str:
+    """« prochain plan dans X min » (arrondi à la minute, au moins 1)."""
+    mins = max(1, math.ceil(wait_s / 60))
+    return (f"Pause Tier 1 ({config_app.OMNI_TIER1_WINDOW_USD:.0f} $ / 10 min) — "
+            f"prochain plan dans {mins} min")
 
 
 def reset_segments_progress(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -863,13 +949,16 @@ def animate_avatar_omni_clips(
     ad_name: str,
     on_update: UpdateFn | None = None,
     only_clip_id: int | None = None,
+    pacer: Tier1Pacer | None = None,
 ) -> dict[str, Any]:
     """Anime les plans VALIDÉS d'un Avatar IA (image→vidéo Google Omni, VOIX + LIP-SYNC natifs).
 
     Même fiche voix (ads.voice_profile, telle que stockée) sur TOUS les plans ; durée de chaque
     clip = temps naturel du dialogue au débit de la fiche + respiration d'intro (bornée 3-10 s).
     L'ancre (ou le 1er plan validé) est envoyée en 2e image pour garder le même visage/la même
-    voix. `only_clip_id` → « Tester ce plan ». Plans « valide » ou « echec » (avec image)."""
+    voix. `only_clip_id` → « Tester ce plan ». Plans « valide » ou « echec » (avec image).
+    Run réel : les plans sont ESPACÉS pour rester sous le plafond Google Tier 1 (`pacer`, par
+    défaut omni_tier1_pacer) ; le plan qui attend affiche « prochain plan dans X min »."""
     all_clips = db.clips_for_ad(ad_id)
     if only_clip_id is not None:
         clips = [
@@ -895,7 +984,19 @@ def animate_avatar_omni_clips(
     # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
     ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
 
+    emit = on_update or _noop
+    if pacer is None:
+        pacer = omni_tier1_pacer(cfg)
+
     def _render(c: dict[str, Any], mp4: Path) -> None:
+        if pacer is not None:
+            n = int(c["scene_n"])
+            usd = clip_omni_seconds(c, wps) * config_app.OMNI_COST_PER_SECOND_USD
+            pacer.acquire(usd, lambda w: emit({
+                "scene": n, "phase": "attente_tier1", "status": "en_cours",
+                "message": tier1_wait_message(w), "wait_s": round(w),
+            }))
+            emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
         if clip_segments(c):
             _render_chain(c, mp4)
             return
@@ -914,6 +1015,7 @@ def animate_avatar_omni_clips(
         )
         db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
         if not cfg.dry_run:
+            _log_omni_turn(n, 1, 1, seconds, str(res.get("path") or mp4), res.get("usage"))
             cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
 
     def _render_chain(c: dict[str, Any], mp4: Path) -> None:
@@ -960,6 +1062,8 @@ def animate_avatar_omni_clips(
                 )
             segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
                        "mp4_path": str(res.get("path") or part), "done": True}
+            if not cfg.dry_run:
+                _log_omni_turn(n, i + 1, k, seconds, segs[i]["mp4_path"], res.get("usage"))
             db.update_clip(clip_id, segments=json.dumps(segs, ensure_ascii=False),
                            interaction_id=segs[i]["interaction_id"])
             if not cfg.dry_run:

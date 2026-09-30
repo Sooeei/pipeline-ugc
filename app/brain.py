@@ -1807,10 +1807,45 @@ def _client_canned_visual(plan: dict[str, Any], product: str) -> tuple[str, list
         f"Segment {i}/{k} — continue the client staging in order (French), matching this line: "
         f"{direction}" for i in range(1, k + 1)
     ]
-    refs = ["visage", "visage2"] if plan.get("has_p2") else ["visage"]
-    if product.strip():
-        refs.append("produit")
+    refs = ["visage", "visage2"] if plan.get("has_p2") else ["visage"]   # « produit » : client_refs
     return shot, motions, refs
+
+
+# Direction qui dit EXPLICITEMENT qu'un seul personnage est à l'image (→ pas de « visage2 »).
+_CLIENT_SOLO_RE = re.compile(
+    r"\bseule?s?\s+(?:à|a|dans|face|en)\s+(?:l'image|l’image|le\s+cadre|le\s+plan|caméra|camera)"
+    r"|\b(?:il|elle)\s+est\s+seule?\b|\bhors\s+(?:du\s+)?(?:champ|cadre)\b|\bplan\s+solo\b"
+    r"|\bsans\s+(?:elle|lui|la\s+modèle|le\s+maquilleur)\s+(?:à|a|dans)\s+(?:l'image|l’image|le\s+cadre)",
+    re.IGNORECASE,
+)
+_CLIENT_BOTTLE_RE = re.compile(r"\b(?:flacons?|bouteilles?|bottles?)\b", re.IGNORECASE)
+
+
+def client_refs(
+    refs: list[str], bible: dict[str, str], direction: str, product: str = "",
+    has_third_party: bool = False,
+) -> list[str]:
+    """Réfs d'un plan client, imposées par le CODE (Claude peut en oublier) :
+    - « visage » dès que la bible décrit le personnage 1 ; « visage2 » aussi dès qu'elle décrit
+      le personnage 2 — sauf si la direction dit explicitement qu'un seul est à l'image ;
+    - « produit » dès que la direction mentionne le flacon (ou le nom du produit) — sauf si le
+      bloc cite une marque tierce sans nommer le produit du client (le flacon est alors le
+      produit concurrent : la photo du produit du client serait fausse).
+    Les autres réfs (décor, style) proposées par Claude sont gardées."""
+    out = [r for r in refs if r not in ("visage", "visage2", "produit")]
+    d = direction or ""
+    solo = bool(_CLIENT_SOLO_RE.search(d))
+    heads: list[str] = []
+    if bible.get("character1"):
+        heads.append("visage")
+    if bible.get("character2") and not solo:
+        heads.append("visage2")
+    names_product = bool(product.strip()) and product.strip().lower() in d.lower()
+    bottle = bool(_CLIENT_BOTTLE_RE.search(d)) or names_product
+    wants_product = bottle and (names_product or not has_third_party)
+    if not wants_product and "produit" in refs and not has_third_party:
+        wants_product = True   # Claude l'a demandé et rien ne l'interdit
+    return heads + (["produit"] if wants_product else []) + out
 
 
 def _client_segments(dialogue: str, max_words: int, wps: float | None) -> list[dict[str, Any]]:
@@ -1895,12 +1930,14 @@ def generate_avatar_omni_client_plan(
             motions = (motions + c_motions[len(motions):])[: len(p["segments"])]
         segs = [{**s, "motion": _scrub_third_party(m, names)} for s, m in zip(p["segments"], motions, strict=True)]
         rn = _norm_refs_needed(v.get("refs_needed")) if v else None
+        refs = client_refs(rn if rn is not None else c_refs, bible, p["direction"], product,
+                           has_third_party=bool(_third_party_names([p["dialogue"]])))
         total = sum(int(s["seconds"]) for s in segs)
         shots.append({
             "n": i + 1, "shot_prompt": shot,
             "prompt_image": compose_client_prompt_image(bible, shot),
             "prompt_motion": segs[0]["motion"],
-            "refs_needed": rn if rn is not None else c_refs,
+            "refs_needed": refs,
             "dialogue": p["dialogue"], "segments": segs, "duration_s": total,
             **{k: p[k] for k in ("block_n", "block_sub", "block_count", "block_title",
                                  "timecode", "direction", "label")},

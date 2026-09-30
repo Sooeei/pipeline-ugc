@@ -499,6 +499,19 @@ def add_cost_event(
         con.close()
 
 
+def omni_spend_since(ts: float) -> list[tuple[float, float]]:
+    """Dépenses Google Omni RÉELLES enregistrées depuis `ts` : [(horodatage, $)] (plafond Tier 1)."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT created_at, usd FROM cost_events WHERE service='gemini' AND unit='second'"
+            " AND created_at >= ? ORDER BY created_at", (float(ts),),
+        ).fetchall()
+    finally:
+        con.close()
+    return [(float(r[0]), float(r[1])) for r in rows]
+
+
 # Filtre de périmètre des coûts : archive_id=None → coûts ACTIFS (non archivés) ;
 # un entier → une archive précise. (Sentinelle interne : on ne mélange jamais les deux.)
 def _archive_where(archive_id: int | None, col: str = "archive_id") -> tuple[str, tuple[Any, ...]]:

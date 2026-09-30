@@ -177,15 +177,18 @@ def fake_google(monkeypatch, tmp_path):
     video = base64.b64encode(
         Path(media.make_placeholder_mp4(tmp_path / "v.mp4", seconds=1.0, label="x")).read_bytes()
     ).decode()
-    state = {"bodies": [], "fail_at": None}
+    state = {"bodies": [], "fail_at": None, "usage": None}
 
     def post(url, headers=None, json=None, timeout=None):
         state["bodies"].append(json)
         n = len(state["bodies"])
         if state["fail_at"] == n:
             return _Resp(500, {"error": {"code": 500, "message": "boom"}})
-        return _Resp(200, {"id": f"v1_{n}", "status": "completed", "steps": [
-            {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4", "data": video}]}]})
+        data = {"id": f"v1_{n}", "status": "completed", "steps": [
+            {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4", "data": video}]}]}
+        if state["usage"]:
+            data["usage"] = state["usage"]
+        return _Resp(200, data)
 
     monkeypatch.setattr(providers.requests, "post", post)
     return state
@@ -430,3 +433,146 @@ def test_omni_batches_bounded_in_words_and_max_tokens_scaled():
     assert len(chunks) >= 2
     assert all(sum(config_app.spoken_word_count(s) for s in ch) <= 220 for ch in chunks)
     assert brain._omni_plan_max_tokens(" ".join(chunks[0]), 22) > 4000
+
+
+# ============================================================ durée = SOMME des tours (coût, plafond)
+def _client_plan_via_api(c):
+    c.post("/api/settings", json={"dry_run": True})
+    r = c.post("/api/avatar-omni/plan", json={
+        "script": DOC, "mode": "client", "persona1": P1_FR, "persona2": P2_FR,
+        "product": "Nuansa", "voice_profile": {"pace": "naturel"},
+    })
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_plan_duration_and_estimate_are_sum_of_turns():
+    with _client() as c:
+        plan = _client_plan_via_api(c)
+        sums = [sum(x["seconds"] for x in s["segments"]) for s in plan["shots"]]
+        assert [s["duration_s"] for s in plan["shots"]] == sums          # « ~X s » par plan
+        assert max(sums) > config_app.OMNI_MAX_CLIP_SECONDS               # plus de ~10 s fixe
+        e = plan["estimate"]
+        assert e["seconds_total"] == sum(sums)                            # estimation globale
+        assert e["usd_video"] == round(sum(sums) * config_app.OMNI_COST_PER_SECOND_USD, 2)
+        assert e["tier1_warning"] == (e["usd_video"] > config_app.OMNI_TIER1_WINDOW_USD)
+        r = c.post("/api/avatar-omni/estimate",
+                   json={"shots": plan["shots"], "voice_profile": {"pace": "naturel"}})
+        assert r.json()["seconds_total"] == sum(sums)
+
+
+def test_spend_cap_uses_sum_of_turns(monkeypatch, tmp_path):
+    from app import main
+
+    ad_id, cid = _chain_ad(tmp_path, 3)
+    secs = pipeline.clip_omni_seconds(db.get_clip(cid), config_app.voice_words_per_sec({"pace": "naturel"}))
+    assert secs == sum(config_app.omni_segment_seconds(s["text"], config_app.voice_words_per_sec(
+        {"pace": "naturel"}), first=(i == 0)) for i, s in enumerate(pipeline.clip_segments(db.get_clip(cid))))
+    monkeypatch.setattr(main, "load_provider_config",
+                        lambda: ProviderConfig(dry_run=False, gemini_api_key="k"))
+    db.set_setting("spend_cap_usd", "0.5")
+    with _client() as c:
+        r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
+    assert r.status_code == 402
+    assert f"${secs * config_app.OMNI_COST_PER_SECOND_USD:.2f}" in r.json()["detail"]   # plafond
+
+
+def test_tier1_wait_minutes():
+    from app import cost
+
+    assert cost.tier1_wait_minutes(9.9) == 0
+    assert cost.tier1_wait_minutes(10.0) == 0
+    assert cost.tier1_wait_minutes(25.0) == 20
+    assert cost.estimate_avatar_omni([40] * 5)["tier1_wait_min"] == 10     # 20 $ → 1 pause
+
+
+# ============================================================ réfs : visage + visage2 (+ produit)
+def test_refs_both_faces_and_product_on_blocks_6_7_9_10():
+    res = _sim_plan(product="Nuansa")
+    refs = {s["block_n"]: s["refs_needed"] for s in res["shots"]}
+    for n in (6, 7, 9, 10):
+        assert "visage" in refs[n] and "visage2" in refs[n], (n, refs[n])
+    for n in (6, 9, 10):                                                  # le flacon est mentionné
+        assert "produit" in refs[n], (n, refs[n])
+    assert "produit" not in refs[7]
+    assert "produit" not in refs[4]           # flacon du concurrent [L'Oréal] ≠ photo du produit
+
+
+def test_client_refs_enforced_over_claude():
+    bible = {"character1": P1_EN, "character2": P2_EN}
+    d6 = brain.parse_client_doc(DOC)[5]["direction"]
+    assert brain.client_refs(["visage"], bible, d6, "Nuansa") == ["visage", "visage2", "produit"]
+    assert brain.client_refs(["visage", "decor"], bible, "Il parle face caméra.") == \
+        ["visage", "visage2", "decor"]
+    assert brain.client_refs(["visage", "visage2"], bible, "Il est seul face caméra.") == ["visage"]
+    assert brain.client_refs(["visage"], {"character1": P1_EN}, "Elle sourit.") == ["visage"]
+
+
+# ============================================================ Tier 1 : plans espacés (10 $ / 10 min)
+class _FakeClock:
+    def __init__(self):
+        self.t, self.sleeps = 1000.0, []
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.t += s
+
+
+def test_tier1_pacer_spaces_launches():
+    clk = _FakeClock()
+    p = pipeline.Tier1Pacer(10.0, 600, clock=clk.now, sleep=clk.sleep)
+    waits = []
+    p.acquire(4.0, waits.append)
+    p.acquire(4.0, waits.append)
+    assert not waits and not clk.sleeps                                   # 8 $ : immédiat
+    p.acquire(4.0, waits.append)                                          # 12 $ > 10 $ → attente
+    assert waits and round(waits[0]) == 600 and clk.t >= 1600            # le 1er plan sort de la fenêtre
+    assert pipeline.tier1_wait_message(waits[0]).endswith("prochain plan dans 10 min")
+
+
+def test_tier1_pacer_counts_previous_spend():
+    clk = _FakeClock()
+    p = pipeline.Tier1Pacer(10.0, 600, history=[(clk.t - 500, 9.0)], clock=clk.now, sleep=clk.sleep)
+    assert round(p.wait_s(2.0)) == 100                                    # 9 $ dépensés il y a 500 s
+
+
+def test_animate_all_is_paced_with_visible_queue(monkeypatch, tmp_path):
+    from app import media
+
+    ad_id = db.create_ad("nuansa", "", "[]", kind="avatar_omni")
+    db.set_ad_voice_profile(ad_id, json.dumps({"pace": "naturel"}))
+    img = media.make_placeholder_image(tmp_path / "p.png", "x")
+    for n in (1, 2, 3):
+        cid = db.create_clip(ad_id, n, f"Voici la phrase du plan numéro {n}.", "m", prompt_image="p")
+        db.update_clip(cid, image_path=img, status="valide")
+    one = pipeline.clip_omni_seconds(db.clips_for_ad(ad_id)[0], None) * config_app.OMNI_COST_PER_SECOND_USD
+    clk = _FakeClock()
+    pacer = pipeline.Tier1Pacer(one * 1.5, 600, clock=clk.now, sleep=clk.sleep)   # 1 plan / fenêtre
+    events = []
+    monkeypatch.setattr(config_app, "OMNI_MAX_PARALLEL", 1)
+    res = pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=True), ad_id, "nuansa",
+                                             on_update=events.append, pacer=pacer)
+    assert res["ok"] == 3
+    waits = [e for e in events if e.get("phase") == "attente_tier1"]
+    assert {e["scene"] for e in waits} == {2, 3}                          # plans 2 et 3 espacés
+    assert all("prochain plan dans" in e["message"] for e in waits)
+    assert clk.t - 1000 >= 1200                                           # 2 fenêtres de 10 min
+
+
+def test_no_pacer_in_simulation():
+    assert pipeline.omni_tier1_pacer(ProviderConfig(dry_run=True)) is None
+    assert pipeline.omni_tier1_pacer(ProviderConfig(dry_run=False, gemini_api_key="k")) is not None
+
+
+# ============================================================ journal par tour (1er animate réel)
+def test_real_turns_logged_with_durations_and_billing(fake_google, tmp_path):
+    ad_id, _ = _chain_ad(tmp_path, 2)
+    fake_google["usage"] = {"total_cost_usd": 0.7}
+    pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "nuansa")
+    logs = [a["message"] for a in db.recent_activity(50) if " tour " in a["message"]]
+    assert len(logs) == 2
+    assert any(m.startswith("Plan 1 tour 1/2 : ") for m in logs)
+    assert all("s demandées, vidéo renvoyée" in m and "total_cost_usd" in m for m in logs)

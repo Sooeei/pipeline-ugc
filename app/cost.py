@@ -9,6 +9,7 @@ Durée de voix estimée à partir du nombre de mots (~2.5 mots/s en français).
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
 from typing import Any
 
@@ -125,9 +126,20 @@ def estimate_avatar_omni(seconds_list: list[int]) -> dict[str, Any]:
         "usd_video": usd_video,
         "usd_total": round(usd_images + usd_video, 2),
         "cout_omni_par_seconde_usd": config_app.OMNI_COST_PER_SECOND_USD,
-        # Plafond Google Tier 1 (10 $ / 10 min) : au-delà, Google peut bloquer temporairement.
+        # Plafond Google Tier 1 (10 $ / 10 min) : au-delà, l'animation ESPACE les plans
+        # (pipeline.Tier1Pacer) → pauses estimées en minutes.
         "tier1_warning": usd_video > config_app.OMNI_TIER1_WINDOW_USD,
+        "tier1_wait_min": tier1_wait_minutes(usd_video),
     }
+
+
+def tier1_wait_minutes(usd_video: float) -> int:
+    """Pauses cumulées (min, ordre de grandeur) pour lancer `usd_video` de vidéo Omni sous le
+    plafond Tier 1 : une fenêtre de 10 min par tranche de 10 $ au-delà de la première."""
+    budget = config_app.OMNI_TIER1_WINDOW_USD
+    if usd_video <= budget:
+        return 0
+    return (math.ceil(usd_video / budget) - 1) * round(config_app.OMNI_TIER1_WINDOW_SECONDS / 60)
 
 
 # ============================================================ COMPTABILISATION (générations RÉELLES)

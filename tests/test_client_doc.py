@@ -59,27 +59,53 @@ def test_no_block_or_empty_dialogue_refused():
         brain.parse_client_doc("BLOC 3 — TITRE\n🎬 direction seule")
 
 
-# ============================================================ plan (simulation)
-def test_verbatim_per_block_and_overall():
+# ============================================================ plan (simulation) : 1 BLOC = 1 PLAN
+def test_ten_plans_one_per_block_verbatim():
     res = _sim_plan()
     blocks = brain.parse_client_doc(DOC)
-    for b in blocks:
-        subs = [s["dialogue"] for s in res["shots"] if s["block_n"] == b["block_n"]]
-        assert all(d in b["dialogue"] for d in subs)                   # tranches exactes
-        assert brain.realign_to_script(b["dialogue"], subs) == subs     # concat == bloc
-    assert "Votre fond de  teint" in res["shots"][[s["block_n"] for s in res["shots"]].index(4)]["dialogue"]
+    assert len(res["shots"]) == 10 and res["blocks"] == 10
+    for s, b in zip(res["shots"], blocks, strict=True):
+        assert s["block_n"] == b["block_n"] and s["label"] == str(b["block_n"])
+        assert s["dialogue"] == b["dialogue"]                        # dialogue COMPLET du bloc
+        texts = [x["text"] for x in s["segments"]]
+        assert brain.realign_to_script(b["dialogue"], texts) == texts   # segments = tranches exactes
+        assert s["duration_s"] == sum(x["seconds"] for x in s["segments"])
+    assert "Votre fond de  teint" in res["shots"][3]["dialogue"]
 
 
-def test_block2_split_in_subplans_max_words():
+def test_block2_is_one_plan_with_segments_and_distributed_motions():
     res = _sim_plan()
-    b2 = [s for s in res["shots"] if s["block_n"] == 2]
-    assert len(b2) >= 3 and res["max_words"] == 22
-    assert all(config_app.spoken_word_count(s["dialogue"]) <= 22 for s in b2)
-    assert [s["label"] for s in b2] == [f"2.{i}" for i in range(1, len(b2) + 1)]
-    assert all(s["block_count"] == len(b2) and s["block_title"] == "LA RÉVÉLATION D'INITIÉ" for s in b2)
-    # tous les sous-plans partagent la direction ; le mouvement porte la direction (doigts)
-    assert all("doigts" in s["direction"] and "doigts" in s["prompt_motion"] for s in b2)
-    assert "part 1/" in b2[0]["prompt_motion"]
+    b2 = res["shots"][1]
+    assert b2["block_title"] == "LA RÉVÉLATION D'INITIÉ" and res["max_words"] == 22
+    segs = b2["segments"]
+    assert len(segs) >= 3
+    assert all(config_app.spoken_word_count(x["text"]) <= 22 for x in segs)
+    assert all("doigts" in x["motion"] for x in segs)                 # direction client, par segment
+    assert segs[0]["motion"].startswith("Segment 1/") and segs[-1]["motion"].startswith(f"Segment {len(segs)}/")
+
+
+def test_bible_identical_in_all_ten_prompt_images():
+    res = _sim_plan()
+    text = brain.bible_text(res["bible"])
+    assert P1_EN in text and P2_EN in text
+    assert all(s["prompt_image"].startswith(text) for s in res["shots"])   # mot pour mot
+    assert all(s["prompt_image"] == brain.compose_client_prompt_image(res["bible"], s["shot_prompt"])
+               for s in res["shots"])
+
+
+def test_third_party_brand_never_in_image_prompts():
+    res = _sim_plan()
+    assert any("[L'Oréal]" in s["dialogue"] for s in res["shots"])        # gardé dans le dialogue
+    assert all("Oréal" not in s["prompt_image"] for s in res["shots"])
+    assert brain._scrub_third_party("hold the L'Oréal bottle", ["L'Oréal"]) == \
+        "hold the a generic foundation bottle"
+
+
+def test_total_duration_warning_over_max():
+    long_doc = "BLOC 1 — LONG " + " ".join(f"Phrase numéro {i} un peu longue pour durer." for i in range(40))
+    res = brain.generate_avatar_omni_client_plan(ProviderConfig(dry_run=True), long_doc, personas=PERSONAS)
+    assert res["shots"][0]["duration_s"] > config_app.OMNI_MAX_TOTAL_SECONDS
+    assert any("par vidéo étendue" in w for w in res["warnings"])
 
 
 def test_bracket_warning_and_values_kept_in_plan():
@@ -87,13 +113,6 @@ def test_bracket_warning_and_values_kept_in_plan():
     assert any(s["dialogue"].startswith("[97 %]") for s in res["shots"])
     w = [x for x in res["warnings"] if x.startswith("Valeurs à valider")]
     assert w and "[97 %]" in w[0] and "[49,90 $]" in w[0]
-
-
-def test_personas_described_consistently_in_image_prompts():
-    res = _sim_plan()
-    assert all(P1_EN in s["prompt_image"] and P2_EN in s["prompt_image"] for s in res["shots"])
-    assert all(P1_FR not in s["prompt_image"] for s in res["shots"])
-    assert all("visage2" in s["refs_needed"] for s in res["shots"])
 
 
 def test_build_omni_prompt_brackets_speaker_and_silent():
@@ -104,13 +123,114 @@ def test_build_omni_prompt_brackets_speaker_and_silent():
     assert "[97 %]" not in p and "97 % des femmes, SPF 50 inclus." in p
     assert f"The speaking character ({P1_EN}) says, spoken in French" in p
     assert f"The other character ({P2_EN}) remains silent" in p
-    assert "same people" in p                                  # ancre : les deux personnes
-    assert p.startswith("<FIRST_FRAME> ")
+    assert "same people" in p and p.startswith("<FIRST_FRAME> ")
+
+
+def test_extension_prompt():
+    p = pipeline.build_omni_extension_prompt("He raises four fingers.", "Quatre affaires.",
+                                             "a warm voice", 4, speaker=P1_EN, silent=P2_EN)
+    assert p.startswith("Extend this video: the scene continues in the same single unbroken shot, "
+                        "same two people, same set, same voice.")
+    assert '[0-4s]' in p and f'({P1_EN}) says, spoken in French, in a warm voice: "Quatre affaires."' in p
+    assert "He raises four fingers." in p and p.endswith("No music. No subtitles.")
+    assert "<FIRST_FRAME>" not in p
 
 
 def test_client_director_rules_override_in_system_prompt():
-    sp = brain.AVATAR_OMNI_CLIENT_SYSTEM_PROMPT
-    assert "PRIME" in sp and "compter sur les" in sp and "n'INVENTES PAS" in sp
+    sp = " ".join(brain.AVATAR_OMNI_CLIENT_SYSTEM_PROMPT.split())
+    assert "PRIME" in sp and "compter sur les doigts" in sp and "n'INVENTES PAS" in sp
+    assert "UN BLOC = UN PLAN" in sp and "EXACTEMENT UN mouvement par SEGMENT" in sp
+
+
+# ============================================================ chaîne Omni (réel, requests mocké)
+class _Resp:
+    def __init__(self, status, data):
+        self.status_code, self._data, self.text = status, data, json.dumps(data)[:300]
+
+    def json(self):
+        return self._data
+
+
+def _chain_ad(tmp_path, n_segments=3):
+    """Pub avatar_omni en base : 1 plan client (image réelle, 3 segments), bible + personnages."""
+    from app import media
+
+    ad_id = db.create_ad("nuansa", "", "[]", kind="avatar_omni")
+    db.set_ad_voice_profile(ad_id, json.dumps({"pace": "naturel"}))
+    db.set_ad_personas(ad_id, json.dumps(PERSONAS))
+    db.set_ad_bible(ad_id, json.dumps({"character1": P1_EN, "character2": P2_EN, "set": "a counter"}))
+    texts = [f"Voici le segment numéro {i} de ce plan." for i in range(1, n_segments + 1)]
+    img = media.make_placeholder_image(tmp_path / "plan.png", "x")
+    cid = db.create_clip(ad_id, 1, " ".join(texts), "m", prompt_image="p")
+    db.update_clip(cid, image_path=img, status="valide", block_n=2,
+                   segments=json.dumps([{"text": t, "motion": f"motion {i}"} for i, t in enumerate(texts, 1)]))
+    return ad_id, cid
+
+
+@pytest.fixture
+def fake_google(monkeypatch, tmp_path):
+    """Faux POST /interactions : renvoie un vrai petit mp4 (base64) ; `fail_at` = n° d'appel en 500."""
+    import base64
+
+    from app import media, providers
+
+    video = base64.b64encode(
+        Path(media.make_placeholder_mp4(tmp_path / "v.mp4", seconds=1.0, label="x")).read_bytes()
+    ).decode()
+    state = {"bodies": [], "fail_at": None}
+
+    def post(url, headers=None, json=None, timeout=None):
+        state["bodies"].append(json)
+        n = len(state["bodies"])
+        if state["fail_at"] == n:
+            return _Resp(500, {"error": {"code": 500, "message": "boom"}})
+        return _Resp(200, {"id": f"v1_{n}", "status": "completed", "steps": [
+            {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4", "data": video}]}]})
+
+    monkeypatch.setattr(providers.requests, "post", post)
+    return state
+
+
+def test_chain_k_calls_store_previous_id_one_mp4_and_cost(fake_google, tmp_path):
+    ad_id, cid = _chain_ad(tmp_path, 3)
+    cfg = ProviderConfig(dry_run=False, gemini_api_key="k")
+    res = pipeline.animate_avatar_omni_clips(cfg, ad_id, "nuansa")
+    assert res["ok"] == 1 and res["echec"] == 0
+    b = fake_google["bodies"]
+    assert len(b) == 3                                                  # k tours
+    assert b[0]["store"] is True and "previous_interaction_id" not in b[0]
+    assert b[0]["input"][0]["type"] == "image"                          # tour 1 : l'image du plan
+    assert b[0]["input"][-1]["text"].startswith("<FIRST_FRAME> ")
+    for i in (1, 2):                                                    # extensions : texte seul
+        assert b[i]["previous_interaction_id"] == f"v1_{i}" and b[i]["store"] is True
+        assert [p["type"] for p in b[i]["input"]] == ["text"]
+        assert b[i]["input"][0]["text"].startswith("Extend this video")
+        assert b[i]["response_format"]["aspect_ratio"] == "9:16"
+    clip = db.get_clip(cid)
+    assert clip["status"] == "pret" and Path(clip["mp4_path"]).name == "1.mp4"   # UN seul mp4
+    segs = json.loads(clip["segments"])
+    assert [s["interaction_id"] for s in segs] == ["v1_1", "v1_2", "v1_3"]
+    events = [e for e in db.cost_events_raw() if e["service"] == "gemini"]
+    assert len(events) == 3                                             # 1 événement par tour
+    assert round(sum(e["usd"] for e in events), 4) == round(sum(s["seconds"] for s in segs) * 0.10, 4)
+
+
+def test_chain_resume_from_last_successful_turn(fake_google, tmp_path):
+    ad_id, cid = _chain_ad(tmp_path, 4)
+    cfg = ProviderConfig(dry_run=False, gemini_api_key="k")
+    fake_google["fail_at"] = 3                                          # le tour 3 échoue
+    res = pipeline.animate_avatar_omni_clips(cfg, ad_id, "nuansa")
+    assert res["echec"] == 1 and db.get_clip(cid)["status"] == "echec"
+    segs = json.loads(db.get_clip(cid)["segments"])
+    assert [bool(s.get("interaction_id")) for s in segs] == [True, True, False, False]
+    fake_google["fail_at"] = None
+    before = len(fake_google["bodies"])
+    res = pipeline.animate_avatar_omni_clips(cfg, ad_id, "nuansa")
+    assert res["ok"] == 1
+    resumed = fake_google["bodies"][before:]
+    assert len(resumed) == 2                                            # tours 3 et 4 seulement
+    assert resumed[0]["previous_interaction_id"] == "v1_2"             # repart du tour 2 réussi
+    assert db.get_clip(cid)["status"] == "pret"
 
 
 # ============================================================ E2E API (simulation)
@@ -127,15 +247,20 @@ def _wait(c, job_id, tries=400):
     raise AssertionError("job trop long")
 
 
-def test_client_mode_e2e_brackets_stored_but_stripped_for_omni(monkeypatch):
-    prompts = []
+def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
+    first_prompts, ext_prompts = [], []
+    real_gen, real_ext = pipeline.omni_generate_video, pipeline.omni_extend_video
 
-    def fake_omni(cfg, image_path, prompt, out_mp4, seconds, anchor_path="", **kw):
-        prompts.append(prompt)
-        Path(out_mp4).write_bytes(b"mp4")
-        return {"path": str(out_mp4), "interaction_id": "X"}
+    def spy_gen(cfg, image_path, prompt, out_mp4, seconds, **kw):
+        first_prompts.append((prompt, kw.get("store")))
+        return real_gen(cfg, image_path, prompt, out_mp4, seconds, **kw)
 
-    monkeypatch.setattr(pipeline, "omni_generate_video", fake_omni)
+    def spy_ext(cfg, prev, prompt, out_mp4, seconds, **kw):
+        ext_prompts.append((prev, prompt))
+        return real_ext(cfg, prev, prompt, out_mp4, seconds, **kw)
+
+    monkeypatch.setattr(pipeline, "omni_generate_video", spy_gen)
+    monkeypatch.setattr(pipeline, "omni_extend_video", spy_ext)
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
         r = c.post("/api/avatar-omni/plan", json={
@@ -144,41 +269,51 @@ def test_client_mode_e2e_brackets_stored_but_stripped_for_omni(monkeypatch):
         })
         assert r.status_code == 200, r.text
         plan = r.json()
-        assert plan["mode"] == "client" and plan["blocks"] == 10
-        assert plan["personas"]["p1_en"] and plan["personas"]["p2_en"]
-        shots = plan["shots"]
+        assert plan["mode"] == "client" and plan["blocks"] == 10 and len(plan["shots"]) == 10
+        bible_en = {**plan["bible"], "character1": P1_EN, "character2": P2_EN}
         r = c.post("/api/avatar-omni/generate-images", data={
-            "ad_name": "nuansa", "shots_json": json.dumps(shots), "confirm": "true",
+            "ad_name": "nuansa", "shots_json": json.dumps(plan["shots"]), "confirm": "true",
             "voice_profile": json.dumps({"pace": "naturel"}),
             "personas": json.dumps({**plan["personas"], "p1_en": P1_EN, "p2_en": P2_EN}),
+            # en réel, Claude écrit la bible en anglais (simulation : pas de traduction)
+            "bible": json.dumps(bible_en),
         })
         assert r.status_code == 200, r.text
         ad_id = r.json()["ad_id"]
         _wait(c, r.json()["job_id"])
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
-        assert ad["personas"]["p2_en"] == P2_EN
-        by_label = {s["label"]: s for s in ad["shots"]}
-        assert "2.1" in by_label and by_label["2.1"]["block_title"] == "LA RÉVÉLATION D'INITIÉ"
-        assert "doigts" in by_label["2.1"]["direction"]
-        s9 = next(s for s in ad["shots"] if s["block_n"] == 9)
-        assert s9["dialogue"].startswith("[97 %]")                        # crochets EN BASE
+        assert len(ad["shots"]) == 10 and ad["bible_text"]
+        b2 = ad["shots"][1]
+        assert b2["label"] == "2" and len(b2["segments"]) >= 3 and "doigts" in b2["direction"]
+        s9 = ad["shots"][8]
+        assert s9["dialogue"].startswith("[97 %]")                           # crochets EN BASE
         assert any(w.startswith("Valeurs à valider") for w in ad["warnings"])
-        # Plan 1 validé → plans suivants (séquentiel) → le plan 9.1 a son image
-        first = ad["shots"][0]
-        c.post(f"/api/avatar-omni/validate/{first['clip_id']}", json={"valide": True})
+        # bible modifiée → prompt_image recomposés, images intactes
+        img_before = db.get_clip(ad["shots"][0]["clip_id"])["image_path"]
+        r = c.patch(f"/api/avatar-omni/bible/{ad_id}",
+                    json={"bible": {**bible_en, "set": "a NEW pink studio set"}})
+        assert r.status_code == 200 and r.json()["updated"] == 10
+        clips = db.clips_for_ad(ad_id)
+        assert all("a NEW pink studio set" in c2["prompt_image"] for c2 in clips)
+        assert db.get_clip(ad["shots"][0]["clip_id"])["image_path"] == img_before
+        # Plan 1 validé → plans suivants → « Tester ce plan » sur le bloc 9 = chaîne complète
+        c.post(f"/api/avatar-omni/validate/{ad['shots'][0]['clip_id']}", json={"valide": True})
         r = c.post(f"/api/avatar-omni/consistency/{ad_id}", json={"confirm": True})
-        assert r.status_code == 200, r.text
         _wait(c, r.json()["job_id"])
-        # anime le plan 9.1 → prompt Omni : sans crochets, perso 1 parle, perso 2 muet
         c.post(f"/api/avatar-omni/validate/{s9['clip_id']}", json={"valide": True})
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"clip_id": s9["clip_id"]})
         assert r.status_code == 200, r.text
+        assert r.json()["seconds_total"] == s9["duration_s"]                 # estimation = Σ segments
         _wait(c, r.json()["job_id"])
-        p = prompts[-1]
-        assert "[97 %]" not in p and "97 % des femmes" in p
+        p, store = first_prompts[-1]
+        assert store is True and "[97 %]" not in p and "97 % des femmes" in p
         assert f"({P1_EN}) says" in p and f"({P2_EN}) remains silent" in p
-        assert P1_FR not in p and P2_FR not in p                           # jamais le FR brut
-        assert db.get_clip(s9["clip_id"])["script"].startswith("[97 %]")
+        assert P1_FR not in p and P2_FR not in p                            # jamais le FR brut
+        assert len(ext_prompts) == len(s9["segments"]) - 1
+        assert all(prev.startswith("SIMU_OMNI") for prev, _ in ext_prompts)
+        clip9 = db.get_clip(s9["clip_id"])
+        assert clip9["status"] == "pret" and clip9["script"].startswith("[97 %]")
+        assert Path(clip9["mp4_path"]).name == "9.mp4" and Path(clip9["mp4_path"]).is_file()
 
 
 def test_visage2_ref_kind_accepted():

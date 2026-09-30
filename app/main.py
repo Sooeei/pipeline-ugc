@@ -744,6 +744,7 @@ def create_app() -> FastAPI:
         ref_kinds: str = Form(""),
         voice_profile: str = Form(""),
         personas: str = Form(""),
+        bible: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
         """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
@@ -753,13 +754,20 @@ def create_app() -> FastAPI:
         shots = _parse_avatar_omni_shots(shots_json)
         profile_json = _json(config_app.normalize_voice_profile(voice_profile))
         personas_json = _json(_resolve_personas(cfg, personas))
+        bible_json = _json(brain.normalize_bible(bible)) if bible.strip() else ""
 
         def _on_ad(aid: int) -> None:
             db.set_ad_voice_profile(aid, profile_json)
             db.set_ad_personas(aid, personas_json)
+            if bible_json:
+                db.set_ad_bible(aid, bible_json)
 
         def _on_clip(clip_id: int, s: dict[str, Any]) -> None:
-            fields = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
+            fields: dict[str, Any] = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
+            if s.get("segments"):
+                fields["segments"] = _json(s["segments"])
+            if s.get("shot_prompt"):
+                fields["shot_prompt"] = s["shot_prompt"]
             if fields:
                 db.update_clip(clip_id, **fields)
 
@@ -771,6 +779,18 @@ def create_app() -> FastAPI:
 
     @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
     def avatar_omni_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if clip is not None and clip.get("shot_prompt") is not None:
+            # Découpage client : le texte édité = CE QUI CHANGE dans ce plan ; la bible est
+            # ajoutée par le code. Nouvelle image → la chaîne de tours repart de zéro.
+            ad = db.get_ad(int(clip["ad_id"])) or {}
+            shot = body.prompt_image.strip() or str(clip.get("shot_prompt") or "")
+            body = RegenerateIn(
+                prompt_image=brain.compose_client_prompt_image(pipeline.ad_bible(ad), shot),
+                confirm=body.confirm,
+            )
+            db.update_clip(clip_id, shot_prompt=shot, segments=_json(
+                pipeline.reset_segments_progress(pipeline.clip_segments(clip))))
         return _regenerate_image(
             clip_id, body, "avatar_omni", "un « Avatar IA »", allow_prompt_edit=True,
         )
@@ -792,9 +812,16 @@ def create_app() -> FastAPI:
         db.update_clip(clip_id, script=body.text)
         wps = config_app.voice_words_per_sec((db.get_ad(int(clip["ad_id"])) or {}).get("voice_profile"))
         max_words = config_app.omni_max_words(wps)
+        if pipeline.clip_segments(clip) and body.text.strip():
+            # Découpage client : nouveaux segments (mouvements gardés par position), progression
+            # d'animation remise à zéro (le texte a changé).
+            segs = brain.client_resegment(body.text, pipeline.clip_segments(clip), max_words, wps,
+                                          str(clip.get("direction") or ""))
+            db.update_clip(clip_id, segments=_json([{"text": s["text"], "motion": s["motion"]}
+                                                    for s in segs]))
         warning = brain.omni_dialogue_warning(int(clip["scene_n"]), body.text, max_words, "dialogue")
         return {
-            "ok": True, "duration_s": config_app.omni_clip_seconds(body.text, wps),
+            "ok": True, "duration_s": pipeline.clip_omni_seconds(db.get_clip(clip_id) or {}, wps),
             "max_words": max_words, "warning": warning or "",
         }
 
@@ -824,9 +851,11 @@ def create_app() -> FastAPI:
             ad_id,
             lambda c: {
                 "dialogue": c.get("script") or "",
-                "duration_s": config_app.omni_clip_seconds(c.get("script") or "", wps),
+                "duration_s": pipeline.clip_omni_seconds(c, wps),
                 **{k: c.get(k) for k in _BLOCK_FIELDS},
                 "label": _block_label(c),
+                "segments": _segments_view(c, wps),
+                "shot_prompt": c.get("shot_prompt") or "",
             },
         )
         resp["warnings"] = [
@@ -837,11 +866,39 @@ def create_app() -> FastAPI:
         if bw:
             resp["warnings"].append(bw)
         resp["personas"] = pipeline.ad_personas(ad)
+        bible = pipeline.ad_bible(ad)
+        resp["bible"] = bible
+        resp["bible_text"] = brain.bible_text(bible) if bible else ""
+        for s in resp["shots"]:
+            if s["segments"] and s["duration_s"] > config_app.OMNI_MAX_TOTAL_SECONDS:
+                resp["warnings"].append(
+                    f"Plan {s['label'] or s['n']} : ~{s['duration_s']} s de vidéo (max "
+                    f"{config_app.OMNI_MAX_TOTAL_SECONDS} s par vidéo étendue) — coupe ce bloc en deux."
+                )
         resp["max_words"] = max_words
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
         resp["voice_locked"] = any(s["status"] == "pret" for s in resp["shots"])
         return resp
+
+    @app.patch("/api/avatar-omni/bible/{ad_id}")
+    def avatar_omni_bible(ad_id: int, body: BibleIn) -> dict[str, Any]:
+        """Modifie la bible visuelle : les prompt_image de TOUS les plans client sont recomposés
+        (bible + partie propre au plan) ; les images déjà générées ne sont PAS touchées."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(400, "Avatar IA introuvable.")
+        bible = brain.normalize_bible(body.bible)
+        if not bible["character1"]:
+            raise HTTPException(400, "La bible doit décrire au moins le personnage 1.")
+        db.set_ad_bible(ad_id, _json(bible))
+        n = 0
+        for c in db.clips_for_ad(ad_id):
+            if c.get("shot_prompt") is not None:
+                db.update_clip(int(c["id"]), prompt_image=brain.compose_client_prompt_image(
+                    bible, str(c.get("shot_prompt") or "")))
+                n += 1
+        return {"ok": True, "bible": bible, "bible_text": brain.bible_text(bible), "updated": n}
 
     @app.patch("/api/avatar-omni/voice/{ad_id}")
     def avatar_omni_voice(ad_id: int, body: VoiceProfileIn) -> dict[str, Any]:
@@ -1460,6 +1517,10 @@ class AvatarOmniEstimateIn(BaseModel):
     voice_profile: dict[str, Any] = {}
 
 
+class BibleIn(BaseModel):
+    bible: dict[str, Any] = {}   # {character1, character2, set, product, positions} (anglais)
+
+
 class VoiceProfileIn(BaseModel):
     voice_profile: dict[str, Any] = {}
     force: bool = False     # déverrouillage explicite (des clips sont déjà animés)
@@ -1578,8 +1639,27 @@ def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
             "n": n, "prompt_image": pi, "prompt_motion": pm,
             "dialogue": str(s.get("dialogue", "")).strip(),
             **_block_fields(s),
+            **_segment_fields(s),
         }, s),
     )
+
+
+def _segment_fields(s: dict[str, Any]) -> dict[str, Any]:
+    """Découpage client : segments (texte + mouvement, sans progression) + partie propre du
+    prompt image. Le texte des segments doit reconstituer le dialogue du plan (vérifié)."""
+    out: dict[str, Any] = {}
+    segs = s.get("segments")
+    if isinstance(segs, list) and segs:
+        clean = [
+            {"text": str(x.get("text") or ""), "motion": str(x.get("motion") or "")[:3000]}
+            for x in segs if isinstance(x, dict) and str(x.get("text") or "").strip()
+        ]
+        dialogue = str(s.get("dialogue", "")).strip()
+        if clean and brain.realign_to_script(dialogue, [x["text"] for x in clean]) is not None:
+            out["segments"] = clean
+    if str(s.get("shot_prompt") or "").strip():
+        out["shot_prompt"] = str(s["shot_prompt"]).strip()[:4000]
+    return out
 
 
 # Découpage CLIENT : bloc d'origine d'un plan (stocké sur le clip, affiché dans la galerie).
@@ -1598,6 +1678,17 @@ def _block_fields(s: dict[str, Any]) -> dict[str, Any]:
         if str(s.get(k) or "").strip():
             out[k] = str(s[k]).strip()[:2000]
     return out
+
+
+def _segments_view(c: dict[str, Any], wps: float) -> list[dict[str, Any]]:
+    """Segments d'un plan client pour l'UI : texte, mouvement, durée, tour déjà fait ou non."""
+    segs = pipeline.clip_segments(c)
+    return [
+        {"text": s["text"], "motion": s.get("motion") or "",
+         "seconds": config_app.omni_segment_seconds(str(s["text"]), wps, first=(i == 0)),
+         "done": bool(s.get("interaction_id"))}
+        for i, s in enumerate(segs)
+    ]
 
 
 def _block_label(c: dict[str, Any]) -> str:
@@ -1666,7 +1757,7 @@ def _omni_estimate(dialogues: list[str], words_per_sec: float) -> dict[str, Any]
 def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:
     """Estimation Omni des plans à animer, avec la fiche voix TELLE QUE STOCKÉE sur la pub."""
     wps = config_app.voice_words_per_sec(ad.get("voice_profile"))
-    return _omni_estimate([str(c.get("script") or "") for c in clips], wps)
+    return cost.estimate_avatar_omni([pipeline.clip_omni_seconds(c, wps) for c in clips])
 
 
 def _norm_currency(value: str) -> str:

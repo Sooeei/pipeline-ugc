@@ -1115,8 +1115,14 @@ def _omni_body(
     image_parts: list[dict[str, Any]],
     seconds: int,
     model_value: str = config_app.OMNI_MODEL,
+    store: bool = False,
+    previous_interaction_id: str = "",
 ) -> dict[str, Any]:
-    """Corps de POST /interactions : images (plan puis ancre, 2 max) + prompt ; sortie vidéo 9:16."""
+    """Corps de POST /interactions : images (plan puis ancre, 2 max) + prompt ; sortie vidéo 9:16.
+
+    `store=True` : l'interaction est conservée par Google → elle pourra être ÉTENDUE au tour
+    suivant (obligatoire pour une chaîne). `previous_interaction_id` : tour d'EXTENSION de la vidéo
+    de cette interaction (texte seul, sans image ; response_format répété à chaque tour)."""
     response_format: dict[str, Any] = {
         "type": "video",
         "aspect_ratio": config_app.ASPECT_RATIO,
@@ -1127,12 +1133,15 @@ def _omni_body(
         response_format["duration"] = f"{int(seconds)}s"
     parts = list(image_parts[: config_app.OMNI_MAX_INPUT_IMAGES])
     parts.append({"type": "text", "text": prompt})
-    return {
+    body: dict[str, Any] = {
         "model": model_value,
         "input": parts,
         "response_format": response_format,
-        "store": False,
+        "store": bool(store),
     }
+    if previous_interaction_id:
+        body["previous_interaction_id"] = previous_interaction_id
+    return body
 
 
 def _omni_extract_video(data: Any) -> tuple[bytes | None, str | None]:
@@ -1253,8 +1262,10 @@ def omni_generate_video(
     model_value: str = config_app.OMNI_MODEL,
     label: str = "",
     index: int = 0,
+    store: bool = False,
 ) -> dict[str, str]:
     """Anime l'IMAGE validée du plan AVEC voix + lip-sync (Google Omni) → .mp4.
+    `store=True` = 1er tour d'une chaîne (la vidéo pourra être étendue).
 
     Renvoie {"path", "interaction_id"}. Simulation : placeholder + id « SIMU_OMNI_<n> ».
     Réel : POST /interactions synchrone (timeout OMNI_REQUEST_TIMEOUT), puis vidéo base64 ou URI.
@@ -1281,7 +1292,43 @@ def omni_generate_video(
             parts.append(_omni_image_part(anchor_path))
         except Exception as exc:  # noqa: BLE001 - ancre illisible : on continue sans
             _log_detail(f"Google Omni ancre ignorée (illisible) : {exc}")
-    body = _omni_body(prompt, parts, seconds, model_value)
+    body = _omni_body(prompt, parts, seconds, model_value, store=store)
+    return {"path": out_mp4, "interaction_id": _omni_run(key, body, out_mp4)}
+
+
+def omni_extend_video(
+    cfg: ProviderConfig,
+    previous_interaction_id: str,
+    prompt: str,
+    out_mp4: str | Path,
+    seconds: int,
+    model_value: str = config_app.OMNI_MODEL,
+    label: str = "",
+    index: int = 0,
+) -> dict[str, str]:
+    """Tour d'EXTENSION d'une vidéo Omni (même plan, même prise continue) : `previous_interaction_id`
+    = interaction du tour précédent (créée avec store=true), texte seul — Google garde la vidéo, les
+    personnages et la voix. Renvoie {"path", "interaction_id"} (stocké : ce tour peut être étendu).
+    Simulation : placeholder + id « SIMU_OMNI_EXT_<n> »."""
+    out_mp4 = str(out_mp4)
+    if cfg.dry_run:
+        path = media.make_placeholder_mp4(
+            out_mp4, seconds=2.0, label=f"SIMULATION omni suite {label} {index + 1}".strip()
+        )
+        return {"path": path, "interaction_id": f"SIMU_OMNI_EXT_{index + 1}"}
+    key = _clean_key(cfg.gemini_api_key)
+    if not key:
+        raise ProviderError("Clé API Google (Gemini) manquante — ajoute-la dans Réglages.")
+    if not previous_interaction_id:
+        raise ProviderError("Tour précédent introuvable — relance l'animation de ce plan depuis le début.")
+    body = _omni_body(prompt, [], seconds, model_value, store=True,
+                      previous_interaction_id=previous_interaction_id)
+    return {"path": out_mp4, "interaction_id": _omni_run(key, body, out_mp4)}
+
+
+def _omni_run(key: str, body: dict[str, Any], out_mp4: str) -> str:
+    """POST /interactions → vidéo écrite dans `out_mp4` (base64 ou URI) ; renvoie l'id. Toutes les
+    erreurs deviennent des ProviderError FR (jamais d'exception requests brute)."""
     headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
 
     try:
@@ -1322,7 +1369,7 @@ def omni_generate_video(
             raise ProviderError("Impossible d'enregistrer la vidéo sur le disque — réessaie.") from exc
     else:
         _omni_download_file(str(uri), key, out_mp4)
-    return {"path": out_mp4, "interaction_id": interaction_id}
+    return interaction_id
 
 
 def omni_check(cfg: ProviderConfig) -> dict:

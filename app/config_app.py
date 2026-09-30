@@ -444,7 +444,14 @@ OMNI_RESOLUTION = "720p"
 OMNI_REQUEST_TIMEOUT = 600             # s — appel direct synchrone (pas de mode background)
 OMNI_POLL_EVERY = 5                    # s — sondage du fichier vidéo (livraison par URI)
 OMNI_POLL_TIMEOUT = 600
-OMNI_SEND_DURATION = False             # response_format.duration non documenté → non envoyé
+# Vidéo ÉTENDUE (découpage client : 1 bloc = 1 plan = chaîne de tours Omni, doc « Video
+# extension ») : chaque tour ajoute 3-10 s, « up to a total length of 40s » (doc Omni).
+OMNI_MAX_TOTAL_SECONDS = 40
+# La doc ne dit pas si la vidéo d'un tour d'extension contient TOUT le clip ou seulement la suite :
+# "auto" = on mesure sa durée (ffprobe) et on concatène les tours si ce n'est que la suite.
+# Forçable : "full" (garder le dernier fichier) / "continuation" (toujours concaténer).
+OMNI_EXTENSION_RETURNS = "auto"
+OMNI_SEND_DURATION = False            # response_format.duration non documenté → non envoyé
 OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
 OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min (avertissement UI)
 OMNI_DEFAULT_ACCENT = "natural French accent from France"
@@ -479,6 +486,20 @@ def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
         return OMNI_SILENT_CLIP_SECONDS
     wps = words_per_sec or GROK_WORDS_PER_SEC
     secs = math.ceil(words / wps) + OMNI_INTRO_SECONDS
+    return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
+
+
+def omni_segment_seconds(text: str, words_per_sec: float | None = None, first: bool = True) -> int:
+    """Durée d'un SEGMENT de plan client (un tour Omni) : le 1er tour garde la respiration
+    d'intro (omni_clip_seconds) ; une extension n'en a pas. Bornée [OMNI_MIN, OMNI_MAX]."""
+    import math
+
+    if first:
+        return omni_clip_seconds(text, words_per_sec)
+    words = spoken_word_count(text)
+    if not words:
+        return OMNI_SILENT_CLIP_SECONDS
+    secs = math.ceil(words / (words_per_sec or GROK_WORDS_PER_SEC))
     return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
 
 

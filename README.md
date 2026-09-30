@@ -72,10 +72,13 @@ qui génère la **voix et le lip-sync** dans la même passe.
 - **Trois découpages** : **Auto** (le cerveau découpe ton script), **Manuel** (un bloc = un
   plan, séparés par une ligne vide) et **Découpage client** : colle le document du client,
   bloc par bloc — `BLOC N · [0:00–0:08] — TITRE <dialogue>` puis une ligne `🎬 <mise en scène>`
-  (timecode et titre optionnels). Le dialogue reste mot pour mot ; un bloc trop long est
-  redécoupé en sous-plans (N.1, N.2…) sur des phrases entières ; la mise en scène du client est
-  **traduite** (jamais inventée) et prime sur les règles par défaut. Les valeurs entre
-  crochets (`[97 %]`) sont surlignées « à valider » et dites sans les crochets.
+  (timecode et titre optionnels). **1 bloc = 1 plan = 1 image = 1 vidéo continue** : le
+  dialogue (mot pour mot) est dit en plusieurs **tours** Omni enchaînés (extension de la vidéo,
+  ≤ 22 mots par tour, 40 s max par plan) ; si un tour échoue, « Reprendre » repart du dernier
+  tour réussi. La mise en scène du client est **traduite** (jamais inventée) et prime sur les
+  règles par défaut ; une **bible visuelle** (personnages, décor, produit, positions) est
+  ajoutée à l'identique à chaque image et reste modifiable au-dessus de la galerie. Les
+  valeurs entre crochets (`[97 %]`) sont surlignées « à valider » et dites sans les crochets.
 - **Personnages** : « Personnage 1 — parle » et « Personnage 2 — muet » (optionnel), saisis en
   français et traduits en anglais par Claude au moment du plan ; les photos « visage » peuvent
   être rattachées au personnage 1 ou 2.

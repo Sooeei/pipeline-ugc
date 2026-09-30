@@ -100,6 +100,7 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("kind", "TEXT NOT NULL DEFAULT 'avatar'"),
         ("voice_profile", "TEXT"),            # JSON : fiche voix Avatar IA (Omni)
         ("personas", "TEXT"),                 # JSON : personnages Avatar IA {p1, p2, p1_en, p2_en}
+        ("bible", "TEXT"),                    # JSON : bible visuelle EN (découpage client)
     ],
     "clips": [
         ("prompt_image", "TEXT"),
@@ -115,6 +116,8 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("block_title", "TEXT"),
         ("timecode", "TEXT"),
         ("direction", "TEXT"),
+        ("segments", "TEXT"),    # JSON : segments du dialogue = tours Omni (texte, motion, durée, id…)
+        ("shot_prompt", "TEXT"), # partie PROPRE au plan du prompt image (la bible est ajoutée à part)
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
@@ -344,6 +347,16 @@ def set_ad_voice_profile(ad_id: int, voice_profile_json: str) -> None:
         con.close()
 
 
+def set_ad_bible(ad_id: int, bible_json: str) -> None:
+    """Enregistre la bible visuelle (JSON, anglais) d'une pub Avatar IA en découpage client."""
+    con = connect()
+    try:
+        con.execute("UPDATE ads SET bible=? WHERE id=?", (bible_json, ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
 def set_ad_personas(ad_id: int, personas_json: str) -> None:
     """Enregistre les personnages (FR saisi + traduction EN) d'une pub Avatar IA (Omni)."""
     con = connect()
@@ -431,6 +444,7 @@ _ALLOWED_CLIP_COLS = {
     "wav_path", "mp4_path", "status", "error", "duration_s",
     "refs_needed", "is_anchor", "interaction_id",
     "block_n", "block_sub", "block_count", "block_title", "timecode", "direction",
+    "segments", "shot_prompt",
 }
 
 

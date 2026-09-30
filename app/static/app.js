@@ -3126,6 +3126,52 @@ function aoBlockHead(s) {
 }
 
 let aoPersonas = null;   // personnages du dernier plan {p1, p2, p1_en, p2_en} (EN = Claude)
+let aoPlanBible = null;  // bible visuelle du dernier plan (découpage client), renvoyée au Plan 1
+const AO_BIBLE_FIELDS = { character1: "aoBibleCharacter1", character2: "aoBibleCharacter2",
+  set: "aoBibleSet", product: "aoBibleProduct", positions: "aoBiblePositions" };
+
+// Segments (tours Omni) d'un plan client : texte, durée, mouvement, tour déjà fait.
+function aoSegmentsHtml(segs) {
+  if (!Array.isArray(segs) || !segs.length) return "";
+  return `<ul class="ao-segs">` + segs.map((x, i) =>
+    `<li class="${x.done ? "done" : ""}"><div class="ao-seg-head"><b>${x.done ? "✓" : "○"} Tour ${i + 1}</b>` +
+    `<span>~${esc(x.seconds ?? "?")} s</span></div>` +
+    `<div>💬 ${aoHighlightBrackets(x.text)}</div>` +
+    (x.motion ? `<div class="ao-seg-motion">🎥 ${esc(x.motion)}</div>` : "") + `</li>`
+  ).join("") + `</ul>`;
+}
+
+function aoPlanTitle(s) {
+  if (s.block_n && Array.isArray(s.segments) && s.segments.length) {
+    return `Bloc ${esc(s.block_n)}` + (s.block_title ? ` · ${esc(s.block_title)}` : "") +
+      (s.timecode ? ` <span class="muted">[${esc(s.timecode)}]</span>` : "");
+  }
+  return `Plan ${esc(s.label || s.n)}`;
+}
+
+function aoRenderBible(bible) {
+  const box = $("aoBibleBox");
+  const has = bible && bible.character1;
+  box.classList.toggle("hidden", !has);
+  if (!has) return;
+  Object.entries(AO_BIBLE_FIELDS).forEach(([k, id]) => { $(id).value = bible[k] || ""; });
+  $("aoBibleMsg").textContent = "";
+}
+
+$("aoBibleSaveBtn").addEventListener("click", async () => {
+  if (!aoAdId) return;
+  const bible = {};
+  Object.entries(AO_BIBLE_FIELDS).forEach(([k, id]) => { bible[k] = $(id).value.trim(); });
+  try {
+    const r = await api(AO_API + "/bible/" + aoAdId, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bible }),
+    });
+    toast(`Bible enregistrée ✓ — ${r.updated} prompt(s) image recomposé(s)`);
+    await loadAoGallery(aoAdId);
+    $("aoBibleMsg").textContent = "Images inchangées : « Régénérer » un plan pour lui appliquer la nouvelle bible.";
+  } catch (e) { toast(e.message); }
+});
 
 function aoRenderWarnings(boxId, warnings, maxWords) {
   const box = $(boxId);
@@ -3173,6 +3219,7 @@ $("aoPlanBtn").addEventListener("click", async () => {
     });
     aoShots = r.shots || [];
     aoPersonas = r.personas || null;
+    aoPlanBible = r.bible || null;
     if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
     msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
     renderAoPlan(aoShots, r);
@@ -3193,7 +3240,8 @@ function renderAoPlan(shots, r) {
   shots.forEach((s) => {
     const refs = Array.isArray(s.refs_needed) ? s.refs_needed : [];
     const refsTxt = refs.length ? refs.map((k) => AO_REF_LABEL[k] || k).join(", ") : "plan neutre";
-    if (s.block_n && s.block_n !== prevBlock) {
+    const segs = Array.isArray(s.segments) ? s.segments : [];
+    if (!segs.length && s.block_n && s.block_count > 1 && s.block_n !== prevBlock) {
       const head = document.createElement("div");
       head.className = "ao-block-head";
       head.innerHTML = aoBlockHead(s);
@@ -3203,11 +3251,14 @@ function renderAoPlan(shots, r) {
     const div = document.createElement("div");
     div.className = "scene-card";
     div.innerHTML =
-      `<div><span class="n">Plan ${esc(s.label || s.n)}</span> <span class="muted">réfs : ${esc(refsTxt)}</span></div>` +
-      `<div class="motion">💬 ${s.dialogue ? aoHighlightBrackets(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+      `<div><span class="n">${aoPlanTitle(s)}</span> <span class="muted">réfs : ${esc(refsTxt)}` +
+      (segs.length ? ` · ${segs.length} tour(s) · ~${esc(s.duration_s)} s` : "") + `</span></div>` +
       (s.direction ? `<div class="ao-direction">🎬 Client : ${esc(s.direction)}</div>` : "") +
-      `<div class="script">🖼️ ${esc(s.prompt_image)}</div>` +
-      `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`;
+      (segs.length
+        ? aoSegmentsHtml(segs) + `<div class="script">🖼️ ${esc(s.shot_prompt || s.prompt_image)}</div>`
+        : `<div class="motion">💬 ${s.dialogue ? aoHighlightBrackets(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+          `<div class="script">🖼️ ${esc(s.prompt_image)}</div>` +
+          `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`);
     list.appendChild(div);
   });
   aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words);
@@ -3245,6 +3296,7 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   fd.append("ref_kinds", JSON.stringify(aoRefsKinds));
   fd.append("voice_profile", JSON.stringify(aoReadVoice("aoV")));
   fd.append("personas", JSON.stringify(aoPersonas || {}));
+  if (aoPlanBible) fd.append("bible", JSON.stringify(aoPlanBible));
   aoRefsFiles.forEach((f) => fd.append("files", f, f.name));
   let res;
   try {
@@ -3313,6 +3365,7 @@ async function loadAoGallery(adId) {
   }
   $("aoValidation").classList.remove("hidden");
   aoGalleryShots = r.shots || [];
+  aoRenderBible(r.bible);
   aoRenderVoiceBlock(r);
   aoRenderWarnings("aoWarnings", r.warnings, r.max_words);
   const g = $("aoGallery");
@@ -3320,7 +3373,8 @@ async function loadAoGallery(adId) {
   g.innerHTML = "";
   let prevBlock = null;
   aoGalleryShots.forEach((s) => {
-    if (s.block_n && s.block_n !== prevBlock) {
+    const hasSegs = Array.isArray(s.segments) && s.segments.length;
+    if (!hasSegs && s.block_n && s.block_count > 1 && s.block_n !== prevBlock) {
       const head = document.createElement("div");
       head.className = "ao-block-head";
       head.innerHTML = aoBlockHead(s);
@@ -3357,6 +3411,7 @@ function aoShotCard(s) {
   const done = s.status === "pret";
   card.className = "obj-shot" + (valid || done ? " valide" : "");
   card.dataset.clip = String(s.clip_id);
+  const isClient = Array.isArray(s.segments) && s.segments.length > 0;
   const badge = done
     ? '<span class="badge ok">animé ✓</span>'
     : valid
@@ -3376,13 +3431,18 @@ function aoShotCard(s) {
   card.innerHTML =
     thumb +
     `<div class="body">` +
-    `<div class="head"><span class="n">Plan ${esc(s.label || s.n)}</span>${badge}</div>` +
+    `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}</div>` +
     `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
     err +
     (s.direction ? `<div class="ao-direction" title="Mise en scène du client">🎬 ${esc(s.direction)}</div>` : "") +
-    `<div class="lbl">Visuel (prompt image, éditable — pris en compte à la régénération)</div>` +
-    `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
-    `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>` +
+    (isClient
+      ? `<div class="lbl">Ce qui change dans ce plan (image de départ — la bible est ajoutée automatiquement)</div>` +
+        `<textarea class="pi">${esc(s.shot_prompt || "")}</textarea>` +
+        `<div class="lbl">Tours Omni (1 vidéo continue${s.segments.length > 1 ? `, ${s.segments.length} extensions enchaînées` : ""})</div>` +
+        aoSegmentsHtml(s.segments)
+      : `<div class="lbl">Visuel (prompt image, éditable — pris en compte à la régénération)</div>` +
+        `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
+        `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>`) +
     `<div class="lbl">💬 Dialogue — ce que la personne DIT (verbatim)</div>` +
     `<textarea class="vo" placeholder="Laisse vide = plan sans parole">${esc(s.dialogue || "")}</textarea>` +
     aoBracketValuesHtml(s.dialogue) +

@@ -13,6 +13,7 @@ import shutil
 import struct
 import subprocess
 import wave
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -110,6 +111,52 @@ def wav_bytes_to_mp3_file(wav_bytes: bytes, out_path: str | Path, bitrate_kbps: 
         str(out_path),
     ]
     subprocess.run(cmd, input=fix_wav_bytes(wav_bytes), check=True)
+    return str(out_path)
+
+
+def mp4_duration(path: str | Path) -> float | None:
+    """Durée (s) d'une vidéo via ffprobe ; None si ffprobe absent ou fichier illisible."""
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, check=True, timeout=60,
+        ).stdout.strip()
+        return float(out) if out else None
+    except Exception:  # noqa: BLE001 - diagnostic non bloquant
+        return None
+
+
+def concat_mp4(parts: Sequence[str | Path], out_path: str | Path) -> str:
+    """Concatène des mp4 (tours successifs d'une vidéo Omni étendue) en UN fichier. D'abord sans
+    ré-encodage (demuxer concat, -c copy) ; si ça échoue (flux incompatibles), ré-encodage."""
+    if not ffmpeg_available():
+        raise RuntimeError(FFMPEG_MISSING_MSG)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    listing = out_path.with_suffix(".concat.txt")
+    lines = []
+    for p in parts:
+        safe = str(Path(p).resolve()).replace("\\", "/").replace("'", "'\\''")
+        lines.append(f"file '{safe}'")
+    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+            "-i", str(listing)]
+    try:
+        try:
+            subprocess.run(base + ["-c", "copy", str(out_path)], check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                base + ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out_path)],
+                check=True, capture_output=True,
+            )
+    finally:
+        try:
+            listing.unlink()
+        except OSError:
+            pass
     return str(out_path)
 
 

@@ -28,6 +28,7 @@ from .providers import (
     heygen_upload_audio,
     kling_generate_video,
     nano_banana_generate_image,
+    omni_extend_video,
     omni_generate_video,
 )
 
@@ -750,6 +751,100 @@ def build_omni_prompt(
     return " ".join(parts)
 
 
+def _assemble_chain(parts: list[str], expected_seconds: int, out_mp4: Path) -> None:
+    """UN mp4 par plan. Si la vidéo du dernier tour contient TOUT le clip (doc non explicite →
+    mesurée par ffprobe en mode "auto"), on la garde ; sinon on concatène les tours (sans
+    ré-encodage si possible). Le constat est journalisé (à vérifier au 1er test réel)."""
+    import shutil
+
+    if len(parts) == 1:
+        if Path(parts[0]) != out_mp4:
+            shutil.copyfile(parts[0], out_mp4)
+        return
+    mode = config_app.OMNI_EXTENSION_RETURNS
+    if mode == "auto":
+        last = media.mp4_duration(parts[-1])
+        full = last is not None and last >= 0.75 * expected_seconds
+        _log_detail(f"Omni extension : dernier tour {last} s pour ~{expected_seconds} s attendues "
+                    f"→ {'clip complet' if full else 'suite seule → concaténation'}")
+    else:
+        full = mode == "full"
+    if full:
+        shutil.copyfile(parts[-1], out_mp4)
+    else:
+        media.concat_mp4(parts, out_mp4)
+
+
+def build_omni_extension_prompt(
+    prompt_motion: str,
+    dialogue: str,
+    voice_sheet: str,
+    seconds: int,
+    speaker: str = "",
+    silent: str = "",
+) -> str:
+    """Prompt d'un tour d'EXTENSION (même plan, même prise continue). Timecodes RELATIFS au début
+    de l'extension (doc Omni : « 0s refers to the beginning of the extended part »). Dialogue
+    VERBATIM (crochets retirés), personnage 1 qui parle, personnage 2 muet."""
+    people = "same two people" if silent else "same person"
+    parts = [
+        f"Extend this video: the scene continues in the same single unbroken shot, {people}, "
+        "same set, same voice."
+    ]
+    text = brain.strip_brackets((dialogue or "").strip())
+    who = f"The speaking character ({speaker})" if speaker else "The person"
+    if text:
+        parts.append(
+            f"[0-{seconds}s] {who} says, spoken in French, in {voice_sheet}: "
+            f"\"{_omni_quote_dialogue(text)}\" Lips and expression stay in sync with every word."
+        )
+    else:
+        parts.append(f"[0-{seconds}s] No dialogue.")
+    motion = brain.scrub_brand_names(prompt_motion or "")
+    if motion:
+        parts.append(motion)
+    if silent:
+        parts.append(f"The other character ({silent}) remains silent: no speech, no lip movement.")
+    parts.append("No music. No subtitles.")
+    return " ".join(parts)
+
+
+def clip_segments(c: dict[str, Any]) -> list[dict[str, Any]]:
+    """Segments (tours Omni) d'un plan en découpage client ; [] pour un plan classique."""
+    import json
+
+    raw = c.get("segments")
+    try:
+        data = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        data = []
+    return [s for s in data if isinstance(s, dict) and str(s.get("text") or "").strip()] \
+        if isinstance(data, list) else []
+
+
+def clip_omni_seconds(c: dict[str, Any], words_per_sec: float | None) -> int:
+    """Durée Omni d'un plan : somme de ses segments (découpage client) ou durée de son dialogue."""
+    segs = clip_segments(c)
+    if segs:
+        return sum(
+            config_app.omni_segment_seconds(str(s["text"]), words_per_sec, first=(i == 0))
+            for i, s in enumerate(segs)
+        )
+    return config_app.omni_clip_seconds(str(c.get("script") or ""), words_per_sec)
+
+
+def reset_segments_progress(segs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Segments sans progression (nouvelle image / nouveau dialogue / réanimation complète)."""
+    return [{k: v for k, v in s.items() if k not in ("interaction_id", "mp4_path", "done")}
+            for s in segs]
+
+
+def ad_bible(ad: dict[str, Any] | None) -> dict[str, str]:
+    """Bible visuelle d'une pub (découpage client) ; {} si absente."""
+    raw = (ad or {}).get("bible")
+    return brain.normalize_bible(raw) if raw else {}
+
+
 def ad_personas(ad: dict[str, Any] | None) -> dict[str, str]:
     """Personnages d'une pub Avatar IA ({p1, p2, p1_en, p2_en}) ; {} si absents / illisibles."""
     import json
@@ -793,17 +888,24 @@ def animate_avatar_omni_clips(
     wps = config_app.voice_words_per_sec(profile)
     sheet = config_app.voice_sheet(profile)
     personas = ad_personas(ad)   # descriptions ANGLAISES (jamais le texte français brut)
+    bible = ad_bible(ad)
+    # Mêmes descriptions que les images : la bible (si découpage client), sinon les personnages EN.
+    speaker = bible.get("character1") or personas.get("p1_en", "")
+    silent = bible.get("character2") or personas.get("p2_en", "")
     # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
     ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
 
     def _render(c: dict[str, Any], mp4: Path) -> None:
+        if clip_segments(c):
+            _render_chain(c, mp4)
+            return
         n = int(c["scene_n"])
         dialogue = str(c.get("script") or "").strip()   # VERBATIM
         seconds = config_app.omni_clip_seconds(dialogue, wps)
         has_anchor = ref is not None and int(ref["id"]) != int(c["id"])
         prompt = build_omni_prompt(
             str(c.get("motion_prompt", "")), dialogue, sheet, seconds, has_anchor,
-            speaker=personas.get("p1_en", ""), silent=personas.get("p2_en", ""),
+            speaker=speaker, silent=silent,
         )
         res = omni_generate_video(
             cfg, str(c["image_path"]), prompt, mp4, seconds,
@@ -813,6 +915,57 @@ def animate_avatar_omni_clips(
         db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
         if not cfg.dry_run:
             cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
+
+    def _render_chain(c: dict[str, Any], mp4: Path) -> None:
+        """Découpage client : 1 plan = 1 vidéo continue = chaîne de tours Omni (1 par segment).
+        Tour 1 = image du plan (<FIRST_FRAME>) + segment 1, store=true ; tours suivants =
+        extension via previous_interaction_id (texte seul). Chaque tour réussi est ENREGISTRÉ
+        (id + fichier) → une reprise repart du dernier tour réussi. Résultat : UN mp4."""
+        import json
+
+        n = int(c["scene_n"])
+        clip_id = int(c["id"])
+        segs = clip_segments(c)
+        k = len(segs)
+        done = 0
+        while done < k and segs[done].get("interaction_id") and Path(
+            str(segs[done].get("mp4_path") or "")
+        ).is_file():
+            done += 1
+        if done == k and c.get("status") == "pret":
+            segs, done = reset_segments_progress(segs), 0   # plan déjà animé : on refait tout
+        has_anchor = ref is not None and int(ref["id"]) != clip_id
+        for i in range(done, k):
+            s = segs[i]
+            seconds = config_app.omni_segment_seconds(str(s["text"]), wps, first=(i == 0))
+            part = mp4.with_name(f"{n}_tour{i + 1}.mp4")
+            if i == 0:
+                prompt = build_omni_prompt(
+                    str(s.get("motion") or ""), str(s["text"]), sheet, seconds, has_anchor,
+                    speaker=speaker, silent=silent,
+                )
+                res = omni_generate_video(
+                    cfg, str(c["image_path"]), prompt, part, seconds,
+                    anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
+                    model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
+                )
+            else:
+                prompt = build_omni_extension_prompt(
+                    str(s.get("motion") or ""), str(s["text"]), sheet, seconds,
+                    speaker=speaker, silent=silent,
+                )
+                res = omni_extend_video(
+                    cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
+                    model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
+                )
+            segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
+                       "mp4_path": str(res.get("path") or part), "done": True}
+            db.update_clip(clip_id, segments=json.dumps(segs, ensure_ascii=False),
+                           interaction_id=segs[i]["interaction_id"])
+            if not cfg.dry_run:
+                cost.record_omni_clip(ad_id, seconds)   # 1 tour = sa durée réelle
+        _assemble_chain([str(s["mp4_path"]) for s in segs],
+                        sum(int(s.get("seconds") or 0) for s in segs), mp4)
 
     return _animate_clips(
         ad_id, ad_name, clips, _render,

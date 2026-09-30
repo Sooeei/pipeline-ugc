@@ -448,6 +448,15 @@ OMNI_SEND_DURATION = False             # response_format.duration non documenté
 OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
 OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min (avertissement UI)
 OMNI_DEFAULT_ACCENT = "natural French accent from France"
+# Accent de la fiche voix (sélecteur) → consigne envoyée à Omni. Le champ libre « accent »,
+# s'il est rempli, a la PRIORITÉ sur ce choix.
+OMNI_ACCENTS: dict[str, dict[str, str]] = {
+    "france": {"label": "France", "phrase": OMNI_DEFAULT_ACCENT},
+    "quebec": {"label": "Québec", "phrase": "natural Québécois French accent (Quebec, Canada)"},
+    "belgique": {"label": "Belgique", "phrase": "natural Belgian French accent"},
+    "suisse": {"label": "Suisse", "phrase": "natural Swiss French accent"},
+}
+DEFAULT_OMNI_ACCENT_REGION = "france"
 OMNI_DEFAULT_CAMERA = (
     "Vertical 9:16 handheld smartphone UGC shot with subtle natural camera movement"
 )
@@ -455,12 +464,17 @@ OMNI_INTRO_GESTURE = "The person looks into the lens with a small natural breath
 _VOICE_TEXT_MAX = 120                  # longueur max d'un champ texte de la fiche voix
 
 
+def spoken_word_count(text: str) -> int:
+    """Nombre de mots PRONONCÉS : un signe isolé (« : », « — », « » ») ne compte pas."""
+    return sum(1 for tok in (text or "").split() if any(ch.isalnum() for ch in tok))
+
+
 def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
     """Durée d'un clip Omni : temps naturel pour dire le dialogue + respiration d'intro, borné
     [OMNI_MIN, OMNI_MAX]. Sans dialogue → OMNI_SILENT_CLIP_SECONDS."""
     import math
 
-    words = len((dialogue or "").split())
+    words = spoken_word_count(dialogue)
     if not words:
         return OMNI_SILENT_CLIP_SECONDS
     wps = words_per_sec or GROK_WORDS_PER_SEC
@@ -485,7 +499,8 @@ def _voice_text(value: Any) -> str:
 def normalize_voice_profile(raw: Any) -> dict[str, str]:
     """Fiche voix Omni validée (dict ou JSON) : clés inconnues → défauts, textes tronqués.
 
-    Structure : {gender, age, accent, tone (clé GROK_VOICE_STYLES), pace (clé GROK_VOICE_PACES), extra}.
+    Structure : {gender, age, accent_region (clé OMNI_ACCENTS), accent (texte libre prioritaire,
+    vide = accent du sélecteur), tone (clé GROK_VOICE_STYLES), pace (clé GROK_VOICE_PACES), extra}.
     """
     import json
 
@@ -500,10 +515,15 @@ def normalize_voice_profile(raw: Any) -> dict[str, str]:
     gender = str(data.get("gender") or "").strip().lower()
     tone = str(data.get("tone") or "").strip()
     pace = str(data.get("pace") or "").strip()
+    region = str(data.get("accent_region") or "").strip().lower()
+    accent = _voice_text(data.get("accent"))
+    if accent == OMNI_DEFAULT_ACCENT:
+        accent = ""   # ancienne fiche : l'accent France pré-rempli n'est pas un choix libre
     return {
         "gender": gender if gender in ("female", "male") else "",
         "age": _voice_text(data.get("age")),
-        "accent": _voice_text(data.get("accent")) or OMNI_DEFAULT_ACCENT,
+        "accent_region": region if region in OMNI_ACCENTS else DEFAULT_OMNI_ACCENT_REGION,
+        "accent": accent,
         "tone": tone if tone in GROK_VOICE_STYLES else DEFAULT_GROK_VOICE_STYLE,
         "pace": pace if pace in GROK_VOICE_PACES else DEFAULT_GROK_VOICE_PACE,
         "extra": _voice_text(data.get("extra")),
@@ -526,7 +546,8 @@ def voice_sheet(profile: Any) -> str:
     if p["age"]:
         speaker += f" around {p['age']} years old"
     parts.append(f" of {speaker}")
-    accent = p["accent"]
+    # Champ libre prioritaire s'il est rempli, sinon l'accent choisi dans le sélecteur.
+    accent = p["accent"] or OMNI_ACCENTS[p["accent_region"]]["phrase"]
     if not accent.lower().startswith(("a ", "an ", "the ")):
         accent = f"a {accent}"
     parts.append(f", with {accent}")

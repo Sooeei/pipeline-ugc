@@ -420,8 +420,16 @@
               </select>
             </label>
             <label>Âge <input type="text" id="aoVAge" placeholder="Ex. 35-45" maxlength="120" /></label>
-            <label>Accent <span class="muted">(en anglais)</span>
-              <input type="text" id="aoVAccent" value="natural French accent from France" maxlength="120" /></label>
+            <label>Accent
+              <select id="aoVAccentRegion">
+                <option value="france">France</option>
+                <option value="quebec">Québec</option>
+                <option value="belgique">Belgique</option>
+                <option value="suisse">Suisse</option>
+              </select>
+            </label>
+            <label>Accent libre <span class="muted">(optionnel, en anglais — remplace le choix ci-dessus)</span>
+              <input type="text" id="aoVAccent" placeholder="Ex. light Marseille accent" maxlength="120" /></label>
             <label>Timbre <select id="aoVTone"></select></label>
             <label>Débit <select id="aoVPace"></select></label>
             <label>Précision libre <span class="muted">(optionnel, en anglais)</span>
@@ -475,7 +483,16 @@
                   </select>
                 </label>
                 <label>Âge <input type="text" id="aoEVAge" maxlength="120" /></label>
-                <label>Accent <input type="text" id="aoEVAccent" maxlength="120" /></label>
+                <label>Accent
+                  <select id="aoEVAccentRegion">
+                    <option value="france">France</option>
+                    <option value="quebec">Québec</option>
+                    <option value="belgique">Belgique</option>
+                    <option value="suisse">Suisse</option>
+                  </select>
+                </label>
+                <label>Accent libre <span class="muted">(prioritaire)</span>
+                  <input type="text" id="aoEVAccent" placeholder="optionnel, en anglais" maxlength="120" /></label>
                 <label>Timbre <select id="aoEVTone"></select></label>
                 <label>Débit <select id="aoEVPace"></select></label>
                 <label>Précision libre <input type="text" id="aoEVExtra" maxlength="120" /></label>

@@ -3,7 +3,7 @@ son texte (il « normalise » souvent la typographie). Aucun appel réseau : fau
 
 import pytest
 
-from app import brain
+from app import brain, config_app
 from app.providers import ProviderConfig
 
 NBSP = " "
@@ -130,3 +130,149 @@ def test_avatar_omni_plan_really_changed_word_is_refused(monkeypatch):
 def test_simulation_still_verbatim():
     res = brain.generate_shooting_plan(ProviderConfig(dry_run=True), "Lunia", "", SCRIPT)
     assert all(s["dialogue"] in SCRIPT for s in res["shots"])
+
+
+# ============================================================ non-régression : script « maquilleuse »
+# Script réel qui faisait refuser le plan Avatar IA (auto) : « », —, apostrophes, deux paragraphes.
+MAQ = (
+    "La première affaire qu'elle m'a dite en arrivant : « Je sais pas me maquiller. » Ça fait "
+    "quarante ans qu'elle pense ça. Aujourd'hui, je vais pas la maquiller — pis à la fin, elle va "
+    "avoir changé d'idée.\n"
+    "Je maquille des peaux matures tous les jours, pis voici ce que personne vous dit : la plupart "
+    "des fonds de teint sont conçus en supposant une technique. Trouver son sous-ton. Préparer sa "
+    "peau pour que ça accroche partout pareil. Doser. Pis fondre le contour pour qu'il reste pas de "
+    "ligne. Quatre affaires. C'est pas un produit, ça : c'est un kit qui suppose une formation. Pis "
+    "cette formation-là, personne lui a donnée."
+)
+# Même texte en typographie française (’, espaces fines U+202F dans « », insécable avant « : »).
+MAQ_TYPO = (MAQ.replace("'", "’").replace("« ", "«" + NNBSP).replace(" »", NNBSP + "»")
+            .replace(" :", NBSP + ":"))
+MAQ_CUTS = ["La première affaire", "Aujourd'hui, je vais", "Je maquille des peaux",
+            "Trouver son sous-ton", "Pis fondre le contour", "C'est pas un produit"]
+LONG_SENTENCE = ("Je maquille des peaux matures tous les jours, pis voici ce que personne vous dit : "
+                 "la plupart des fonds de teint sont conçus en supposant une technique.")
+
+
+def _flatten(t):
+    """Faux Claude : « » → ", — → -, ’ → ', insécables → espaces, et espaces internes des
+    guillemets retirés."""
+    t = (t.replace("«", '"').replace("»", '"').replace("—", "-").replace("’", "'")
+         .replace(NBSP, " ").replace(NNBSP, " "))
+    return t.replace('" ', '"', 1).replace(' "', '"', 1)
+
+
+def _maq_flat_dialogues(script):
+    flat = _flatten(script).replace("\n", " ")
+    pos = [flat.index(_flatten(k)) for k in MAQ_CUTS] + [len(flat)]
+    return [flat[a:b].strip() for a, b in zip(pos, pos[1:], strict=False)]
+
+
+@pytest.mark.parametrize("script", [MAQ, MAQ_TYPO], ids=["tel_quel", "typo_fr"])
+def test_maquilleuse_script_accepted_with_flattened_claude(monkeypatch, script):
+    flat = _maq_flat_dialogues(script)
+    assert brain._parts_reconstruct(script, flat) is False       # l'ancien garde-fou refusait
+    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+    monkeypatch.setattr(brain, "_call_claude_avatar_omni_plan", lambda *a, **k: _shots(flat))
+    res = brain.generate_avatar_omni_plan(_cfg(), script)
+    dialogues = [s["dialogue"] for s in res["shots"]]
+    assert len(dialogues) == 6 and all(d in script for d in dialogues)   # tranches exactes
+    assert "«" in dialogues[0] and "»" in dialogues[0] and "—" in dialogues[1]
+
+
+def test_maquilleuse_long_sentence_warning_in_simulation():
+    res = brain.generate_avatar_omni_plan(ProviderConfig(dry_run=True), MAQ)
+    assert res["max_words"] == 22
+    long_plans = [s for s in res["shots"] if s["dialogue"] == LONG_SENTENCE]
+    assert len(long_plans) == 1                                    # reste seule, jamais coupée
+    n = long_plans[0]["n"]
+    msg = (f"Plan {n} : 27 mots (max 22 pour un clip de 10 s) — cette phrase est trop longue pour "
+           "un seul plan : raccourcis-la dans ton script, sinon la fin risque d'être coupée ou dite "
+           "trop vite.")
+    assert msg in res["warnings"]
+    assert config_app.spoken_word_count(LONG_SENTENCE) == 27       # « : » n'est pas un mot
+
+
+MAQ_BLOCKS = [
+    "La première affaire qu'elle m'a dite en arrivant : « Je sais pas me maquiller. » Ça fait "
+    "quarante ans qu'elle pense ça.",
+    "Aujourd'hui, je vais pas la maquiller — pis à la fin, elle va avoir changé d'idée.",
+    "Je maquille des peaux matures tous les jours, pis voici ce que personne vous dit :",
+    "la plupart des fonds de teint sont conçus en supposant une technique. Trouver son sous-ton.",
+    "Préparer sa peau pour que ça accroche partout pareil. Doser. Pis fondre le contour pour qu'il "
+    "reste pas de ligne.",
+    "Quatre affaires. C'est pas un produit, ça : c'est un kit qui suppose une formation. Pis cette "
+    "formation-là, personne lui a donnée.",
+]
+
+
+@pytest.mark.parametrize("typo", [False, True], ids=["tel_quel", "typo_fr"])
+def test_maquilleuse_manual_six_blocks_kept_exactly(typo):
+    blocks = [b.replace("'", "’").replace(" :", NBSP + ":") if typo else b for b in MAQ_BLOCKS]
+    res = brain.generate_avatar_omni_plan(
+        ProviderConfig(dry_run=True), "\n\n".join(blocks), manual=True,
+    )
+    assert [s["dialogue"] for s in res["shots"]] == blocks          # blocs EXACTS (insécables)
+
+
+def test_manual_blocks_multiline_collapsed_but_nbsp_kept():
+    out = brain._split_script_manual(f"Ligne un\nsuite{NBSP}:  fin.\n\n---\nBloc{NNBSP}2")
+    assert out == [f"Ligne un suite{NBSP}: fin.", f"Bloc{NNBSP}2"]
+
+
+# ============================================================ Avatar HeyGen (generate_scenes)
+def _scenes(parts):
+    return [{"n": i, "script": p, "motion_prompt": f"m{i}"} for i, p in enumerate(parts, 1)]
+
+
+def test_heygen_scenes_accept_flattened_typo_and_store_original(monkeypatch):
+    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+    calls = []
+
+    def fake(cfg, script, brief, avatar_label, attempt=0):
+        calls.append(attempt)
+        return _scenes(FLAT)
+
+    monkeypatch.setattr(brain, "_call_claude", fake)
+    res = brain.generate_scenes(_cfg(), SCRIPT, "", "avatar", "av")
+    parts = [s["script"] for s in res["scenes"]]
+    assert calls == [0] and all(p in SCRIPT for p in parts)
+    assert "’" in "".join(parts) and NNBSP in "".join(parts)
+
+
+def test_heygen_scenes_maquilleuse_typo(monkeypatch):
+    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+    flat = _maq_flat_dialogues(MAQ_TYPO)
+    monkeypatch.setattr(brain, "_call_claude", lambda *a, **k: _scenes(flat))
+    res = brain.generate_scenes(_cfg(), MAQ_TYPO, "", "avatar", "av")
+    assert len(res["scenes"]) == 6 and all(s["script"] in MAQ_TYPO for s in res["scenes"])
+
+
+def test_heygen_scenes_really_changed_word_is_refused(monkeypatch):
+    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+    changed = list(FLAT)
+    changed[1] = 'On m\'appelle "la grande fée".'
+    monkeypatch.setattr(brain, "_call_claude", lambda *a, **k: _scenes(changed))
+    with pytest.raises(brain.BrainVerbatimError):
+        brain.generate_scenes(_cfg(), SCRIPT, "", "avatar", "av")
+
+
+# ============================================================ accent de la fiche voix
+@pytest.mark.parametrize("region,phrase", [
+    ("france", "natural French accent from France"),
+    ("quebec", "natural Québécois French accent (Quebec, Canada)"),
+    ("belgique", "natural Belgian French accent"),
+    ("suisse", "natural Swiss French accent"),
+])
+def test_voice_sheet_accent_region(region, phrase):
+    assert f"with a {phrase}" in config_app.voice_sheet({"accent_region": region})
+
+
+def test_voice_sheet_free_accent_has_priority_and_legacy_default_ignored():
+    free = {"accent_region": "quebec", "accent": "light Marseille accent"}
+    assert "light Marseille accent" in config_app.voice_sheet(free)
+    assert "Québécois" not in config_app.voice_sheet(free)
+    # ancienne fiche (accent France pré-rempli) + sélecteur Québec → Québec s'applique
+    legacy = config_app.normalize_voice_profile(
+        {"accent_region": "quebec", "accent": config_app.OMNI_DEFAULT_ACCENT})
+    assert legacy["accent"] == "" and "Québécois" in config_app.voice_sheet(legacy)
+    assert config_app.normalize_voice_profile({"accent_region": "zzz"})["accent_region"] == "france"

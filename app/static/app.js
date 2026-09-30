@@ -2852,7 +2852,7 @@ const AO_API = "/api/avatar-omni";
 const AO_DEFAULT_RATE = 0.10;        // $/s (720p) — même formule que le backend
 const AO_TIER1_USD = 10;             // quota Google Tier 1 : 10 $ / 10 min
 const AO_DEFAULT_ACCENT = "natural French accent from France";
-const AO_VOICE_FIELDS = ["Gender", "Age", "Accent", "Tone", "Pace", "Extra"];
+const AO_VOICE_FIELDS = ["Gender", "Age", "AccentRegion", "Accent", "Tone", "Pace", "Extra"];
 
 function aoRate() {
   const r = aoLastEstimate && Number(aoLastEstimate.cout_omni_par_seconde_usd);
@@ -2896,7 +2896,8 @@ function aoReadVoice(prefix) {
   return {
     gender: v("Gender"),
     age: v("Age").trim(),
-    accent: v("Accent").trim() || AO_DEFAULT_ACCENT,
+    accent_region: v("AccentRegion") || "france",
+    accent: v("Accent").trim(),   // libre, prioritaire s'il est rempli (vide = accent choisi)
     tone: v("Tone"),
     pace: v("Pace"),
     extra: v("Extra").trim(),
@@ -2913,7 +2914,9 @@ function aoWriteVoice(prefix, p) {
   };
   set("Gender", p.gender || "");
   set("Age", p.age || "");
-  set("Accent", p.accent || AO_DEFAULT_ACCENT);
+  set("AccentRegion", p.accent_region || "france");
+  // L'ancien accent France pré-rempli n'est pas un choix libre → champ vide.
+  set("Accent", p.accent && p.accent !== AO_DEFAULT_ACCENT ? p.accent : "");
   if (p.tone) set("Tone", p.tone);
   if (p.pace) set("Pace", p.pace);
   set("Extra", p.extra || "");

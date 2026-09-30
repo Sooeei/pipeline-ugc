@@ -230,7 +230,8 @@ def test_auto_dialogues_within_max_words_except_single_long_sentence():
 def test_auto_no_warning_when_all_short():
     res = brain.generate_avatar_omni_plan(_sim(), SCRIPT)
     assert res["warnings"] == []
-    assert all(len(s["dialogue"].split()) <= res["max_words"] for s in res["shots"])
+    # mots PRONONCÉS (un signe isolé « : », « — » ne compte pas)
+    assert all(config_app.spoken_word_count(s["dialogue"]) <= res["max_words"] for s in res["shots"])
 
 
 def test_manual_block_too_long_warns_but_not_cut():
@@ -315,7 +316,8 @@ def test_normalize_voice_profile_defaults_and_cleaning():
                                             "age": 'a"b' + "c" * 300, "extra": '"hi"'})
     assert p["gender"] == "" and p["tone"] == config_app.DEFAULT_GROK_VOICE_STYLE
     assert p["pace"] == config_app.DEFAULT_GROK_VOICE_PACE
-    assert p["accent"] == config_app.OMNI_DEFAULT_ACCENT
+    assert p["accent"] == "" and p["accent_region"] == "france"   # accent libre vide → sélecteur
+    assert config_app.OMNI_DEFAULT_ACCENT in config_app.voice_sheet(p)
     assert '"' not in p["age"] and len(p["age"]) <= 120 and p["extra"] == "hi"
     assert config_app.normalize_voice_profile("not json") == config_app.normalize_voice_profile({})
     assert config_app.voice_sheet(VP) == config_app.voice_sheet(json.dumps(VP))   # déterministe
@@ -952,3 +954,24 @@ def test_resume_image_phase_after_animation_keeps_reference(monkeypatch):
         _wait(c, r.json()["job_id"])
         prompt, refs = calls[-1]
         assert prompt.startswith(pipeline._AVATAR_CONSISTENCY) and refs[0] == "fake/1.png"
+
+
+# ============================================================ accent (fiche voix)
+def test_voice_accent_region_stored_editable_and_locked():
+    with _client() as c:
+        c.post("/api/settings", json={"dry_run": True})
+        ad_id, ids = _omni_ad(1, voice_profile=VP)
+        r = c.patch(f"/api/avatar-omni/voice/{ad_id}",
+                    json={"voice_profile": {**VP, "accent_region": "quebec"}})
+        assert r.status_code == 200
+        assert r.json()["voice_profile"]["accent_region"] == "quebec"
+        assert "Québécois" in r.json()["voice_sheet"]
+        ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
+        assert ad["voice_profile"]["accent_region"] == "quebec" and "Québécois" in ad["voice_sheet"]
+        db.update_clip(ids[0], status="pret")                       # un clip animé → verrou
+        r = c.patch(f"/api/avatar-omni/voice/{ad_id}",
+                    json={"voice_profile": {**VP, "accent_region": "suisse"}})
+        assert r.status_code == 409
+        r = c.patch(f"/api/avatar-omni/voice/{ad_id}",
+                    json={"voice_profile": {**VP, "accent_region": "suisse"}, "force": True})
+        assert r.status_code == 200 and "Swiss" in r.json()["voice_sheet"]

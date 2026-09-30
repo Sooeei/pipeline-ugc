@@ -335,11 +335,14 @@ def generate_scenes(
     # On écarte d'éventuelles scènes au script vide (n'affecte pas le verbatim).
     scenes = [s for s in scenes if str(s.get("script", "")).strip()]
     scenes = _renumber(scenes)
-    # Garde-fou final (défense en profondeur, même en simulation) :
-    if not verbatim_ok(script, scenes):
+    # Garde-fou final (défense en profondeur, même en simulation) : les scripts des scènes
+    # deviennent les tranches EXACTES du script original (points de coupe du modèle) ; refus si
+    # le texte a réellement été modifié.
+    aligned = _realign_shot_dialogues(script, scenes, key="script")
+    if aligned is None:
         raise BrainVerbatimError("découpage refusé (texte altéré)")
 
-    return {"ad": _slug(script), "avatar": avatar_label, "scenes": scenes}
+    return {"ad": _slug(script), "avatar": avatar_label, "scenes": aligned}
 
 
 # ==================================================== OBJET ANIMÉ (plan de tournage)
@@ -441,12 +444,13 @@ Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
 def _split_script_manual(script: str) -> list[str]:
     """Découpe MANUELLE : chaque bloc séparé par une LIGNE VIDE ou une ligne de séparateur
     (« --- », « *** », « === », « — ») devient un plan (dans l'ordre). Espaces internes d'un
-    bloc normalisés (le dialogue parlé n'a pas de sauts de ligne). Aucun mot modifié."""
+    bloc regroupés (sauts de ligne / espaces ASCII → une espace) ; les espaces insécables
+    (U+00A0, U+202F…) et tout autre caractère sont gardés TELS QUELS. Aucun mot modifié."""
     text = script.replace("\r\n", "\n").replace("\r", "\n")
     # Une ligne composée uniquement de séparateurs → frontière de bloc (ligne vide).
     text = re.sub(r"(?m)^[ \t]*[-*=_—–]{2,}[ \t]*$", "\n\n", text)
     blocks = re.split(r"\n[ \t]*\n+", text)
-    return [_normalize_ws(b) for b in blocks if b.strip()]
+    return [re.sub(r"[ \t\n\f\v]+", " ", b).strip(" \t\n\f\v") for b in blocks if b.strip()]
 
 
 def _generate_manual_plan(
@@ -1090,7 +1094,7 @@ def omni_dialogue_warning(n: int, dialogue: str, max_words: int, kind: str = "ph
     """Avertissement FR si le dialogue d'un plan dépasse `max_words` (clip Omni de 10 s max).
     `kind` : "phrase" (découpage auto : phrase seule trop longue), "bloc" (mode manuel : bloc
     trop long, on ne coupe rien), "dialogue" (galerie : dialogue édité)."""
-    words = len((dialogue or "").split())
+    words = config_app.spoken_word_count(dialogue)
     if words <= max_words:
         return None
     secs = config_app.OMNI_MAX_CLIP_SECONDS
@@ -1117,7 +1121,7 @@ def _group_sentences_max_words(script: str, max_words: int) -> list[str]:
     sentences = _split_script_ideas(script, per_group=1)
     out: list[str] = []
     for sent in sentences:
-        if out and len((out[-1] + " " + sent).split()) <= max_words:
+        if out and config_app.spoken_word_count(out[-1] + " " + sent) <= max_words:
             out[-1] = out[-1] + " " + sent
         else:
             out.append(sent)
@@ -1395,13 +1399,15 @@ def realign_to_script(script: str, dialogues: list[str]) -> list[str] | None:
     return out
 
 
-def _realign_shot_dialogues(script: str, shots: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-    """Plans dont le `dialogue` est remplacé par la tranche EXACTE du script (voir
-    realign_to_script). None si l'alignement échoue."""
-    aligned = realign_to_script(script, [str(s.get("dialogue", "")) for s in shots])
+def _realign_shot_dialogues(
+    script: str, shots: list[dict[str, Any]], key: str = "dialogue",
+) -> list[dict[str, Any]] | None:
+    """Plans/scènes dont le champ `key` (dialogue objet/avatar IA, script avatar HeyGen) est
+    remplacé par la tranche EXACTE du script (voir realign_to_script). None si l'alignement échoue."""
+    aligned = realign_to_script(script, [str(s.get(key, "")) for s in shots])
     if aligned is None:
         return None
-    return [{**s, "dialogue": a} for s, a in zip(shots, aligned, strict=True)]
+    return [{**s, key: a} for s, a in zip(shots, aligned, strict=True)]
 
 
 def verbatim_ok(original: str, scenes: list[dict[str, Any]]) -> bool:
@@ -1436,8 +1442,12 @@ def _generate_with_retry(
                 last_err, last_verbatim = str(exc), False
                 continue
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
-        if verbatim_ok(script, scenes):
-            return scenes
+        # Typographie « aplatie » par le modèle = OK (on découpe le script ORIGINAL à ses points
+        # de coupe) ; un vrai mot changé → alignement impossible → on relance.
+        kept = [s for s in scenes if str(s.get("script", "")).strip()]
+        aligned = _realign_shot_dialogues(script, kept, key="script") if kept else None
+        if aligned:
+            return aligned
         last_err, last_verbatim = "texte altéré par le modèle", True
     if last_verbatim:
         raise BrainVerbatimError(f"découpage refusé ({last_err})")

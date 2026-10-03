@@ -118,6 +118,7 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("direction", "TEXT"),
         ("segments", "TEXT"),    # JSON : segments du dialogue = tours Omni (texte, motion, durée, id…)
         ("shot_prompt", "TEXT"), # partie PROPRE au plan du prompt image (la bible est ajoutée à part)
+        ("refs_sent", "TEXT"),   # JSON : réfs RÉELLEMENT envoyées à Nano Banana [{n, kind, path}] (audit)
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
@@ -444,7 +445,7 @@ _ALLOWED_CLIP_COLS = {
     "wav_path", "mp4_path", "status", "error", "duration_s",
     "refs_needed", "is_anchor", "interaction_id",
     "block_n", "block_sub", "block_count", "block_title", "timecode", "direction",
-    "segments", "shot_prompt",
+    "segments", "shot_prompt", "refs_sent",
 }
 
 

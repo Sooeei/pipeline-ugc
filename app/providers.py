@@ -1185,8 +1185,31 @@ def _omni_errors_message(errors: Any) -> str | None:
     return None
 
 
+_OMNI_DAILY_RE = re.compile(r"per\s+day|daily|perday|requests?\s*/\s*day", re.IGNORECASE)
+_OMNI_DAILY_LIMIT_RE = re.compile(r"limit\s*:?\s*(\d+)\s*requests?\s+per\s+day", re.IGNORECASE)
+
+
+def omni_daily_quota_message(limit: int | str | None = None) -> str:
+    """Message FR du quota JOURNALIER Google Omni atteint (429 « requests per day »)."""
+    n = str(limit or config_app.OMNI_DAILY_REQUEST_LIMIT)
+    return (f"Quota Google du jour atteint ({n} requêtes/jour sur ton tier) — reprends demain ou "
+            "passe à un tier supérieur (ai.dev/rate-limit). Les tours déjà faits sont gardés.")
+
+
+def _omni_daily_quota(status: int, code: Any, message: Any) -> str | None:
+    """429 / RESOURCE_EXHAUSTED « N requests per day » → message dédié (jamais « crédits »)."""
+    m = str(message or "")
+    c = str(code or "").lower()
+    is_rate = status == 429 or "too_many_requests" in c or "resource_exhausted" in c
+    if not (is_rate and _OMNI_DAILY_RE.search(m)):
+        return None
+    hit = _OMNI_DAILY_LIMIT_RE.search(m)
+    return omni_daily_quota_message(hit.group(1) if hit else None)
+
+
 def _omni_http_error(r: requests.Response, what: str) -> ProviderError:
-    """HTTP ≥ 400 → ProviderError FR (blocage reconnu sinon `_friendly_http`). Corps → app.log."""
+    """HTTP ≥ 400 → ProviderError FR (quota du jour / blocage reconnu, sinon `_friendly_http`).
+    Corps → app.log."""
     _log_detail(f"Google Omni {what} {r.status_code} : {r.text[:400]}")
     code: Any = ""
     message: Any = ""
@@ -1197,7 +1220,11 @@ def _omni_http_error(r: requests.Response, what: str) -> ProviderError:
             message = err.get("message") or ""
     except Exception:  # noqa: BLE001 - corps non JSON
         pass
-    return ProviderError(_omni_block_message(code, message) or _friendly_http("Google", r.status_code))
+    return ProviderError(
+        _omni_daily_quota(r.status_code, code, message)
+        or _omni_block_message(code, message)
+        or _friendly_http("Google", r.status_code)
+    )
 
 
 def _omni_download_file(uri: str, key: str, out_mp4: str) -> None:

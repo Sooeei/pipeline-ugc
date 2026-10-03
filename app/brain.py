@@ -622,17 +622,28 @@ def _one_visuals_batch_with_retry(
 
 def _call_claude_data(
     cfg: ProviderConfig, *, system: str, user: str, max_tokens: int,
+    images: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Appel Claude → dict JSON complet (réponse coupée → _BrainTruncated ; illisible →
-    _BrainRetryable). Base commune de _call_claude_json."""
+    _BrainRetryable). Base commune de _call_claude_json. `images` = photos (vision) envoyées
+    AVANT le texte, chacune précédée de son étiquette : [{"label", "media_type", "data"(b64)}]."""
     import anthropic
 
+    content: Any = user
+    if images:
+        blocks: list[dict[str, Any]] = []
+        for im in images:
+            blocks.append({"type": "text", "text": im["label"]})
+            blocks.append({"type": "image", "source": {
+                "type": "base64", "media_type": im["media_type"], "data": im["data"]}})
+        blocks.append({"type": "text", "text": user})
+        content = blocks
     client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     resp = client.messages.create(
         model=cfg.brain_model or config_app.DEFAULT_BRAIN_MODEL,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[{"role": "user", "content": content}],
     )
     _record_anthropic(resp)
     if getattr(resp, "stop_reason", "") == "max_tokens":
@@ -1615,6 +1626,19 @@ RÈGLES :
   devient « a generic foundation bottle », jamais son nom).
 - "positions" : placement PAR DÉFAUT des personnages et objets dans le cadre (qui est à gauche /
   à droite, debout / assis, distance à la caméra, où sont posés les produits).
+- PHOTOS DE RÉFÉRENCE : si une photo « visage » (personnage 1), « visage2 » (personnage 2) ou
+  « produit » est jointe, la description correspondante COMMENCE EXACTEMENT par
+  « EXACTLY the person in the "visage" reference photo » (resp. « EXACTLY the person in the
+  "visage2" reference photo », « EXACTLY the product in the "produit" reference photo »), puis ne
+  décrit QUE ce qui est VISIBLE sur la photo (genre, âge apparent, cheveux, carnation…) + la
+  tenue / les accessoires DEMANDÉS par les directions (gants…). N'invente AUCUN trait qui
+  contredirait la photo (âge, genre, couleur de cheveux…).
+- PERSONNAGES NON DÉCRITS : DÉDUIS l'âge, le genre et le profil du SCRIPT (dialogues ET
+  directions) : « peaux matures », « mes plis », « mes rides », « depuis la ménopause » → une
+  femme de 55 ans et plus ; « je maquille », « mon salon » → un(e) maquilleur(se) professionnel(le) ;
+  « il » / « elle » dans les directions → le genre. Les INDICES DÉDUITS DU SCRIPT fournis sont
+  prioritaires. JAMAIS un profil qui contredit le script (pas une femme de 25 ans pour des
+  « peaux matures »).
 - Aucun texte à l'image, aucun nom de marque autre que celui du produit du client.
 Réponds UNIQUEMENT avec le JSON :
   {"bible":{"character1":"...","character2":"...","set":"...","product":"...","positions":"..."}}
@@ -1706,11 +1730,92 @@ def _scrub_third_party(text: str, names: list[str]) -> str:
     return scrub_brand_names(out)
 
 
-def _canned_bible(personas: dict[str, str] | None, product: str, ambiance: str) -> dict[str, str]:
+# Photos de référence lues par Claude pour écrire la bible (vision) : type → (champ, préfixe).
+BIBLE_PHOTO_KINDS = ("visage", "visage2", "produit")
+_PHOTO_PREFIX = {
+    "visage": ("character1", 'EXACTLY the person in the "visage" reference photo'),
+    "visage2": ("character2", 'EXACTLY the person in the "visage2" reference photo'),
+    "produit": ("product", 'EXACTLY the product in the "produit" reference photo'),
+}
+_PHOTO_LABEL = {
+    "visage": 'Photo de référence "visage" = PERSONNAGE 1 (celui qui parle) :',
+    "visage2": 'Photo de référence "visage2" = PERSONNAGE 2 (muet) :',
+    "produit": 'Photo de référence "produit" = PRODUIT DU CLIENT :',
+}
+
+# Indices de profil tirés du SCRIPT (dialogues + directions), quand les personnages sont vides.
+_MATURE_RE = re.compile(
+    r"peaux?\s+matures?|\bplis\b|\brides\b|ridules|m[ée]nopause"
+    r"|\b[5-7]\d\s*ans\b|\b(?:quarante|cinquante|soixante)\s+ans\b|apr[èe]s\s+50",
+    re.IGNORECASE,
+)
+_PRO_MAKEUP_RE = re.compile(r"\bje\s+maquille\b|\bmon\s+salon\b|\bmaquill(?:eur|euse)\b", re.IGNORECASE)
+_GLOVES_RE = re.compile(r"\bgants?\b", re.IGNORECASE)
+_HE_RE = re.compile(r"(?:^|[.!?—:]\s*)Il\s")
+_SHE_RE = re.compile(r"(?:^|[.!?—:]\s*)Elle\s")
+_OTHER_PERSON_RE = re.compile(r"\bla\s+mod[èe]le\b|\bles\s+deux\b", re.IGNORECASE)
+_MATURE_WOMAN = ("a woman aged 55 or older, mature skin with natural fine lines and soft "
+                 "wrinkles, real and warm (never young)")
+
+
+def script_profile_hints(blocks: list[dict[str, Any]]) -> dict[str, str]:
+    """Profil des personnages DÉDUIT du script (règles fixes, sans IA) : {"character1",
+    "character2"} en anglais ("" si rien). Sert à la bible de secours et d'indice à Claude quand
+    les champs personnages sont vides (« peaux matures » → femme 55+, jamais l'inverse)."""
+    dialogues = " ".join(str(b.get("dialogue") or "") for b in blocks)
+    directions = " ".join(str(b.get("direction") or "") for b in blocks)
+    he, she = len(_HE_RE.findall(directions)), len(_SHE_RE.findall(directions))
+    duo = bool(_OTHER_PERSON_RE.search(f"{dialogues} {directions}")) or (he > 0 and she > 0)
+    mature = bool(_MATURE_RE.search(f"{dialogues} {directions}"))
+    pro = bool(_PRO_MAKEUP_RE.search(dialogues))
+    # Le personnage 1 PARLE : son genre = le sujet dominant des directions.
+    gender = "male" if he > she else "female" if she > he else ""
+    p1 = {"male": "an adult man", "female": "an adult woman"}.get(gender, "an adult person")
+    if pro:
+        p1 = {"male": "a male professional makeup artist",
+              "female": "a female professional makeup artist"}.get(gender, "a professional makeup artist")
+    p2 = ""
+    if duo:
+        p2 = _MATURE_WOMAN if mature and gender != "female" else (
+            "an adult woman" if gender == "male" else "an adult person")
+    elif mature:
+        p1 = "a man aged 55 or older, mature skin" if gender == "male" else _MATURE_WOMAN
+    if _GLOVES_RE.search(directions):
+        p1 += ", black nitrile gloves on BOTH hands"
+    return {"character1": p1, "character2": p2}
+
+
+def _hints_text(hints: dict[str, str]) -> str:
+    lines = [f"- {_BIBLE_LABELS[k]} : {v}" for k, v in hints.items() if v]
+    return "\n".join(lines) or "- (aucun indice sûr)"
+
+
+def enforce_photo_prefixes(bible: dict[str, str], photo_kinds: list[str]) -> dict[str, str]:
+    """Une photo de ce type existe → la description commence par « EXACTLY the … in the "<type>"
+    reference photo » (imposé par le CODE, même si Claude l'a oublié)."""
+    out = dict(bible)
+    for kind in dict.fromkeys(photo_kinds):
+        if kind not in _PHOTO_PREFIX:
+            continue
+        key, prefix = _PHOTO_PREFIX[kind]
+        cur = (out.get(key) or "").strip()
+        if not cur.startswith(prefix):
+            out[key] = prefix + (f" — {cur}" if cur else "")
+    return out
+
+
+def _canned_bible(
+    personas: dict[str, str] | None, product: str, ambiance: str,
+    blocks: list[dict[str, Any]] | None = None, photo_kinds: list[str] | None = None,
+) -> dict[str, str]:
+    """Bible déterministe (simulation) : champs saisis, sinon profil DÉDUIT du script (jamais un
+    « créateur UGC » générique quand le script dit autre chose) ; préfixes des photos présentes."""
     p1, p2 = _client_characters_en(personas)
+    hints = script_profile_hints(blocks or [])
+    p1, p2 = p1 or hints["character1"], p2 or hints["character2"]
     scene, _ = _parse_context(ambiance)
-    return {
-        "character1": p1 or "an adult UGC creator with a generic, ordinary face, casual neutral outfit",
+    bible = {
+        "character1": p1 or "an adult person, generic ordinary face, casual neutral outfit",
         "character2": p2,
         "set": scene or "a bright, clean bathroom counter with a large mirror, soft daylight",
         "product": product.strip() or "the product bottle exactly as in the reference photos",
@@ -1718,31 +1823,43 @@ def _canned_bible(personas: dict[str, str] | None, product: str, ambiance: str) 
                       "right, facing the camera; products rest on the counter between them")
         if p2 else "Character 1 faces the camera, centered, products on the counter in front",
     }
+    return enforce_photo_prefixes(bible, photo_kinds or [])
 
 
 def generate_client_bible(
     cfg: ProviderConfig, blocks: list[dict[str, Any]], personas: dict[str, str] | None,
-    product: str, ambiance: str,
+    product: str, ambiance: str, photos: list[dict[str, str]] | None = None,
 ) -> dict[str, str]:
-    """Bible visuelle EN (UNE fois par pub). Simulation → bible déterministe à partir des champs."""
+    """Bible visuelle EN (UNE fois par pub). Claude VOIT les photos « visage », « visage2 »,
+    « produit » (vision) et lit les DIALOGUES : rien d'inventé ni de contradictoire. Simulation →
+    bible déterministe (champs, indices du script, préfixes des photos présentes)."""
+    photos = [ph for ph in (photos or []) if ph.get("kind") in BIBLE_PHOTO_KINDS]
+    kinds = [ph["kind"] for ph in photos]
     if cfg.dry_run:
-        return _canned_bible(personas, product, ambiance)
+        return _canned_bible(personas, product, ambiance, blocks, kinds)
     p = personas or {}
     directions = "\n".join(f"[Bloc {b['block_n']}] {b['direction'] or '(aucune)'}" for b in blocks)
+    dialogues = "\n".join(f"[Bloc {b['block_n']}] {b['dialogue']}" for b in blocks)
+    joined = ", ".join(f'"{k}"' for k in dict.fromkeys(kinds)) or "aucune"
     user = (
-        f"PERSONNAGE 1 (parle) : {p.get('p1_en') or p.get('p1') or '(non décrit — propose-le)'}\n"
-        f"PERSONNAGE 2 (muet) : {p.get('p2_en') or p.get('p2') or '(non décrit)'}\n"
+        f"PHOTOS DE RÉFÉRENCE JOINTES : {joined}\n"
+        f"PERSONNAGE 1 (parle) : {p.get('p1_en') or p.get('p1') or '(non décrit — déduis-le du script)'}\n"
+        f"PERSONNAGE 2 (muet) : {p.get('p2_en') or p.get('p2') or '(non décrit — déduis-le du script)'}\n"
+        f"INDICES DÉDUITS DU SCRIPT :\n{_hints_text(script_profile_hints(blocks))}\n"
         f"PRODUIT DU CLIENT : {product.strip() or '(non précisé — déduis-le des directions)'}\n"
         f"AMBIANCE / DÉCOR : {ambiance or '(non précisé)'}\n\n"
+        f"DIALOGUES (dits par le personnage 1, dans l'ordre) :\n{dialogues}\n\n"
         f"DIRECTIONS DU CLIENT (toutes, dans l'ordre) :\n{directions}\n\nÉcris la bible (JSON strict)."
     )
+    images = [{"label": _PHOTO_LABEL[ph["kind"]], "media_type": ph["media_type"], "data": ph["data"]}
+              for ph in photos]
     last_transient = False
     for attempt in range(_BRAIN_MAX_ATTEMPTS):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
             data = _call_claude_data(cfg, system=AVATAR_OMNI_BIBLE_SYSTEM_PROMPT, user=user,
-                                     max_tokens=2000)
+                                     max_tokens=2000, images=images or None)
         except _BrainRetryable:
             last_transient = False
             continue
@@ -1753,7 +1870,7 @@ def generate_client_bible(
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
         bible = normalize_bible(data.get("bible"))
         if bible["character1"] and bible["set"]:
-            return bible
+            return enforce_photo_prefixes(bible, kinds)
     if last_transient:
         raise BrainProviderError(_OVERLOADED_MESSAGE)
     raise BrainError("La bible visuelle n'a pas pu être écrite — réessaie.")
@@ -1819,6 +1936,19 @@ _CLIENT_SOLO_RE = re.compile(
     re.IGNORECASE,
 )
 _CLIENT_BOTTLE_RE = re.compile(r"\b(?:flacons?|bouteilles?|bottles?)\b", re.IGNORECASE)
+# La bible place le flacon À L'IMAGE par défaut (positions / décor) — sauf « hors champ ».
+_BIBLE_BOTTLE_RE = re.compile(r"\b(?:bottles?|products?|foundation|flacons?|pump)\b", re.IGNORECASE)
+_BIBLE_OFFSCREEN_RE = re.compile(r"off[- ]?screen|out of (?:frame|shot)|not visible|hidden", re.IGNORECASE)
+
+
+def bible_shows_product(bible: dict[str, str]) -> bool:
+    """La bible pose le produit dans le cadre (positions ou décor) → visible sur chaque plan."""
+    for key in ("positions", "set"):
+        text = bible.get(key) or ""
+        for sentence in re.split(r"(?<=[.;])\s+", text):
+            if _BIBLE_BOTTLE_RE.search(sentence) and not _BIBLE_OFFSCREEN_RE.search(sentence):
+                return True
+    return False
 
 
 def client_refs(
@@ -1828,9 +1958,10 @@ def client_refs(
     """Réfs d'un plan client, imposées par le CODE (Claude peut en oublier) :
     - « visage » dès que la bible décrit le personnage 1 ; « visage2 » aussi dès qu'elle décrit
       le personnage 2 — sauf si la direction dit explicitement qu'un seul est à l'image ;
-    - « produit » dès que la direction mentionne le flacon (ou le nom du produit) — sauf si le
-      bloc cite une marque tierce sans nommer le produit du client (le flacon est alors le
-      produit concurrent : la photo du produit du client serait fausse).
+    - « produit » dès que le flacon est À L'IMAGE : la bible le place dans le cadre, ou la
+      direction le mentionne (ou nomme le produit) — sauf si le bloc cite une marque tierce et
+      que la direction met un flacon en main sans nommer le produit du client (ce flacon est
+      alors le produit concurrent : la photo du produit du client serait fausse).
     Les autres réfs (décor, style) proposées par Claude sont gardées."""
     out = [r for r in refs if r not in ("visage", "visage2", "produit")]
     d = direction or ""
@@ -1841,10 +1972,13 @@ def client_refs(
     if bible.get("character2") and not solo:
         heads.append("visage2")
     names_product = bool(product.strip()) and product.strip().lower() in d.lower()
-    bottle = bool(_CLIENT_BOTTLE_RE.search(d)) or names_product
-    wants_product = bottle and (names_product or not has_third_party)
-    if not wants_product and "produit" in refs and not has_third_party:
-        wants_product = True   # Claude l'a demandé et rien ne l'interdit
+    bottle_in_direction = bool(_CLIENT_BOTTLE_RE.search(d))
+    third_party_in_hand = has_third_party and bottle_in_direction and not names_product
+    if third_party_in_hand:
+        wants_product = False
+    else:
+        wants_product = (names_product or bottle_in_direction or bible_shows_product(bible)
+                         or ("produit" in refs and not has_third_party))
     return heads + (["produit"] if wants_product else []) + out
 
 
@@ -1862,13 +1996,16 @@ def _client_segments(dialogue: str, max_words: int, wps: float | None) -> list[d
 def generate_avatar_omni_client_plan(
     cfg: ProviderConfig, doc: str, personas: dict[str, str] | None = None, product: str = "",
     ambiance: str = "", words_per_sec: float | None = None,
+    photos: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Plan « Avatar IA » en DÉCOUPAGE CLIENT : 1 BLOC = 1 PLAN = 1 image = 1 vidéo continue.
 
     Le dialogue du bloc est découpé en SEGMENTS (≤ MAX_WORDS, phrases entières, verbatim) : un
     tour Omni par segment (extension de la vidéo). Une BIBLE visuelle (Claude, une fois) est
     injectée par le code dans chaque prompt_image ; Claude traduit la direction 🎬 en « shot » +
-    un mouvement par segment. Renvoie {"ad", "shots", "warnings", "max_words", "blocks", "bible"}."""
+    un mouvement par segment. `photos` = photos de réf (visage / visage2 / produit) que Claude
+    VOIT pour écrire la bible. Renvoie {"ad", "shots", "warnings" (répliques trop longues, PAR
+    TOUR), "alerts" (durée, crochets, IA indisponible), "max_words", "blocks", "bible"}."""
     if len(doc or "") > MAX_SCRIPT_CHARS:
         raise BrainError(
             f"Document trop long ({len(doc)} caractères, max {MAX_SCRIPT_CHARS}). "
@@ -1893,10 +2030,11 @@ def generate_avatar_omni_client_plan(
             "timecode": b["timecode"], "direction": b["direction"],
             "label": str(b["block_n"]), "has_p2": p2,
         })
-    bible = generate_client_bible(cfg, blocks, personas, product, ambiance)
+    bible = generate_client_bible(cfg, blocks, personas, product, ambiance, photos)
     names = _third_party_names([b["dialogue"] for b in blocks])
     bible = {k: _scrub_third_party(v, names) if v else v for k, v in bible.items()}
     warnings: list[str] = []
+    alerts: list[str] = []
     visuals: list[dict[str, Any]] = []
     if not cfg.dry_run:
         if not cfg.anthropic_api_key:
@@ -1913,7 +2051,7 @@ def generate_avatar_omni_client_plan(
             got = [g for g in got if isinstance(g, dict)][: len(batch)]
             if len(got) < len(batch):
                 labels = ", ".join(p["label"] for p in batch[len(got):])
-                warnings.append(
+                alerts.append(
                     f"Mise en scène non traduite (IA indisponible) pour le(s) plan(s) {labels} : "
                     "la direction du client est envoyée telle quelle — régénère le plan plus tard."
                 )
@@ -1943,21 +2081,31 @@ def generate_avatar_omni_client_plan(
                                  "timecode", "direction", "label")},
         })
         if total > config_app.OMNI_MAX_TOTAL_SECONDS:
-            warnings.append(
+            alerts.append(
                 f"Plan {p['label']} : ~{total} s de vidéo (max {config_app.OMNI_MAX_TOTAL_SECONDS} s "
                 "par vidéo étendue) — coupe ce bloc en deux dans le document du client."
             )
-        for j, s in enumerate(segs, 1):
-            if config_app.spoken_word_count(s["text"]) > max_words:
-                warnings.append(
-                    f"Plan {p['label']}, segment {j} : {config_app.spoken_word_count(s['text'])} mots "
-                    f"(max {max_words}) — phrase trop longue pour un seul tour de 10 s ; raccourcis-la."
-                )
+        warnings.extend(omni_turn_warnings(p["label"], [s["text"] for s in segs], max_words))
     bw = bracket_values_warning([s["dialogue"] for s in shots])
     if bw:
-        warnings.append(bw)
+        alerts.append(bw)
     return {"ad": _slug(blocks[0]["title"] or blocks[0]["dialogue"]), "shots": shots,
-            "warnings": warnings, "max_words": max_words, "blocks": len(blocks), "bible": bible}
+            "warnings": warnings, "alerts": alerts, "max_words": max_words,
+            "blocks": len(blocks), "bible": bible}
+
+
+def omni_turn_warnings(label: Any, turns: list[str], max_words: int) -> list[str]:
+    """Avertissements « X mots (max N) » calculés PAR TOUR Omni (découpage client : un segment =
+    un tour de 10 s max) — jamais sur le bloc entier, qui est réparti sur plusieurs tours."""
+    out = []
+    for j, text in enumerate(turns, 1):
+        words = config_app.spoken_word_count(text)
+        if words > max_words:
+            out.append(
+                f"Plan {label}, tour {j} : {words} mots (max {max_words}) — phrase trop longue "
+                "pour un seul tour de 10 s ; raccourcis-la."
+            )
+    return out
 
 
 def client_resegment(dialogue: str, old_segments: list[dict[str, Any]], max_words: int,

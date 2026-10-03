@@ -146,6 +146,9 @@ OBJET_MAX_REF_IMAGES = 14   # borne technique haute Nano Banana (on plafonne à 
 BRAIN_SHOTS_PER_BATCH = 10  # taille d'un sous-appel Claude (recollé en une seule liste numérotée)
 # Réfs images envoyées PAR APPEL à Nano Banana (qualité/coût ; l'API ne documente pas de max).
 MAX_REFS_PER_IMAGE_CALL = 3
+# Avatar IA (Omni) : 4 réfs max, dans cet ordre de priorité : visage > visage2 > produit > ancre.
+MAX_REFS_PER_IMAGE_CALL_OMNI = 4
+OMNI_REF_PRIORITY = ("visage", "visage2", "produit")
 
 # Garde-fou budget : si le coût ESTIMÉ d'une génération dépasse ce plafond ($), on bloque et on
 # demande une confirmation explicite. Réglable dans les Réglages (setting `spend_cap_usd`).
@@ -454,6 +457,9 @@ OMNI_EXTENSION_RETURNS = "auto"
 OMNI_SEND_DURATION = False            # response_format.duration non documenté → non envoyé
 OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
 OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min
+# Quota Google Omni : requêtes PAR JOUR (1 tour = 1 requête). Réglable (setting
+# `omni_daily_request_limit`) selon le tier du compte Google.
+OMNI_DAILY_REQUEST_LIMIT = 20
 OMNI_TIER1_WINDOW_SECONDS = 600        # → « Animer » espace les plans pour rester dessous
 OMNI_DEFAULT_ACCENT = "natural French accent from France"
 # Accent de la fiche voix (sélecteur) → consigne envoyée à Omni. Le champ libre « accent »,
@@ -567,16 +573,48 @@ def voice_sheet(profile: Any) -> str:
     speaker = {"female": "a female speaker", "male": "a male speaker"}.get(p["gender"], "a speaker")
     if p["age"]:
         speaker += f" around {p['age']} years old"
-    parts.append(f" of {speaker}")
+    parts.append(f" — the voice of {speaker}")
     # Champ libre prioritaire s'il est rempli, sinon l'accent choisi dans le sélecteur.
     accent = p["accent"] or OMNI_ACCENTS[p["accent_region"]]["phrase"]
     if not accent.lower().startswith(("a ", "an ", "the ")):
         accent = f"a {accent}"
     parts.append(f", with {accent}")
     parts.append(", speaking " + GROK_VOICE_PACES[p["pace"]]["directive"])
-    if p["extra"]:
+    if p["extra"] and not voice_extra_is_brand(p["extra"]):
         parts.append(", " + p["extra"])
     return "".join(parts)
+
+
+# Mots de voix / d'accent tolérés avec une majuscule dans la précision libre (« Québécois »…).
+_VOICE_PROPER_OK = {"français", "française", "québécois", "québécoise", "belge", "suisse",
+                    "marseillais", "parisien", "parisienne", "french", "quebec", "québec"}
+
+
+def voice_extra_is_brand(extra: str, product: str = "") -> bool:
+    """La précision libre de la fiche voix ressemble à un NOM de marque/produit (« Nuansa ») et
+    non à une consigne de voix → elle n'est PAS envoyée à Google. Vrai si elle contient le nom du
+    produit, ou si elle n'est faite que de 1 à 3 noms propres (majuscule) sans ponctuation."""
+    import re
+
+    e = (extra or "").strip()
+    if not e:
+        return False
+    prod = (product or "").strip().lower()
+    if prod and prod in e.lower():
+        return True
+    words = re.findall(r"[^\W\d_][\w'’-]*", e)
+    return (0 < len(words) <= 3 and not re.search(r"[,;:]", e)
+            and all(w[0].isupper() for w in words)
+            and not any(w.lower() in _VOICE_PROPER_OK for w in words))
+
+
+def voice_extra_warning(profile: Any, product: str = "") -> str:
+    """Alerte FR si la précision libre de la voix ressemble à un nom de produit ("" sinon)."""
+    extra = normalize_voice_profile(profile)["extra"]
+    if not voice_extra_is_brand(extra, product):
+        return ""
+    return (f"Fiche voix : « {extra} » ressemble à un nom de marque/produit — il n'est PAS envoyé "
+            "à Google. Mets plutôt une consigne de voix (ex. « légèrement voilée »).")
 
 # En mode simulation, on ne touche à aucune API et on ne dépense aucun crédit.
 # Par défaut ON (True) tant que les vraies clés n'ont pas été testées.

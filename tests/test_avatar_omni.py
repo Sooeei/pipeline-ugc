@@ -416,7 +416,8 @@ def test_refs_needed_kept_on_clip_creation(route, extra):
 @pytest.mark.parametrize("kind,route,prefix", [
     ("objet", "/api/objet/regenerate-image", pipeline._CHARACTER_CONSISTENCY),
     ("mashup", "/api/mashup/regenerate-image", pipeline._MASHUP_CONSISTENCY),
-    ("avatar_omni", "/api/avatar-omni/regenerate-image", pipeline._AVATAR_CONSISTENCY),
+    ("avatar_omni", "/api/avatar-omni/regenerate-image",
+     pipeline.omni_refs_legend([{"kind": "ancre", "path": "fake/1.png"}])),
 ])
 def test_regenerate_image_passes_character_ref(monkeypatch, kind, route, prefix):
     calls = []
@@ -935,7 +936,7 @@ def test_regenerate_after_animation_keeps_reference(monkeypatch):
         r = c.post(f"/api/avatar-omni/regenerate-image/{ids[1]}", json={})
         _wait(c, r.json()["job_id"])
         prompt, refs = calls[-1]
-        assert prompt.startswith(pipeline._AVATAR_CONSISTENCY) and refs[0] == "fake/1.png"
+        assert prompt.startswith(pipeline.omni_refs_legend([{"kind": "ancre", "path": "x"}])) and refs[0] == "fake/1.png"
 
 
 def test_resume_image_phase_after_animation_keeps_reference(monkeypatch):
@@ -953,7 +954,7 @@ def test_resume_image_phase_after_animation_keeps_reference(monkeypatch):
         assert r.status_code == 200 and r.json()["phase"] == "images"
         _wait(c, r.json()["job_id"])
         prompt, refs = calls[-1]
-        assert prompt.startswith(pipeline._AVATAR_CONSISTENCY) and refs[0] == "fake/1.png"
+        assert prompt.startswith(pipeline.omni_refs_legend([{"kind": "ancre", "path": "x"}])) and refs[0] == "fake/1.png"
 
 
 # ============================================================ accent (fiche voix)

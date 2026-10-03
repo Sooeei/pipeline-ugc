@@ -171,6 +171,7 @@ async function loadSettings() {
   aoFillVoiceSelects();   // timbre/débit de la fiche voix « Avatar IA » (mêmes listes que Grok)
   $("dryRun").checked = !!s.dry_run;
   if ($("spendCap")) $("spendCap").value = s.spend_cap_usd ?? 25;
+  if ($("omniDailyLimit")) $("omniDailyLimit").value = s.omni_daily_request_limit ?? 20;
   setModeBadge(!!s.dry_run);
   renderAvatars(s.avatars || []);
   renderVoices(s.voices || []);
@@ -254,6 +255,8 @@ $("saveSettings").addEventListener("click", async () => {
     audio_format: ($("audioFormat") && $("audioFormat").value) || "",
     dry_run: $("dryRun").checked,
     spend_cap_usd: ($("spendCap") && $("spendCap").value !== "") ? parseFloat($("spendCap").value) : null,
+    omni_daily_request_limit: ($("omniDailyLimit") && $("omniDailyLimit").value !== "")
+      ? parseInt($("omniDailyLimit").value, 10) : null,
   };
   await api("/api/settings", {
     method: "POST",
@@ -951,6 +954,8 @@ const PHASE_LABEL = {
 function prettyError(raw) {
   const m = String(raw || "échec");
   if (/unauthor|invalid api key|authentication|clé.*refus/i.test(m)) return "clé API refusée — vérifie-la dans Réglages";
+  // 429 / quota du jour : message tel quel (jamais « crédits insuffisants »).
+  if (/quota google du jour|requêtes\/jour|trop de requêtes|rate.?limit|too many requests|\b429\b/i.test(m)) return m;
   if (/quota|insufficient|not enough|no.*credit|crédits insuffisants/i.test(m)) return "crédits insuffisants";
   if (/too long|trop long|max.*char|character limit|1500\s*(car|char)/i.test(m)) return "texte trop long (max 1500 car.)";
   if (/voice.*not found|voix introuvable|invalid voice|unknown voice/i.test(m)) return "voix introuvable";
@@ -2858,6 +2863,7 @@ let aoLastEstimate = null;   // estimation du plan (cout_omni_par_seconde_usd, �
 let aoGalleryShots = [];     // derniers plans reçus de GET /ad (durées Omni réelles)
 let aoVoiceLocked = false;   // au moins un clip « pret » → fiche voix verrouillée
 let aoVoiceUnlocked = false; // l'utilisateur a explicitement déverrouillé (→ force:true)
+let aoOmniDailyLimit = null; // quota Google Omni (requêtes/jour) renvoyé par GET /ad
 const AO_API = "/api/avatar-omni";
 const AO_DEFAULT_RATE = 0.10;        // $/s (720p) — même formule que le backend
 const AO_TIER1_USD = 10;             // quota Google Tier 1 : 10 $ / 10 min
@@ -3014,7 +3020,7 @@ async function aoRefreshDurations() {
       const dur = card && card.querySelector(".ao-dur");
       if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
     });
-    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words);
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts);
     aoRenderAnimEstimate();
   } catch (_) { /* non bloquant */ }
 }
@@ -3173,14 +3179,21 @@ $("aoBibleSaveBtn").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 
-function aoRenderWarnings(boxId, warnings, maxWords) {
+// Deux sections : « Répliques trop longues » (mots PAR TOUR) seulement s'il y en a ; les autres
+// alertes (durée, valeurs [à valider], fiche voix…) sous leur propre titre.
+function aoRenderWarnings(boxId, warnings, maxWords, alerts) {
   const box = $(boxId);
   const list = (warnings || []).filter(Boolean);
-  if (!list.length) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  const other = (alerts || []).filter(Boolean);
+  if (!list.length && !other.length) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  const ul = (items) => "<ul>" + items.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>";
   box.innerHTML =
-    `<div class="ao-w-title">⚠ Répliques trop longues${maxWords ? ` (max ~${esc(maxWords)} mots par plan, soit 10 s)` : ""}</div>` +
-    "<ul>" + list.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>" +
-    `<div class="muted small">Au-delà, Google risque de couper la phrase. Raccourcis le dialogue ou découpe-le.</div>`;
+    (list.length
+      ? `<div class="ao-w-title">⚠ Répliques trop longues${maxWords ? ` (max ~${esc(maxWords)} mots par tour, soit 10 s)` : ""}</div>` +
+        ul(list) +
+        `<div class="muted small">Au-delà, Google risque de couper la phrase. Raccourcis le dialogue ou découpe-le.</div>`
+      : "") +
+    (other.length ? `<div class="ao-w-title">⚠ À vérifier</div>` + ul(other) : "");
   box.classList.remove("hidden");
 }
 
@@ -3200,6 +3213,43 @@ function aoTier1Html(usdVideo, flag) {
   return `<div class="ao-tier1">⏳ ${esc(aoTier1Text(usdVideo))}</div>`;
 }
 
+// Photo réduite (≤ 1024 px, JPEG) pour la bible : Claude la VOIT (visage / visage2 / produit).
+async function aoPhotoDataUrl(file, max = 1024) {
+  const url = await new Promise((res, rej) => {
+    const rd = new FileReader();
+    rd.onload = () => res(String(rd.result));
+    rd.onerror = rej;
+    rd.readAsDataURL(file);
+  });
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    const k = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.width * k));
+    c.height = Math.max(1, Math.round(img.height * k));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.85);
+  } catch (_) { return url; }
+}
+
+// Une photo par type (visage, visage2, produit) : celles que Claude regarde pour écrire la bible.
+async function aoBiblePhotos() {
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < aoRefsFiles.length; i++) {
+    const kind = aoRefsKinds[i];
+    if (!["visage", "visage2", "produit"].includes(kind) || seen.has(kind)) continue;
+    seen.add(kind);
+    out.push({ kind, data: await aoPhotoDataUrl(aoRefsFiles[i]) });
+  }
+  return out;
+}
+
 // -- Étape 3 : plan de tournage --
 $("aoPlanBtn").addEventListener("click", async () => {
   const script = $("aoScript").value;   // VERBATIM
@@ -3211,6 +3261,7 @@ $("aoPlanBtn").addEventListener("click", async () => {
     : manual ? "🎬 Préparation de tes plans…" : "🎬 Découpage du script en plans…";
   $("aoPlanBtn").disabled = true;
   try {
+    const refPhotos = mode === "client" ? await aoBiblePhotos() : [];
     const r = await api(AO_API + "/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3224,6 +3275,7 @@ $("aoPlanBtn").addEventListener("click", async () => {
         manual,
         mode,
         voice_profile: aoReadVoice("aoV"),
+        ref_photos: refPhotos,
       }),
     });
     aoShots = r.shots || [];
@@ -3270,7 +3322,7 @@ function renderAoPlan(shots, r) {
           `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`);
     list.appendChild(div);
   });
-  aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words);
+  aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words, r.alerts);
   const e = r.estimate || {};
   $("aoEstimate").innerHTML =
     `<b>Coût estimé :</b> ${usd(e.usd_total)} ` +
@@ -3376,9 +3428,10 @@ async function loadAoGallery(adId) {
   }
   $("aoValidation").classList.remove("hidden");
   aoGalleryShots = r.shots || [];
+  aoOmniDailyLimit = r.omni_daily_limit || null;
   aoRenderBible(r.bible);
   aoRenderVoiceBlock(r);
-  aoRenderWarnings("aoWarnings", r.warnings, r.max_words);
+  aoRenderWarnings("aoWarnings", r.warnings, r.max_words, r.alerts);
   const g = $("aoGallery");
   renderOverviewBanner(g, r, "avatar_omni", adId);
   g.innerHTML = "";
@@ -3406,13 +3459,36 @@ function aoSumSeconds(shots) {
   return shots.reduce((t, s) => t + (Number(s.duration_s) || 0), 0);
 }
 
+// Requêtes Google Omni = somme des tours RESTANTS (1 par plan sans tours) — même calcul que le backend.
+function aoRequests(shots) {
+  return shots.reduce((t, s) => {
+    const segs = Array.isArray(s.segments) ? s.segments : [];
+    return t + (segs.length ? segs.filter((x) => !x.done).length : 1);
+  }, 0);
+}
+
+function aoDailyLimit() {
+  return Number(aoOmniDailyLimit || (currentSettings && currentSettings.omni_daily_request_limit)) || 20;
+}
+
+function aoQuotaText(shots) {
+  const req = aoRequests(shots);
+  const lim = aoDailyLimit();
+  return req > lim
+    ? `${req} requêtes Google nécessaires (1 par tour) > quota de ${lim}/jour (Réglages) : l'animation s'arrêtera au quota — les tours faits sont gardés, reprends le lendemain.`
+    : "";
+}
+
 function aoRenderAnimEstimate() {
   const c = aoCandidates();
   const secs = aoSumSeconds(c);
   const usdVid = secs * aoRate();
+  const quota = aoQuotaText(c);
   $("aoAnimEstimate").innerHTML = c.length
-    ? `≈ <b>${usd(usdVid)}</b> <span class="muted">(${c.length} plan(s) · ~${secs} s de vidéo + voix à ~${usd(aoRate())}/s)</span>` +
-      aoTier1Html(usdVid, false)
+    ? `≈ <b>${usd(usdVid)}</b> <span class="muted">(${c.length} plan(s) · ~${secs} s de vidéo + voix à ~${usd(aoRate())}/s · ` +
+      `${aoRequests(c)} requête(s) Google, quota ${aoDailyLimit()}/jour)</span>` +
+      aoTier1Html(usdVid, false) +
+      (quota ? `<div class="ao-tier1">🚦 ${esc(quota)}</div>` : "")
     : `<span class="muted">Aucun plan validé pour l'instant.</span>`;
 }
 
@@ -3444,6 +3520,10 @@ function aoShotCard(s) {
     `<div class="body">` +
     `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}</div>` +
     `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
+    (Array.isArray(s.refs_sent) && s.refs_sent.length
+      ? `<div class="muted small" title="Réfs réellement envoyées à Nano Banana, dans l'ordre">📎 Réfs envoyées : ` +
+        `${esc(s.refs_sent.map((k) => (k === "ancre" ? "Ancre" : AO_REF_LABEL[k] || "sans type")).join(" › "))}</div>`
+      : "") +
     err +
     (s.direction ? `<div class="ao-direction" title="Mise en scène du client">🎬 ${esc(s.direction)}</div>` : "") +
     (isClient
@@ -3551,7 +3631,7 @@ async function aoRefreshMeta(s, card) {
     }
     const dur = card.querySelector(".ao-dur");
     if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
-    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words);
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts);
     aoRenderAnimEstimate();
   } catch (_) { /* non bloquant */ }
 }
@@ -3619,11 +3699,14 @@ async function aoLaunchAnimation(shots, clipId) {
     const secs = aoSumSeconds(shots);
     const usdVid = secs * aoRate();
     const tier1 = usdVid > AO_TIER1_USD ? `\n\n⏳ ${aoTier1Text(usdVid)}` : "";
+    const quota = aoQuotaText(shots);
+    const reqLine = `\n\n🚦 ${aoRequests(shots)} requête(s) Google (1 par tour) — quota ${aoDailyLimit()}/jour.` +
+      (quota ? `\n⚠ ${quota}` : "");
     const ok = await showModal({
       title: clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
       message:
         (clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) +
-        ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s) — estimé ≈ ${usd(usdVid)} pour ~${secs} s. Continuer ?` + tier1,
+        ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s) — estimé ≈ ${usd(usdVid)} pour ~${secs} s. Continuer ?` + tier1 + reqLine,
       confirmText: clipId ? "Tester" : "Animer", cancelText: "Annuler", danger: true,
     });
     if (!ok) return;

@@ -146,6 +146,7 @@ def create_app() -> FastAPI:
                 {"key": "wav", "label": "WAV (non compressé)"},
             ],
             "spend_cap_usd": _spend_cap_usd(),
+            "omni_daily_request_limit": _omni_daily_limit(),
             "dry_run": s.get("dry_run", "1") == "1",
             "avatars": db.list_avatars(),
             "voices": db.list_voices(),
@@ -229,6 +230,8 @@ def create_app() -> FastAPI:
         db.set_setting("audio_format", config_app.normalize_audio_format(body.audio_format))
         if body.spend_cap_usd is not None:
             db.set_setting("spend_cap_usd", str(max(0.0, float(body.spend_cap_usd))))
+        if body.omni_daily_request_limit is not None:
+            db.set_setting("omni_daily_request_limit", str(max(1, int(body.omni_daily_request_limit))))
         db.set_setting("dry_run", "1" if body.dry_run else "0")
         db.log_activity("reglages", "Réglages enregistrés.")
         return {"ok": True}
@@ -711,6 +714,7 @@ def create_app() -> FastAPI:
                 result = brain.generate_avatar_omni_client_plan(
                     cfg, body.script, personas=personas, product=body.product,
                     ambiance=body.ambiance, words_per_sec=wps,
+                    photos=_bible_photos(body.ref_photos),
                 )
             else:
                 result = brain.generate_avatar_omni_plan(
@@ -724,6 +728,9 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         result["mode"] = mode
         result["personas"] = personas
+        result.setdefault("alerts", [])
+        if vw := config_app.voice_extra_warning(profile, body.product):
+            result["alerts"].append(vw)
         for s in result["shots"]:
             s["duration_s"] = _shot_omni_seconds(s, wps)   # client : SOMME des tours
         result["estimate"] = _omni_estimate(result["shots"], wps)
@@ -819,10 +826,11 @@ def create_app() -> FastAPI:
                                           str(clip.get("direction") or ""))
             db.update_clip(clip_id, segments=_json([{"text": s["text"], "motion": s["motion"]}
                                                     for s in segs]))
-        warning = brain.omni_dialogue_warning(int(clip["scene_n"]), body.text, max_words, "dialogue")
+        fresh = db.get_clip(clip_id) or {}
+        warning = _clip_word_warnings(fresh, max_words)
         return {
-            "ok": True, "duration_s": pipeline.clip_omni_seconds(db.get_clip(clip_id) or {}, wps),
-            "max_words": max_words, "warning": warning or "",
+            "ok": True, "duration_s": pipeline.clip_omni_seconds(fresh, wps),
+            "max_words": max_words, "warning": " · ".join(warning),
         }
 
     @app.post("/api/avatar-omni/consistency/{ad_id}")
@@ -856,26 +864,32 @@ def create_app() -> FastAPI:
                 "label": _block_label(c),
                 "segments": _segments_view(c, wps),
                 "shot_prompt": c.get("shot_prompt") or "",
+                "refs_sent": _refs_sent(c),
             },
         )
+        clips_by_id = {int(c["id"]): c for c in db.clips_for_ad(ad_id)}
         resp["warnings"] = [
             w for s in resp["shots"]
-            if (w := brain.omni_dialogue_warning(int(s["n"]), s["dialogue"], max_words, "dialogue"))
+            for w in _clip_word_warnings(clips_by_id.get(int(s["clip_id"])) or {}, max_words)
         ]
+        resp["alerts"] = []
         bw = brain.bracket_values_warning([s["dialogue"] for s in resp["shots"]])
         if bw:
-            resp["warnings"].append(bw)
+            resp["alerts"].append(bw)
+        if vw := config_app.voice_extra_warning(profile):
+            resp["alerts"].append(vw)
         resp["personas"] = pipeline.ad_personas(ad)
         bible = pipeline.ad_bible(ad)
         resp["bible"] = bible
         resp["bible_text"] = brain.bible_text(bible) if bible else ""
         for s in resp["shots"]:
             if s["segments"] and s["duration_s"] > config_app.OMNI_MAX_TOTAL_SECONDS:
-                resp["warnings"].append(
+                resp["alerts"].append(
                     f"Plan {s['label'] or s['n']} : ~{s['duration_s']} s de vidéo (max "
                     f"{config_app.OMNI_MAX_TOTAL_SECONDS} s par vidéo étendue) — coupe ce bloc en deux."
                 )
         resp["max_words"] = max_words
+        resp["omni_daily_limit"] = _omni_daily_limit()
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
         resp["voice_locked"] = any(s["status"] == "pret" for s in resp["shots"])
@@ -958,6 +972,7 @@ def create_app() -> FastAPI:
             "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
             "n_plans": len(candidates), "usd_video": est["usd_video"],
             "seconds_total": est["seconds_total"], "tier1_warning": est["tier1_warning"],
+            **_omni_quota_info(candidates),
         }
 
     @app.post("/api/objet/consistency/{ad_id}")
@@ -1377,6 +1392,7 @@ class SettingsIn(BaseModel):
     objet_style: str = ""    # style visuel « Objet vivant » (jalon 6)
     audio_format: str = ""   # format de sortie des voix : "mp3" (défaut) | "wav"
     spend_cap_usd: float | None = None   # plafond de dépense ($) ; None = ne pas changer
+    omni_daily_request_limit: int | None = None   # quota Google Omni (requêtes/jour) ; None = idem
     dry_run: bool = True
     # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices (comme les avatars).
 
@@ -1510,6 +1526,8 @@ class AvatarOmniPlanIn(BaseModel):
     persona1: str = ""      # personnage 1 — PARLE (FR, traduit en EN par Claude)
     persona2: str = ""      # personnage 2 — MUET, optionnel (FR, traduit en EN)
     voice_profile: dict[str, Any] = {}   # fiche voix (débit → MAX_WORDS et durées)
+    # Photos de réf lues par Claude pour la bible (découpage client) : [{kind, data(data URL)}]
+    ref_photos: list[dict[str, Any]] = []
 
 
 class AvatarOmniEstimateIn(BaseModel):
@@ -1680,6 +1698,29 @@ def _block_fields(s: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _refs_sent(c: dict[str, Any]) -> list[str]:
+    """Types des réfs RÉELLEMENT envoyées à Nano Banana pour ce plan, dans l'ordre (audit)."""
+    import json
+
+    try:
+        data = json.loads(c.get("refs_sent") or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(r.get("kind") or "") for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def _clip_word_warnings(c: dict[str, Any], max_words: int) -> list[str]:
+    """« X mots (max N) » d'un plan Avatar IA : PAR TOUR en découpage client (un segment = un
+    tour de 10 s), sur le dialogue entier sinon (un plan = un clip)."""
+    segs = pipeline.clip_segments(c)
+    if segs:
+        return brain.omni_turn_warnings(_block_label(c) or c.get("scene_n"),
+                                        [str(s["text"]) for s in segs], max_words)
+    w = brain.omni_dialogue_warning(int(c.get("scene_n") or 0), str(c.get("script") or ""),
+                                    max_words, "dialogue")
+    return [w] if w else []
+
+
 def _segments_view(c: dict[str, Any], wps: float) -> list[dict[str, Any]]:
     """Segments d'un plan client pour l'UI : texte, mouvement, durée, tour déjà fait ou non."""
     segs = pipeline.clip_segments(c)
@@ -1689,6 +1730,38 @@ def _segments_view(c: dict[str, Any], wps: float) -> list[dict[str, Any]]:
          "done": bool(s.get("interaction_id"))}
         for i, s in enumerate(segs)
     ]
+
+
+_PHOTO_MEDIA = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+_PHOTO_MAX_BYTES = 4_500_000   # limite Claude ~5 Mo par image (après décodage)
+
+
+def _bible_photos(raw: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Photos de réf envoyées avec le plan (data URL) → [{kind, media_type, data(b64)}] : une par
+    type (visage, visage2, produit), formats image acceptés par Claude, ≤ ~4,5 Mo. Le reste est
+    ignoré (jamais d'erreur : la bible se fait alors sans cette photo)."""
+    import base64
+    import binascii
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for ph in raw or []:
+        if not isinstance(ph, dict):
+            continue
+        kind = str(ph.get("kind") or "").strip().lower()
+        mt = re.match(r"data:(image/[\w.+-]+);base64,(.+)$", str(ph.get("data") or ""), re.DOTALL)
+        if kind not in brain.BIBLE_PHOTO_KINDS or kind in seen or not mt or mt.group(1) not in _PHOTO_MEDIA:
+            continue
+        data = mt.group(2).strip()
+        try:
+            size = len(base64.b64decode(data, validate=True))
+        except (binascii.Error, ValueError):
+            continue
+        if size > _PHOTO_MAX_BYTES:
+            continue
+        seen.add(kind)
+        out.append({"kind": kind, "media_type": mt.group(1), "data": data})
+    return out
 
 
 def _block_label(c: dict[str, Any]) -> str:
@@ -1770,6 +1843,34 @@ def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dic
 
 def _norm_currency(value: str) -> str:
     return "eur" if str(value or "").strip().lower() == "eur" else "usd"
+
+
+def _omni_daily_limit() -> int:
+    """Quota Google Omni (requêtes/jour, 1 tour = 1 requête) : setting, sinon défaut."""
+    try:
+        v = int(db.get_setting("omni_daily_request_limit", "") or config_app.OMNI_DAILY_REQUEST_LIMIT)
+    except (TypeError, ValueError):
+        v = config_app.OMNI_DAILY_REQUEST_LIMIT
+    return max(1, v)
+
+
+def _omni_requests(clips: list[dict[str, Any]]) -> int:
+    """Requêtes Google Omni nécessaires = somme des tours RESTANTS (1 par plan sans segments)."""
+    n = 0
+    for c in clips:
+        segs = pipeline.clip_segments(c)
+        n += sum(1 for s in segs if not s.get("interaction_id")) if segs else 1
+    return n
+
+
+def _omni_quota_info(clips: list[dict[str, Any]]) -> dict[str, Any]:
+    req, limit = _omni_requests(clips), _omni_daily_limit()
+    warning = ""
+    if req > limit:
+        warning = (f"{req} requêtes Google nécessaires (1 par tour) > quota de {limit} requêtes/jour "
+                   "(Réglages) : l'animation s'arrêtera au quota — les tours faits sont gardés, "
+                   "reprends le lendemain.")
+    return {"requests": req, "daily_limit": limit, "quota_warning": warning}
 
 
 def _spend_cap_usd() -> float:

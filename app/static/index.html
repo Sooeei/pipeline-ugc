@@ -417,7 +417,7 @@
             <textarea id="aoAmbiance" rows="2"
               placeholder="Ex. salle de bain lumineuse le matin, lumière naturelle douce…"></textarea>
           </label>
-          <label for="aoDropzone">Photos de référence <span class="muted">(optionnel — indique le type : visage, produit, décor, style)</span></label>
+          <label for="aoDropzone">Photos de référence <span class="muted">(optionnel — indique le type : visage, produit, décor, style ; en découpage client, ajoute-les AVANT le plan : Claude regarde visage / visage2 / produit pour écrire la bible)</span></label>
           <div id="aoDropzone" class="dropzone" tabindex="0" role="button"
                aria-label="Glisser-déposer ou sélectionner des images">
             <input type="file" id="aoRefs" accept="image/*" multiple class="hidden" />
@@ -685,6 +685,9 @@
           <div id="objetStylePreview" class="style-preview"></div>
           <label>Plafond de dépense par génération ($) <span class="muted">(0 = aucun plafond)</span>
             <input type="number" id="spendCap" min="0" step="1" placeholder="25" />
+          </label>
+          <label>Quota Google Omni (requêtes / jour) <span class="muted">(1 tour = 1 requête ; Tier 1 = 20)</span>
+            <input type="number" id="omniDailyLimit" min="1" step="1" placeholder="20" />
           </label>
           <label class="check">
             <input type="checkbox" id="dryRun" />

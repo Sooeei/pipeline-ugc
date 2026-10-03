@@ -7,6 +7,7 @@ autres. Émet des événements de progression via `on_update`.
 from __future__ import annotations
 
 import html
+import json
 import math
 import os
 import re
@@ -386,26 +387,10 @@ _MASHUP_CONSISTENCY = (
     "change the scene, framing and action described here: "
 )
 
-# Cohérence PERSONNE pour l'Avatar IA (Omni) : la 1re image de réf est la personne VERROUILLÉE
-# (Plan 1 validé / ancre). Même personne, seuls le cadrage, la pose et l'action changent.
-_AVATAR_CONSISTENCY = (
-    "IMPORTANT — PERSON CONSISTENCY: the FIRST reference image is the LOCKED person (same face, "
-    "hair, age, body, outfit, photographic UGC style and lighting). Do NOT change the person. "
-    "Only change framing, pose and action: "
-)
-
-# Deux personnages (découpage client : celui qui parle + un personnage muet).
-_AVATAR_DUO_CONSISTENCY = (
-    "IMPORTANT — PEOPLE CONSISTENCY: the FIRST reference image is the LOCKED scene (same two "
-    "people: same faces, hair, ages, bodies, outfits, same photographic UGC style and lighting). "
-    "Do NOT change the people. Only change framing, pose and action: "
-)
-
 # Préfixe de cohérence par type de pub (objet vivant = défaut).
 _CONSISTENCY_BY_KIND = {
     "mashup": _MASHUP_CONSISTENCY,
-    "avatar_omni": _AVATAR_CONSISTENCY,
-}
+}   # Avatar IA (Omni) : pas de préfixe, la légende des réfs nomme le rôle de chaque image
 
 
 def consistency_ref(
@@ -450,20 +435,28 @@ def generate_objet_images(
         {"path": p, "kind": ""} for p in base_refs
     ]
     model_id = _objet_image_model_id(cfg)
+    ad_row = db.get_ad(ad_id) or {}
+    kind = str(ad_row.get("kind") or "")
     # Consigne de cohérence adaptée au type : Mashup = look ultra-réaliste (SANS langage Pixar) ;
-    # Avatar IA (Omni) = même personne ; Objet vivant = personnage-mascotte. Sinon aucune (Plan 1).
+    # Objet vivant = personnage-mascotte. Sinon aucune (Plan 1). Avatar IA (Omni) : le RÔLE de
+    # chaque réf est nommé dans le prompt (légende), l'ancre n'étant plus forcément la 1re image.
     prefix = ""
-    if character_ref:
-        ad_row = db.get_ad(ad_id) or {}
-        kind = str(ad_row.get("kind") or "")
+    if character_ref and kind != "avatar_omni":
         prefix = _CONSISTENCY_BY_KIND.get(kind, _CHARACTER_CONSISTENCY)
-        if kind == "avatar_omni" and ad_personas(ad_row).get("p2_en"):
-            prefix = _AVATAR_DUO_CONSISTENCY
 
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
-        refs = _select_clip_refs(_norm_refs_needed(s.get("refs_needed")), typed_refs, character_ref)
-        if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, prefix):
+        needed = _norm_refs_needed(s.get("refs_needed"))
+        shot_prefix = prefix
+        if kind == "avatar_omni":
+            picked = select_omni_refs(needed, typed_refs, character_ref)
+            refs = [r["path"] for r in picked]
+            shot_prefix = omni_refs_legend(picked)
+            db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
+                [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
+        else:
+            refs = _select_clip_refs(needed, typed_refs, character_ref)
+        if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix):
             ok += 1
     ko = len(shots) - ok
     db.set_ad_status(ad_id, "objet_images")
@@ -497,6 +490,66 @@ def _select_clip_refs(
             if p and p not in sel:
                 sel.append(p)
     return sel[: max(1, cap)]
+
+
+def select_omni_refs(
+    needed: list[str] | None, typed_refs: list[dict[str, Any]], anchor: str = "",
+    cap: int = config_app.MAX_REFS_PER_IMAGE_CALL_OMNI,
+) -> list[dict[str, str]]:
+    """Réfs d'un plan Avatar IA (Omni), au plus `cap` (4), dans l'ordre de PRIORITÉ :
+    visage > visage2 > produit > ancre, puis les photos en plus (2e photo produit, décor, style,
+    réfs sans type). Une photo par type d'abord : l'ancre passe avant une 2e photo du même type.
+    `needed == []` (plan neutre) → aucune réf ; `None` → tous les types. Renvoie [{kind, path}]
+    (kind « ancre » pour l'image du plan validé)."""
+    if needed == []:
+        return []
+
+    def wanted(kind: str) -> bool:
+        return needed is None or kind == "" or kind in needed
+
+    refs = [{"kind": (t.get("kind") or "").strip().lower(), "path": str(t.get("path") or "")}
+            for t in typed_refs if t.get("path")]
+    refs = [r for r in refs if wanted(r["kind"])]
+    first: list[dict[str, str]] = []
+    for kind in config_app.OMNI_REF_PRIORITY:
+        hit = next((r for r in refs if r["kind"] == kind), None)
+        if hit:
+            first.append(hit)
+    if anchor:
+        first.append({"kind": "ancre", "path": anchor})
+    rest = sorted((r for r in refs if r not in first),
+                  key=lambda r: (config_app.OMNI_REF_PRIORITY + ("decor", "style", "")).index(r["kind"])
+                  if r["kind"] in config_app.OMNI_REF_PRIORITY + ("decor", "style", "") else 99)
+    out: list[dict[str, str]] = []
+    for r in first + rest:
+        if r["path"] not in {x["path"] for x in out}:
+            out.append(r)
+    return out[: max(1, cap)]
+
+
+# Rôle de chaque réf, nommé dans le prompt image Avatar IA (« reference image 1 = … »).
+_OMNI_REF_ROLES = {
+    "visage": "character 1's face (the speaker) — keep this exact face identical (same age, "
+              "features, skin, hair)",
+    "visage2": "character 2's face (the silent person) — keep this exact face identical (same "
+               "age, features, skin, hair)",
+    "produit": "the client's product — reproduce it exactly (same bottle shape, colors, cap and "
+               "label)",
+    "ancre": "the validated previous shot — keep the same people, outfits, set and lighting; "
+             "only framing, pose and action change",
+    "decor": "the set / background to reproduce",
+    "style": "the photographic style and lighting to match",
+    "": "an additional reference",
+}
+
+
+def omni_refs_legend(picked: list[dict[str, str]]) -> str:
+    """Légende des réfs placée en tête du prompt image Avatar IA ("" sans réf)."""
+    if not picked:
+        return ""
+    lines = [f"reference image {i} = {_OMNI_REF_ROLES.get(r['kind'], _OMNI_REF_ROLES[''])}"
+             for i, r in enumerate(picked, 1)]
+    return "REFERENCE IMAGES (in order): " + "; ".join(lines) + ".\n\n"
 
 
 def _objet_image_model_id(cfg: ProviderConfig) -> str:

@@ -105,13 +105,14 @@ def test_total_duration_warning_over_max():
     long_doc = "BLOC 1 — LONG " + " ".join(f"Phrase numéro {i} un peu longue pour durer." for i in range(40))
     res = brain.generate_avatar_omni_client_plan(ProviderConfig(dry_run=True), long_doc, personas=PERSONAS)
     assert res["shots"][0]["duration_s"] > config_app.OMNI_MAX_TOTAL_SECONDS
-    assert any("par vidéo étendue" in w for w in res["warnings"])
+    assert any("par vidéo étendue" in w for w in res["alerts"])
+    assert not any("par vidéo étendue" in w for w in res["warnings"])   # pas sous « trop longues »
 
 
 def test_bracket_warning_and_values_kept_in_plan():
     res = _sim_plan()
     assert any(s["dialogue"].startswith("[97 %]") for s in res["shots"])
-    w = [x for x in res["warnings"] if x.startswith("Valeurs à valider")]
+    w = [x for x in res["alerts"] if x.startswith("Valeurs à valider")]
     assert w and "[97 %]" in w[0] and "[49,90 $]" in w[0]
 
 
@@ -290,7 +291,7 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         assert b2["label"] == "2" and len(b2["segments"]) >= 3 and "doigts" in b2["direction"]
         s9 = ad["shots"][8]
         assert s9["dialogue"].startswith("[97 %]")                           # crochets EN BASE
-        assert any(w.startswith("Valeurs à valider") for w in ad["warnings"])
+        assert any(w.startswith("Valeurs à valider") for w in ad["alerts"])
         # bible modifiée → prompt_image recomposés, images intactes
         img_before = db.get_clip(ad["shots"][0]["clip_id"])["image_path"]
         r = c.patch(f"/api/avatar-omni/bible/{ad_id}",
@@ -494,8 +495,8 @@ def test_refs_both_faces_and_product_on_blocks_6_7_9_10():
         assert "visage" in refs[n] and "visage2" in refs[n], (n, refs[n])
     for n in (6, 9, 10):                                                  # le flacon est mentionné
         assert "produit" in refs[n], (n, refs[n])
-    assert "produit" not in refs[7]
-    assert "produit" not in refs[4]           # flacon du concurrent [L'Oréal] ≠ photo du produit
+    assert "produit" in refs[7]               # la bible pose le flacon sur le comptoir → visible
+    assert "produit" not in refs[4]           # flacon du concurrent [L'Oréal] en main ≠ photo du produit
 
 
 def test_client_refs_enforced_over_claude():

@@ -645,8 +645,28 @@
             <input type="password" id="xaiKey" /></label>
           <label>Clé API Google (Gemini) — Avatar IA Omni <span class="muted">(Google AI Studio, tier payant)</span>
             <input type="password" id="geminiKey" /></label>
-          <label>Clé API Anthropic (cerveau IA) <input type="password" id="anthropicKey" /></label>
-          <label>Modèle du cerveau (Claude) <input type="text" id="brainModel" /></label>
+          <fieldset class="engine-box">
+            <legend>Moteur du cerveau (Claude)</legend>
+            <label class="check"><input type="radio" name="brainEngine" value="anthropic_api" checked />
+              API Anthropic <span class="muted">(clé API, facturé à l'usage)</span></label>
+            <label class="check" id="brainEngineCcLabel"><input type="radio" name="brainEngine" value="claude_code" />
+              Claude Code (abonnement) <span class="muted">(quota de ton abonnement, 0 $ par appel)</span></label>
+            <div id="ccNotInstalled" class="muted hidden">Claude Code n'est pas installé sur ce PC</div>
+            <p class="muted small">Un seul moteur actif : aucune bascule automatique de l'un vers l'autre.</p>
+            <div id="engineApiBox">
+              <label>Clé API Anthropic (cerveau IA) <input type="password" id="anthropicKey" /></label>
+              <label>Modèle du cerveau (Claude) <input type="text" id="brainModel" /></label>
+            </div>
+            <div id="engineCcBox" class="hidden">
+              <label>Token Claude Code <span class="muted">(obtenu avec <code>claude setup-token</code>)</span>
+                <input type="password" id="claudeCodeToken" autocomplete="off" /></label>
+              <label>Modèle (Claude Code) <select id="claudeCodeModel"></select></label>
+              <div class="row">
+                <button class="btn small" id="claudeCodeTestBtn" type="button">🔌 Tester</button>
+                <span id="claudeCodeTestMsg" class="muted"></span>
+              </div>
+            </div>
+          </fieldset>
           <label>Modèle Gradium <input type="text" id="gradiumModel" /></label>
           <label>Format des voix off / voix seules
             <select id="audioFormat"></select>

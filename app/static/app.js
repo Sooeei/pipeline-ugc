@@ -114,6 +114,8 @@ async function loadSettings() {
   setKeyField("openrouterKey", s.openrouter_api_key_set);
   setKeyField("xaiKey", s.xai_api_key_set);
   setKeyField("anthropicKey", s.anthropic_api_key_set);
+  setKeyField("claudeCodeToken", s.claude_code_token_set);
+  renderBrainEngine(s);
   if ($("geminiKey")) setKeyField("geminiKey", s.gemini_api_key_set);
   $("gradiumModel").value = s.gradium_model || "default";
   $("heygenVoiceId").value = s.heygen_voice_id || "";
@@ -176,6 +178,62 @@ async function loadSettings() {
   renderAvatars(s.avatars || []);
   renderVoices(s.voices || []);
   renderMashStyleChips(s.mashup_style_suggestions || []);
+}
+
+// Moteur du cerveau : API Anthropic (défaut) ou Claude Code (abonnement). Si `claude` est
+// introuvable, l'option est grisée. Le token n'est jamais renvoyé (champ vide = garder).
+function brainEngineValue() {
+  const r = document.querySelector('input[name="brainEngine"]:checked');
+  return r ? r.value : "anthropic_api";
+}
+
+function toggleBrainEngineBoxes() {
+  const cc = brainEngineValue() === "claude_code";
+  $("engineApiBox").classList.toggle("hidden", cc);
+  $("engineCcBox").classList.toggle("hidden", !cc);
+}
+
+function renderBrainEngine(s) {
+  if (!$("engineCcBox")) return;
+  const installed = !!s.claude_code_installed;
+  const ccRadio = document.querySelector('input[name="brainEngine"][value="claude_code"]');
+  ccRadio.disabled = !installed;
+  $("brainEngineCcLabel").classList.toggle("disabled", !installed);
+  $("ccNotInstalled").classList.toggle("hidden", installed);
+  const engine = installed && s.brain_engine === "claude_code" ? "claude_code" : "anthropic_api";
+  document.querySelector(`input[name="brainEngine"][value="${engine}"]`).checked = true;
+  const sel = $("claudeCodeModel");
+  sel.innerHTML = "";
+  (s.claude_code_models || []).forEach((m) => {
+    const o = document.createElement("option");
+    o.value = m.key;
+    o.textContent = m.label;
+    sel.appendChild(o);
+  });
+  sel.value = s.claude_code_model || "sonnet";
+  toggleBrainEngineBoxes();
+}
+
+document.querySelectorAll('input[name="brainEngine"]').forEach((r) =>
+  r.addEventListener("change", toggleBrainEngineBoxes)
+);
+
+if ($("claudeCodeTestBtn")) {
+  $("claudeCodeTestBtn").addEventListener("click", async () => {
+    const msg = $("claudeCodeTestMsg");
+    msg.textContent = "⏳ Appel « claude -p » en cours… (enregistre d'abord le token)";
+    $("claudeCodeTestBtn").disabled = true;
+    try {
+      const r = await api("/api/claude-code/test", { method: "POST" });
+      msg.innerHTML = r.ok
+        ? `<span class="ok">✓ ${esc(r.message)} Sortie : « ${esc(r.output)} »</span>`
+        : `<span class="ko">✗ ${esc(r.message)}</span>`;
+    } catch (e) {
+      msg.innerHTML = `<span class="ko">✗ ${esc(e.message)}</span>`;
+    } finally {
+      $("claudeCodeTestBtn").disabled = false;
+    }
+  });
 }
 
 // JALON 7 — puces de style « Mashup » : pré-remplissent le champ Style LIBRE (éditable).
@@ -243,6 +301,9 @@ $("saveSettings").addEventListener("click", async () => {
     gradium_model: $("gradiumModel").value.trim(),
     heygen_voice_id: $("heygenVoiceId").value.trim(),
     anthropic_api_key: $("anthropicKey").value.trim(),
+    brain_engine: brainEngineValue(),
+    claude_code_token: $("claudeCodeToken") ? $("claudeCodeToken").value.trim() : "",
+    claude_code_model: ($("claudeCodeModel") && $("claudeCodeModel").value) || "",
     gemini_api_key: ($("geminiKey") && $("geminiKey").value.trim()) || "",   // vide = garder
     brain_model: $("brainModel").value.trim(),
     cost_mode: $("costModeDefault").value,
@@ -2016,6 +2077,7 @@ const COST_COLORS = {
   heygen: "#f59e0b",
   gradium: "#a855f7",
   anthropic: "#ec4899",
+  claude_code: "#d97706",
   gemini: "#84cc16",
 };
 const COST_COLOR_FALLBACK = ["#14b8a6", "#eab308", "#f97316", "#64748b"];

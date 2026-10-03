@@ -146,6 +146,25 @@ OBJET_MAX_REF_IMAGES = 14   # borne technique haute Nano Banana (on plafonne à 
 BRAIN_SHOTS_PER_BATCH = 10  # taille d'un sous-appel Claude (recollé en une seule liste numérotée)
 # Réfs images envoyées PAR APPEL à Nano Banana (qualité/coût ; l'API ne documente pas de max).
 MAX_REFS_PER_IMAGE_CALL = 3
+# Moteur du cerveau (Réglages) : API Anthropic (défaut) OU Claude Code (abonnement, `claude -p`).
+# Un seul actif, aucune bascule automatique de l'un vers l'autre.
+BRAIN_ENGINES = {"anthropic_api": "API Anthropic", "claude_code": "Claude Code (abonnement)"}
+DEFAULT_BRAIN_ENGINE = "anthropic_api"
+CLAUDE_CODE_MODELS = {"sonnet": "Sonnet (recommandé)", "opus": "Opus (plus lent, quota ↑)",
+                      "haiku": "Haiku (rapide)"}
+DEFAULT_CLAUDE_CODE_MODEL = "sonnet"
+
+
+def normalize_brain_engine(value: object) -> str:
+    v = str(value or "").strip()
+    return v if v in BRAIN_ENGINES else DEFAULT_BRAIN_ENGINE
+
+
+def normalize_claude_code_model(value: object) -> str:
+    v = str(value or "").strip()
+    return v if v in CLAUDE_CODE_MODELS else DEFAULT_CLAUDE_CODE_MODEL
+
+
 # Avatar IA (Omni) : 4 réfs max, dans cet ordre de priorité : visage > visage2 > produit > ancre.
 MAX_REFS_PER_IMAGE_CALL_OMNI = 4
 OMNI_REF_PRIORITY = ("visage", "visage2", "produit")

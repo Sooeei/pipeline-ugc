@@ -198,6 +198,11 @@ def record_anthropic_call(
     )
 
 
+def record_claude_code_call(model: str = "", ad_id: int | None = None) -> None:
+    """Appel du cerveau via Claude Code (abonnement) : 0 $ (quota de l'abonnement), compté à part."""
+    db.add_cost_event("claude_code", "call", 1, usd=0.0, ad_id=ad_id, detail=model or "claude -p")
+
+
 # ============================================================ RAPPORT (section « Coûts »)
 _SERVICE_LABELS = {
     "openrouter": "OpenRouter — images Nano Banana",
@@ -207,8 +212,10 @@ _SERVICE_LABELS = {
     "heygen": "HeyGen — avatar (crédits)",
     "gradium": "Gradium — voix",
     "anthropic": "Anthropic — cerveau",
+    "claude_code": "Claude Code (quota abonnement)",
 }
-_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "anthropic"]
+_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "anthropic",
+                  "claude_code"]
 
 
 def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
@@ -230,7 +237,7 @@ def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
         return f"{n('credit')} clip(s) · {round(q('credit'))} crédits"
     if svc == "gradium":
         return f"{n('generation')} génération(s)"
-    if svc == "anthropic":
+    if svc in ("anthropic", "claude_code"):
         return f"{n('call')} appel(s)"
     return ", ".join(f"{int(v.get('n', 0))} {k}" for k, v in units.items())
 

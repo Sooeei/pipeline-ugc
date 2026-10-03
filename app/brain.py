@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from . import config_app, cost, providers
+from . import claude_code, config_app, cost, providers
 from .providers import ProviderConfig
 
 # --- System prompt (collé tel quel, ne pas reformuler) ---
@@ -202,6 +202,11 @@ class BrainProviderError(BrainError):
     """Erreur côté fournisseur (réseau, auth, 5xx Anthropic) → HTTP 502."""
 
 
+class BrainClaudeCodeError(BrainProviderError):
+    """Erreur du moteur Claude Code (token expiré, quota abonnement, absent, timeout) : message FR
+    clair, JAMAIS relancée ni basculée vers l'API Anthropic."""
+
+
 class _BrainRetryable(BrainError):
     """Réponse mal formée (JSON illisible / sans scènes) → on relance."""
 
@@ -232,11 +237,26 @@ TOO_LONG_MESSAGE_OMNI = (
 )
 
 
+def _uses_claude_code(cfg: ProviderConfig) -> bool:
+    return config_app.normalize_brain_engine(getattr(cfg, "brain_engine", "")) == "claude_code"
+
+
+def _brain_ready(cfg: ProviderConfig) -> bool:
+    """Le moteur choisi est utilisable (clé API, ou Claude Code : le token est vérifié à l'appel)."""
+    return _uses_claude_code(cfg) or bool(cfg.anthropic_api_key)
+
+
+def _attempts(cfg: ProviderConfig, n: int = _BRAIN_MAX_ATTEMPTS) -> int:
+    """Nombre d'essais d'une boucle de relance : plafonné en mode abonnement (quota)."""
+    return min(n, claude_code.MAX_ATTEMPTS) if _uses_claude_code(cfg) else n
+
+
 def _is_transient_brain_error(exc: BaseException | None) -> bool:
     """Vrai si l'erreur est PONCTUELLE et mérite une relance : 529 overloaded, 429, 5xx,
     ou hoquet réseau (timeout, connexion coupée). Une vraie erreur (clé 401/403, requête 400)
-    n'est PAS transitoire → on ne boucle pas dessus."""
-    if exc is None:
+    n'est PAS transitoire → on ne boucle pas dessus. Erreur Claude Code (token, quota,
+    absent, timeout) : jamais relancée (ni vers l'API)."""
+    if exc is None or isinstance(exc, BrainClaudeCodeError):
         return False
     if providers.is_network_hiccup(exc):
         return True
@@ -264,6 +284,8 @@ def _brain_backoff_sleep(retry_index: int) -> None:
 def _friendly_anthropic(exc: BaseException) -> str:
     """Message clair et actionnable pour une erreur du cerveau (Anthropic), SANS trace brute.
     Le détail technique part dans app.log (jamais à l'écran)."""
+    if isinstance(exc, BrainClaudeCodeError):
+        return str(exc)   # déjà un message FR clair (moteur abonnement)
     providers._log_detail(f"Anthropic : {exc}")
     if providers.is_network_hiccup(exc):
         return providers._friendly_network("Anthropic (Claude)", exc)
@@ -290,6 +312,9 @@ def anthropic_check(cfg: ProviderConfig) -> dict[str, Any]:
     distingue « délai réseau, réessaie » d'une vraie « clé/modèle invalide » (erreur HTTP)."""
     if cfg.dry_run:
         return {"ok": True, "simulation": True, "message": "Simulation : clé non vérifiée."}
+    if _uses_claude_code(cfg):
+        return {"ok": True, "simulation": False,
+                "message": "Moteur Claude Code (abonnement) — « Tester » dans Réglages."}
     if not cfg.anthropic_api_key:
         return {"ok": False, "message": "Clé Anthropic manquante."}
     import time
@@ -582,7 +607,7 @@ def _manual_visuals_with_retry(
 ) -> list[dict[str, Any]]:
     """Visuels du mode MANUEL (dialogues fournis). `call` = appel Claude propre au pipeline
     (objet par défaut ; Avatar IA Omni fournit le sien) — mêmes relances, mêmes sous-lots."""
-    if not cfg.anthropic_api_key:
+    if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
     # DÉCOUPAGE INTERNE : le cerveau ne rend pas 40 plans en un JSON fiable → on traite par
     # sous-lots (BRAIN_SHOTS_PER_BATCH) puis on recolle. Transparent (une seule galerie).
@@ -602,7 +627,7 @@ def _one_visuals_batch_with_retry(
 ) -> list[dict[str, Any]]:
     fn = call or _call_claude_manual_visuals  # résolu à l'appel (monkeypatch des tests OK)
     last_err = ""
-    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
+    for attempt in range(_attempts(cfg, max_attempts)):  # 1 essai + relances (529, réseau, JSON tronqué)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
@@ -626,7 +651,21 @@ def _call_claude_data(
 ) -> dict[str, Any]:
     """Appel Claude → dict JSON complet (réponse coupée → _BrainTruncated ; illisible →
     _BrainRetryable). Base commune de _call_claude_json. `images` = photos (vision) envoyées
-    AVANT le texte, chacune précédée de son étiquette : [{"label", "media_type", "data"(b64)}]."""
+    AVANT le texte, chacune précédée de son étiquette : [{"label", "media_type", "data"(b64)}].
+
+    POINT DE BRANCHEMENT UNIQUE du moteur : API Anthropic, ou Claude Code (abonnement) si
+    choisi dans Réglages — sans bascule de l'un vers l'autre."""
+    if _uses_claude_code(cfg):
+        model = config_app.normalize_claude_code_model(cfg.claude_code_model)
+        try:
+            res = claude_code.run(system, user, token=cfg.claude_code_token, model=model, images=images)
+        except claude_code.ClaudeCodeError as exc:
+            raise BrainClaudeCodeError(str(exc)) from exc
+        try:
+            cost.record_claude_code_call(model)
+        except Exception:  # noqa: BLE001 - le comptage ne casse jamais une génération
+            pass
+        return _extract_json(res["text"])
     import anthropic
 
     content: Any = user
@@ -727,7 +766,7 @@ def _generate_plan_with_retry(
     → beaucoup de plans par phrase). Réponse COUPÉE (max_tokens) → le lot est redécoupé en deux
     (récursif) au lieu d'être relancé à l'identique ; une phrase seule encore coupée → message
     honnête (`too_long_msg`), jamais « surchargée »."""
-    if not cfg.anthropic_api_key:
+    if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
     # DÉCOUPAGE INTERNE (cap 40) : un script long donnerait un JSON trop gros/tronqué. On le coupe
     # en TRANCHES CONTIGUËS de phrases (verbatim GLOBAL préservé : concat des tranches == script),
@@ -770,7 +809,7 @@ def _one_plan_batch_with_retry(
     last_err = ""
     last_verbatim = False
     last_transient = False
-    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON illisible)
+    for attempt in range(_attempts(cfg, max_attempts)):  # 1 essai + relances (529, réseau, JSON illisible)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
@@ -934,7 +973,7 @@ def _simulate_mashup_shots(
 def _generate_mashup_shots_with_retry(
     cfg: ProviderConfig, brief: str, style: str, persona: str, ratio: str, count: int = 0,
 ) -> list[dict[str, Any]]:
-    if not cfg.anthropic_api_key:
+    if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
     batch = config_app.BRAIN_SHOTS_PER_BATCH
     # DÉCOUPAGE INTERNE (cap 40) : si on demande BEAUCOUP de plans, on les génère par sous-lots
@@ -955,7 +994,7 @@ def _one_mashup_batch_with_retry(
     cfg: ProviderConfig, brief: str, style: str, persona: str, ratio: str,
     count: int, part_hint: str,
 ) -> list[dict[str, Any]]:
-    for attempt in range(_BRAIN_MAX_ATTEMPTS):
+    for attempt in range(_attempts(cfg)):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
@@ -1434,14 +1473,14 @@ def translate_personas(cfg: ProviderConfig, persona1: str, persona2: str = "") -
     if cfg.dry_run:
         out.update(p1_en=p1, p2_en=p2)
         return out
-    if not cfg.anthropic_api_key:
+    if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
     user = (
         f"PERSONNAGE 1 : {p1 or '(vide)'}\nPERSONNAGE 2 : {p2 or '(vide)'}\n\n"
         "Traduis (JSON strict)."
     )
     last_transient = False
-    for attempt in range(_BRAIN_MAX_ATTEMPTS):
+    for attempt in range(_attempts(cfg)):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
@@ -1854,7 +1893,7 @@ def generate_client_bible(
     images = [{"label": _PHOTO_LABEL[ph["kind"]], "media_type": ph["media_type"], "data": ph["data"]}
               for ph in photos]
     last_transient = False
-    for attempt in range(_BRAIN_MAX_ATTEMPTS):
+    for attempt in range(_attempts(cfg)):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
@@ -2037,7 +2076,7 @@ def generate_avatar_omni_client_plan(
     alerts: list[str] = []
     visuals: list[dict[str, Any]] = []
     if not cfg.dry_run:
-        if not cfg.anthropic_api_key:
+        if not _brain_ready(cfg):
             raise BrainError("Clé Anthropic manquante (Réglages).")
         state = ""
         for batch in _batches(plans, config_app.BRAIN_SHOTS_PER_BATCH):
@@ -2259,11 +2298,11 @@ def _generate_with_retry(
     cfg: ProviderConfig, script: str, brief: str, avatar_label: str,
     max_attempts: int = _BRAIN_MAX_ATTEMPTS,
 ) -> list[dict[str, Any]]:
-    if not cfg.anthropic_api_key:
+    if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
     last_err = ""
     last_verbatim = False  # dernier échec = texte altéré (≠ surcharge/JSON) ?
-    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
+    for attempt in range(_attempts(cfg, max_attempts)):  # 1 essai + relances (529, réseau, JSON tronqué)
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:

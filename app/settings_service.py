@@ -31,6 +31,9 @@ def load_provider_config() -> ProviderConfig:
         heygen_voice_id=s.get("heygen_voice_id", ""),
         anthropic_api_key=s.get("anthropic_api_key", ""),
         brain_model=s.get("brain_model", config_app.DEFAULT_BRAIN_MODEL),
+        brain_engine=config_app.normalize_brain_engine(s.get("brain_engine")),
+        claude_code_token=s.get("claude_code_token", ""),
+        claude_code_model=config_app.normalize_claude_code_model(s.get("claude_code_model")),
         cost_mode=s.get("cost_mode", config_app.DEFAULT_COST_MODE),
         dry_run=s.get("dry_run", "1") == "1",
     )

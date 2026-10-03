@@ -90,6 +90,9 @@ class ProviderConfig:
     heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = config_app.DEFAULT_BRAIN_MODEL
+    brain_engine: str = config_app.DEFAULT_BRAIN_ENGINE   # "anthropic_api" | "claude_code"
+    claude_code_token: str = ""                            # token `claude setup-token` (secret)
+    claude_code_model: str = config_app.DEFAULT_CLAUDE_CODE_MODEL
     cost_mode: str = config_app.DEFAULT_COST_MODE
     dry_run: bool = True
 

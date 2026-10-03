@@ -458,3 +458,8 @@ mark.ao-val { background: color-mix(in srgb, var(--warn) 25%, transparent); colo
 .obj-shot .ao-dur { color: var(--muted); }
 .obj-shot .ao-meta .dl { font-size: 12px; }
 .obj-shot .ao-err { font-size: 12px; color: var(--err); }
+
+/* Moteur du cerveau (Réglages) */
+.engine-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.engine-box legend { padding: 0 6px; font-weight: 600; }
+label.check.disabled { opacity: .45; cursor: not-allowed; }

@@ -23,7 +23,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import __version__, bootstrap, brain, config_app, cost, db, jobs, media, pipeline
+from . import (
+    __version__,
+    bootstrap,
+    brain,
+    claude_code,
+    config_app,
+    cost,
+    db,
+    jobs,
+    media,
+    pipeline,
+)
 from . import providers as prov
 from .settings_service import load_provider_config
 
@@ -108,6 +119,16 @@ def create_app() -> FastAPI:
             "gradium_model": s.get("gradium_model", config_app.DEFAULT_GRADIUM_MODEL),
             "heygen_voice_id": s.get("heygen_voice_id", ""),
             "brain_model": s.get("brain_model", config_app.DEFAULT_BRAIN_MODEL),
+            # Moteur du cerveau : API Anthropic (défaut) ou Claude Code (abonnement). Le token
+            # n'est JAMAIS renvoyé : seulement claude_code_token_set.
+            "brain_engine": config_app.normalize_brain_engine(s.get("brain_engine")),
+            "brain_engines": [{"key": k, "label": v} for k, v in config_app.BRAIN_ENGINES.items()],
+            "claude_code_token_set": bool(s.get("claude_code_token", "").strip()),
+            "claude_code_model": config_app.normalize_claude_code_model(s.get("claude_code_model")),
+            "claude_code_models": [
+                {"key": k, "label": v} for k, v in config_app.CLAUDE_CODE_MODELS.items()
+            ],
+            "claude_code_installed": claude_code.is_installed(),
             "cost_mode": s.get("cost_mode", config_app.DEFAULT_COST_MODE),
             "objet_image_model": s.get("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL),
             "objet_image_models": [
@@ -172,6 +193,13 @@ def create_app() -> FastAPI:
             db.set_setting("gemini_api_key", gemini_key)
         if body.anthropic_api_key.strip():
             db.set_setting("anthropic_api_key", body.anthropic_api_key.strip())
+        cc_token = prov._clean_key(body.claude_code_token)
+        if cc_token:   # vide = garder le token actuel (comme les clés API)
+            db.set_setting("claude_code_token", cc_token)
+        if body.brain_engine:
+            db.set_setting("brain_engine", config_app.normalize_brain_engine(body.brain_engine))
+        if body.claude_code_model:
+            db.set_setting("claude_code_model", config_app.normalize_claude_code_model(body.claude_code_model))
 
         # DIAGNOSTIC (app.log) : on NE journalise JAMAIS de matériel de clé (même un préfixe) —
         # seulement PRÉSENT/vide et ce qui a été écrit/gardé.
@@ -182,7 +210,8 @@ def create_app() -> FastAPI:
             "[REGLAGES] reçu: "
             f"openrouter={_m(body.openrouter_api_key)} xai={_m(body.xai_api_key)} "
             f"gradium={_m(body.gradium_api_key)} heygen={_m(body.heygen_api_key)} "
-            f"anthropic={_m(body.anthropic_api_key)} gemini={_m(body.gemini_api_key)} | "
+            f"anthropic={_m(body.anthropic_api_key)} gemini={_m(body.gemini_api_key)} "
+            f"claude_code_token={_m(body.claude_code_token)} | "
             f"écrit: openrouter={'OUI' if openrouter_key else 'NON (gardé)'} "
             f"xai={'OUI' if xai_key else 'NON (gardé)'} "
             f"gemini={'OUI' if gemini_key else 'NON (gardé)'} | "
@@ -419,6 +448,16 @@ def create_app() -> FastAPI:
     def del_voice(row_id: int) -> dict[str, Any]:
         db.delete_voice(row_id)
         return {"ok": True, "voices": db.list_voices()}
+
+    @app.post("/api/claude-code/test")
+    def claude_code_test() -> dict[str, Any]:
+        """Bouton « Tester » du moteur Claude Code : 1 appel `claude -p "Réponds OK"` (vrai appel,
+        sur le quota de l'abonnement) → sortie affichée. Jamais d'appel à l'API Anthropic."""
+        cfg = load_provider_config()
+        if not claude_code.is_installed():
+            return {"ok": False, "message": claude_code.MSG_NOT_INSTALLED, "output": ""}
+        return claude_code.check(cfg.claude_code_token,
+                                 config_app.normalize_claude_code_model(cfg.claude_code_model))
 
     @app.post("/api/test-connection")
     def test_connection() -> dict[str, Any]:
@@ -1383,6 +1422,9 @@ class SettingsIn(BaseModel):
     heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = ""
+    brain_engine: str = ""        # "anthropic_api" | "claude_code" ; "" = ne pas changer
+    claude_code_token: str = ""   # token `claude setup-token` ; vide = garder
+    claude_code_model: str = ""   # sonnet | opus | haiku ; "" = ne pas changer
     cost_mode: str = ""
     objet_image_model: str = ""
     objet_video_model: str = ""

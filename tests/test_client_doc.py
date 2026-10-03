@@ -76,10 +76,12 @@ def test_ten_plans_one_per_block_verbatim():
 def test_block2_is_one_plan_with_segments_and_distributed_motions():
     res = _sim_plan()
     b2 = res["shots"][1]
-    assert b2["block_title"] == "LA RÉVÉLATION D'INITIÉ" and res["max_words"] == 22
+    # tours de 8 s max (chronométreur) : 17 mots max sans geste au débit naturel (2,5 mots/s)
+    assert b2["block_title"] == "LA RÉVÉLATION D'INITIÉ" and res["max_words"] == 17
     segs = b2["segments"]
     assert len(segs) >= 3
-    assert all(config_app.spoken_word_count(x["text"]) <= 22 for x in segs)
+    assert all(config_app.spoken_word_count(x["text"]) <= 17 for x in segs)
+    assert all(x["seconds"] <= 8 and x["speaker"] == 1 for x in segs)
     assert all("doigts" in x["motion"] for x in segs)                 # direction client, par segment
     assert segs[0]["motion"].startswith("Segment 1/") and segs[-1]["motion"].startswith(f"Segment {len(segs)}/")
 
@@ -140,7 +142,7 @@ def test_extension_prompt():
 def test_client_director_rules_override_in_system_prompt():
     sp = " ".join(brain.AVATAR_OMNI_CLIENT_SYSTEM_PROMPT.split())
     assert "PRIME" in sp and "compter sur les doigts" in sp and "n'INVENTES PAS" in sp
-    assert "UN BLOC = UN PLAN" in sp and "EXACTEMENT UN mouvement par SEGMENT" in sp
+    assert "UN BLOC = UN PLAN" in sp and "UN SEUL personnage parle par tour" in sp
 
 
 # ============================================================ chaîne Omni (réel, requests mocké)
@@ -338,7 +340,9 @@ def test_personas_translated_to_english_by_claude(monkeypatch):
 
     monkeypatch.setattr(brain, "_call_claude_json", fake_json)
     out = brain.translate_personas(ProviderConfig(dry_run=False, anthropic_api_key="k"), P1_FR, P2_FR)
-    assert out == {"p1": P1_FR, "p2": P2_FR, "p1_en": P1_EN, "p2_en": P2_EN}
+    assert {k: out[k] for k in ("p1", "p2", "p1_en", "p2_en")} == \
+        {"p1": P1_FR, "p2": P2_FR, "p1_en": P1_EN, "p2_en": P2_EN}
+    assert [(c["n"], c["en"], c["speaks"]) for c in out["characters"]] == [(1, P1_EN, True), (2, P2_EN, False)]
     assert "ANGLAIS" in seen["system"] and P1_FR in seen["user"]
     assert brain.translate_personas(ProviderConfig(dry_run=False), "", "")["p1_en"] == ""
 
@@ -467,8 +471,8 @@ def test_spend_cap_uses_sum_of_turns(monkeypatch, tmp_path):
 
     ad_id, cid = _chain_ad(tmp_path, 3)
     secs = pipeline.clip_omni_seconds(db.get_clip(cid), config_app.voice_words_per_sec({"pace": "naturel"}))
-    assert secs == sum(config_app.omni_segment_seconds(s["text"], config_app.voice_words_per_sec(
-        {"pace": "naturel"}), first=(i == 0)) for i, s in enumerate(pipeline.clip_segments(db.get_clip(cid))))
+    assert secs == sum(pipeline.turn_plan(s, 2.5, 8)["seconds"]           # Σ des tours chronométrés
+                       for s in pipeline.clip_segments(db.get_clip(cid)))
     monkeypatch.setattr(main, "load_provider_config",
                         lambda: ProviderConfig(dry_run=False, gemini_api_key="k"))
     db.set_setting("spend_cap_usd", "0.5")
@@ -492,7 +496,7 @@ def test_refs_both_faces_and_product_on_blocks_6_7_9_10():
     res = _sim_plan(product="Nuansa")
     refs = {s["block_n"]: s["refs_needed"] for s in res["shots"]}
     for n in (6, 7, 9, 10):
-        assert "visage" in refs[n] and "visage2" in refs[n], (n, refs[n])
+        assert "visage1" in refs[n] and "visage2" in refs[n], (n, refs[n])
     for n in (6, 9, 10):                                                  # le flacon est mentionné
         assert "produit" in refs[n], (n, refs[n])
     assert "produit" in refs[7]               # la bible pose le flacon sur le comptoir → visible
@@ -502,11 +506,12 @@ def test_refs_both_faces_and_product_on_blocks_6_7_9_10():
 def test_client_refs_enforced_over_claude():
     bible = {"character1": P1_EN, "character2": P2_EN}
     d6 = brain.parse_client_doc(DOC)[5]["direction"]
-    assert brain.client_refs(["visage"], bible, d6, "Nuansa") == ["visage", "visage2", "produit"]
+    # visage = visage1 (types visage1..visage4 pour les 4 personnages)
+    assert brain.client_refs(["visage"], bible, d6, "Nuansa") == ["visage1", "visage2", "produit"]
     assert brain.client_refs(["visage", "decor"], bible, "Il parle face caméra.") == \
-        ["visage", "visage2", "decor"]
-    assert brain.client_refs(["visage", "visage2"], bible, "Il est seul face caméra.") == ["visage"]
-    assert brain.client_refs(["visage"], {"character1": P1_EN}, "Elle sourit.") == ["visage"]
+        ["visage1", "visage2", "decor"]
+    assert brain.client_refs(["visage", "visage2"], bible, "Il est seul face caméra.") == ["visage1"]
+    assert brain.client_refs(["visage"], {"character1": P1_EN}, "Elle sourit.") == ["visage1"]
 
 
 # ============================================================ Tier 1 : plans espacés (10 $ / 10 min)

@@ -1133,7 +1133,9 @@ def _omni_body(
         "delivery": "uri",
     }
     if config_app.OMNI_SEND_DURATION:
-        response_format["duration"] = f"{int(seconds)}s"
+        # VideoResponseFormat.duration (string « Ns », 3–10 s), aussi sur les tours d'extension.
+        secs = max(config_app.OMNI_MIN_CLIP_SECONDS, min(config_app.OMNI_MAX_CLIP_SECONDS, int(seconds)))
+        response_format["duration"] = f"{secs}s"
     parts = list(image_parts[: config_app.OMNI_MAX_INPUT_IMAGES])
     parts.append({"type": "text", "text": prompt})
     body: dict[str, Any] = {

@@ -77,14 +77,20 @@ def _omni_ad(n_clips=2, status="valide", dialogues=None, voice_profile=None, kin
 def test_avatar_omni_e2e_api_dry_run(monkeypatch):
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
+        # Mode auto : Claude écrit le DOCUMENT client → relecture → validation → plan client.
         r = c.post("/api/avatar-omni/plan", json={"script": SCRIPT, "persona": "maman 40 ans",
                                                   "voice_profile": VP})
+        assert r.status_code == 200, r.text
+        auto = r.json()
+        assert auto["review"] is True and "shots" not in auto and auto["doc"].strip()
+        r = c.post("/api/avatar-omni/validate-doc", json={"doc": auto["doc"], "persona": "maman 40 ans",
+                                                          "voice_profile": VP})
         assert r.status_code == 200, r.text
         plan = r.json()
         assert set(plan) >= {"ad", "shots", "warnings", "max_words", "estimate", "dry_run"}
         shots = plan["shots"]
-        assert " ".join(s["dialogue"] for s in shots) == SCRIPT
-        assert plan["max_words"] == 22 and plan["dry_run"] is True
+        assert brain.realign_to_script(SCRIPT, [s["dialogue"] for s in shots]) is not None   # verbatim
+        assert plan["max_words"] == 17 and plan["dry_run"] is True     # tours de 8 s à 2,5 mots/s
         est = c.post("/api/avatar-omni/estimate", json={"shots": shots, "voice_profile": VP}).json()
         assert est["seconds_total"] == plan["estimate"]["seconds_total"]
 
@@ -102,7 +108,7 @@ def test_avatar_omni_e2e_api_dry_run(monkeypatch):
         assert [x["kind"] for x in db.list_ref_images_typed(ad_id)] == ["visage"]
 
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
-        assert ad["voice_profile"]["gender"] == "female" and ad["voice_locked"] is False
+        assert ad["voice_profile"]["gender"] == "female" and ad["voice_locked"] == {"1": False}
         assert ad["voice_sheet"] == config_app.voice_sheet(VP)
         for s in ad["shots"]:
             for k in ("clip_id", "n", "prompt_image", "prompt_motion", "dialogue", "image_url",
@@ -208,9 +214,10 @@ def test_max_words_values_per_pace():
     assert config_app.omni_max_words(3.0) == 27
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
-        for pace, mw in (("naturel", 22), ("lent", 18), ("dynamique", 27)):
+        # Plan (tours de 8 s) : mots max d'un tour sans geste = floor((8 − 0,5 − 0,7) × débit).
+        for pace, mw in (("naturel", 17), ("lent", 13), ("dynamique", 20)):
             r = c.post("/api/avatar-omni/plan",
-                       json={"script": SCRIPT, "voice_profile": {**VP, "pace": pace}})
+                       json={"script": SCRIPT, "mode": "manual", "voice_profile": {**VP, "pace": pace}})
             assert r.status_code == 200 and r.json()["max_words"] == mw, (pace, r.text)
 
 
@@ -368,7 +375,7 @@ def test_voice_profile_persisted_and_reused_by_resume_and_test_plan(monkeypatch)
         r = c.patch(f"/api/avatar-omni/voice/{ad_id}", json={"voice_profile": {**vp, "pace": "dynamique"}})
         assert r.status_code == 409 and r.json()["detail"] == MSG_LOCKED
         assert json.loads(db.get_ad(ad_id)["voice_profile"])["pace"] == "lent"   # rien écrit
-        assert c.get(f"/api/avatar-omni/ad/{ad_id}").json()["voice_locked"] is True
+        assert c.get(f"/api/avatar-omni/ad/{ad_id}").json()["voice_locked"] == {"1": True}
 
         # Reprise d'un plan en échec (image présente) → même fiche voix
         db.update_clip(cid2, status="echec", error="boom")
@@ -518,8 +525,8 @@ def test_omni_base64_response_writes_mp4(monkeypatch, omni_env, capsys):
     assert sent["headers"]["x-goog-api-key"] == KEY and sent["timeout"] == 600
     assert body["model"] == "gemini-omni-1.1-flash" and body["store"] is False
     rf = body["response_format"]
-    assert rf == {"type": "video", "aspect_ratio": "9:16", "resolution": "720p", "delivery": "uri"}
-    assert "duration" not in rf
+    assert rf == {"type": "video", "aspect_ratio": "9:16", "resolution": "720p", "delivery": "uri",
+                  "duration": "7s"}   # VideoResponseFormat.duration envoyée (OMNI_SEND_DURATION)
     # anchor == image du plan → une seule image, puis le texte
     assert [p["type"] for p in body["input"]] == ["image", "text"]
     assert body["input"][-1]["text"] == "PROMPT"
@@ -538,9 +545,9 @@ def test_omni_body_images_png_jpeg_webp_and_duration_flag(monkeypatch, tmp_path)
     assert base64.b64decode(parts[2]["data"])[:8] == b"\x89PNG\r\n\x1a\n"   # webp → PNG
     body = providers._omni_body("t", parts, 6)
     assert len([p for p in body["input"] if p["type"] == "image"]) == 2     # 2 images max
-    assert "duration" not in body["response_format"]
-    monkeypatch.setattr(config_app, "OMNI_SEND_DURATION", True)
-    assert providers._omni_body("t", parts, 6)["response_format"]["duration"] == "6s"
+    assert body["response_format"]["duration"] == "6s"
+    monkeypatch.setattr(config_app, "OMNI_SEND_DURATION", False)
+    assert "duration" not in providers._omni_body("t", parts, 6)["response_format"]
 
 
 def test_omni_sends_plan_then_anchor(monkeypatch, omni_env, tmp_path):

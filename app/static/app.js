@@ -174,6 +174,7 @@ async function loadSettings() {
   $("dryRun").checked = !!s.dry_run;
   if ($("spendCap")) $("spendCap").value = s.spend_cap_usd ?? 25;
   if ($("omniDailyLimit")) $("omniDailyLimit").value = s.omni_daily_request_limit ?? 20;
+  if ($("omniMaxSpoken")) $("omniMaxSpoken").value = s.omni_max_spoken_clip_seconds ?? 8;
   setModeBadge(!!s.dry_run);
   renderAvatars(s.avatars || []);
   renderVoices(s.voices || []);
@@ -318,6 +319,8 @@ $("saveSettings").addEventListener("click", async () => {
     spend_cap_usd: ($("spendCap") && $("spendCap").value !== "") ? parseFloat($("spendCap").value) : null,
     omni_daily_request_limit: ($("omniDailyLimit") && $("omniDailyLimit").value !== "")
       ? parseInt($("omniDailyLimit").value, 10) : null,
+    omni_max_spoken_clip_seconds: ($("omniMaxSpoken") && $("omniMaxSpoken").value !== "")
+      ? Math.min(10, Math.max(3, parseInt($("omniMaxSpoken").value, 10) || 8)) : null,
   };
   await api("/api/settings", {
     method: "POST",
@@ -1118,11 +1121,15 @@ const REF_KIND_OPTS = [
   { v: "style", t: "Style" },
 ];
 
-// Avatar IA : deux personnages → « visage » (personnage 1, parle) / « visage2 » (personnage 2).
+// Avatar IA : jusqu'à 4 personnages → « visage1 » … « visage4 » (« visage » = ancien perso 1).
+// Liste propre à l'Avatar IA (REF_KIND_OPTS, partagée Objet/Mashup, ne change pas). Les libellés
+// portent le nom court du personnage quand il est connu (aoRefKindOpts).
 const AO_REF_KIND_OPTS = [
   { v: "", t: "Type ?" },
-  { v: "visage", t: "Visage perso 1" },
+  { v: "visage1", t: "Visage perso 1" },
   { v: "visage2", t: "Visage perso 2" },
+  { v: "visage3", t: "Visage perso 3" },
+  { v: "visage4", t: "Visage perso 4" },
   { v: "produit", t: "Produit" },
   { v: "decor", t: "Décor" },
   { v: "style", t: "Style" },
@@ -2923,8 +2930,7 @@ let aoShots = [];            // plan de tournage (réponse /plan)
 let aoAdId = null;
 let aoLastEstimate = null;   // estimation du plan (cout_omni_par_seconde_usd, …)
 let aoGalleryShots = [];     // derniers plans reçus de GET /ad (durées Omni réelles)
-let aoVoiceLocked = false;   // au moins un clip « pret » → fiche voix verrouillée
-let aoVoiceUnlocked = false; // l'utilisateur a explicitement déverrouillé (→ force:true)
+let aoVoiceUnlockedBy = {}; // par personnage : déverrouillage explicite (→ force:true), 1 sauvegarde
 let aoOmniDailyLimit = null; // quota Google Omni (requêtes/jour) renvoyé par GET /ad
 const AO_API = "/api/avatar-omni";
 const AO_DEFAULT_RATE = 0.10;        // $/s (720p) — même formule que le backend
@@ -2956,16 +2962,144 @@ function aoFillVoiceSelects() {
     const want = [keep, ...preferred].find((k) => k && keys.includes(k));
     if (want) sel.value = want;
   };
-  ["aoV", "aoEV"].forEach((p) => {
+  ["aoV", "aoEV", "aoV2", "aoV3", "aoV4", "aoEV2", "aoEV3", "aoEV4"].forEach((p) => {
     fill(p + "Tone", s.objet_voice_styles, ["douce", s.objet_voice_style]);
     fill(p + "Pace", s.objet_voice_paces, ["naturel", s.objet_voice_pace]);
   });
 }
 
+// Formulaire de fiche voix (mêmes champs que aoV* / aoEV*) pour un préfixe d'ids donné.
+function aoVoiceFormHtml(prefix) {
+  const regions = [["france", "France"], ["quebec", "Québec"], ["belgique", "Belgique"], ["suisse", "Suisse"]];
+  return `<div class="voice-sheet">` +
+    `<label>Genre <select id="${prefix}Gender"><option value="">Non précisé</option>` +
+    `<option value="female">Femme</option><option value="male">Homme</option></select></label>` +
+    `<label>Âge <input type="text" id="${prefix}Age" maxlength="120" placeholder="Ex. 35-45" /></label>` +
+    `<label>Accent <select id="${prefix}AccentRegion">` +
+    regions.map(([v, t]) => `<option value="${v}">${t}</option>`).join("") + `</select></label>` +
+    `<label>Accent libre <span class="muted">(optionnel, en anglais)</span>` +
+    `<input type="text" id="${prefix}Accent" maxlength="120" /></label>` +
+    `<label>Timbre <select id="${prefix}Tone"></select></label>` +
+    `<label>Débit <select id="${prefix}Pace"></select></label>` +
+    `<label>Précision libre <span class="muted">(optionnel, en anglais)</span>` +
+    `<input type="text" id="${prefix}Extra" maxlength="120" /></label></div>`;
+}
+
+// ---- Personnages 1..4 (nom court + description FR + parle/muet) ----
+const AO_MAX_CHARS = 4;
+
+function aoCharRowVisible(n) {
+  const row = $("aoCharRow" + n);
+  return !!row && !row.classList.contains("hidden");
+}
+
+// Personnages saisis : le 1 toujours, les autres s'ils ont un nom ou une description.
+function aoReadCharacters() {
+  const out = [];
+  for (let n = 1; n <= AO_MAX_CHARS; n++) {
+    if (!aoCharRowVisible(n)) continue;
+    const name = ($("aoCharName" + n).value || "").trim();
+    const fr = ($("aoPersona" + n).value || "").trim();
+    if (n > 1 && !name && !fr) continue;
+    out.push({ n, name, fr, speaks: $("aoCharSpeaks" + n).value === "1" });
+  }
+  return out;
+}
+
+function aoSpeakingChars() {
+  return aoReadCharacters().filter((c) => c.speaks).map((c) => c.n);
+}
+
+// Nom affichable d'un personnage : réponse serveur (personas.characters), sinon champs saisis.
+function aoCharName(n) {
+  n = Number(n) || 1;
+  const list = (aoPersonas && Array.isArray(aoPersonas.characters)) ? aoPersonas.characters : [];
+  const c = list.find((x) => Number(x.n) === n);
+  if (c && c.name) return c.name;
+  const el = $("aoCharName" + n);
+  return el && el.value.trim() ? el.value.trim() : `Perso ${n}`;
+}
+
+// Options de type de réf Avatar IA, avec le nom des personnages (« Visage perso 2 (Julie) »).
+function aoRefKindOpts() {
+  return AO_REF_KIND_OPTS.map((o) => {
+    const m = /^visage(\d)$/.exec(o.v);
+    if (!m) return o;
+    const nm = aoCharName(m[1]);
+    return { v: o.v, t: nm.startsWith("Perso ") ? o.t : `${o.t} (${nm})` };
+  });
+}
+
+// Fiches voix des personnages 2..4 qui parlent (le perso 1 = formulaire aoV* existant).
+function aoRenderVoiceForms() {
+  const box = $("aoVoiceExtra");
+  if (!box) return;
+  const want = aoSpeakingChars().filter((n) => n > 1);
+  // garder les valeurs déjà saisies
+  const keep = {};
+  for (let n = 2; n <= AO_MAX_CHARS; n++) if ($("aoV" + n + "Gender")) keep[n] = aoReadVoice("aoV" + n);
+  box.innerHTML = want.map((n) =>
+    `<div class="lbl ao-voice-extra-title">🎙️ Personnage ${n}${aoCharName(n).startsWith("Perso ") ? "" : " (" + esc(aoCharName(n)) + ")"}</div>` +
+    aoVoiceFormHtml("aoV" + n)
+  ).join("");
+  $("aoVoiceTitle1").textContent = `🎙️ Personnage 1${aoCharName(1).startsWith("Perso ") ? "" : " (" + aoCharName(1) + ")"}` +
+    (aoSpeakingChars().includes(1) ? "" : " — muet (fiche gardée par défaut)");
+  aoFillVoiceSelects();
+  want.forEach((n) => { if (keep[n]) aoWriteVoice("aoV" + n, keep[n]); });
+}
+
+// Fiches voix envoyées : {"1": …, "n": …} pour chaque personnage qui parle (le 1 toujours).
+function aoReadVoiceProfiles() {
+  const out = { 1: aoReadVoice("aoV") };
+  aoSpeakingChars().filter((n) => n > 1).forEach((n) => {
+    if ($("aoV" + n + "Gender")) out[n] = aoReadVoice("aoV" + n);
+  });
+  return out;
+}
+
+function aoRefreshCharsUi() {
+  aoRenderVoiceForms();
+  renderAoRefs();
+  const visible = [1, 2, 3, 4].filter(aoCharRowVisible).length;
+  $("aoCharAddBtn").classList.toggle("hidden", visible >= AO_MAX_CHARS);
+}
+
+(function initAoChars() {
+  if (!$("aoChars")) return;
+  $("aoCharAddBtn").addEventListener("click", () => {
+    for (let n = 3; n <= AO_MAX_CHARS; n++) {
+      if (!aoCharRowVisible(n)) { $("aoCharRow" + n).classList.remove("hidden"); break; }
+    }
+    aoRefreshCharsUi();
+  });
+  document.querySelectorAll(".ao-char-rm").forEach((b) => b.addEventListener("click", () => {
+    const n = b.dataset.n;
+    $("aoCharName" + n).value = "";
+    $("aoPersona" + n).value = "";
+    $("aoCharSpeaks" + n).value = "0";
+    $("aoCharRow" + n).classList.add("hidden");
+    aoRefreshCharsUi();
+  }));
+  for (let n = 1; n <= AO_MAX_CHARS; n++) {
+    $("aoCharSpeaks" + n).addEventListener("change", aoRefreshCharsUi);
+    $("aoCharName" + n).addEventListener("change", aoRefreshCharsUi);
+  }
+})();
+
+function aoStyle() {
+  const r = document.querySelector('input[name="aoStyle"]:checked');
+  return r ? r.value : "realiste";
+}
+
+document.querySelectorAll('input[name="aoStyle"]').forEach((r) =>
+  r.addEventListener("change", () => $("aoStyleHint").classList.toggle("hidden", aoStyle() !== "3d"))
+);
+
 async function aoEnsureVoiceSelects() {
   try {
     if (!currentSettings) currentSettings = await api("/api/settings");
     if (!$("aoVTone").options.length) aoFillVoiceSelects();
+    aoRenderVoiceForms();
   } catch (e) { toast(e.message); }
 }
 
@@ -3000,78 +3134,137 @@ function aoWriteVoice(prefix, p) {
   set("Extra", p.extra || "");
 }
 
-function aoSetVoiceEditable(editable) {
-  AO_VOICE_FIELDS.forEach((f) => { const el = $("aoEV" + f); if (el) el.disabled = !editable; });
-  $("aoVoiceSaveBtn").disabled = !editable;
+// ---- Fiches voix en galerie : une par personnage qui parle (perso 1 = bloc aoEV* existant).
+// Ids : perso 1 → aoEV*, aoVoiceLock, aoVoiceSheet, aoVoiceSaveBtn, aoVoiceUnlockBtn ;
+//       perso n → aoEV{n}*, aoVoiceLock{n}, aoVoiceSheet{n}, aoVoiceSave{n}, aoVoiceUnlock{n}.
+function aoVoiceIds(sp) {
+  sp = Number(sp) || 1;
+  return sp === 1
+    ? { prefix: "aoEV", lock: "aoVoiceLock", sheet: "aoVoiceSheet", save: "aoVoiceSaveBtn", unlock: "aoVoiceUnlockBtn" }
+    : { prefix: "aoEV" + sp, lock: "aoVoiceLock" + sp, sheet: "aoVoiceSheet" + sp, save: "aoVoiceSave" + sp, unlock: "aoVoiceUnlock" + sp };
 }
 
-// État de la fiche voix en galerie (verrou si des clips sont déjà animés avec cette voix).
-function aoRenderVoiceBlock(r) {
-  aoVoiceLocked = !!r.voice_locked;
-  if (!aoVoiceLocked) aoVoiceUnlocked = false;
-  aoWriteVoice("aoEV", r.voice_profile || {});
-  $("aoVoiceSheet").textContent = r.voice_sheet ? "Consigne envoyée à Google : " + r.voice_sheet : "";
-  const lock = $("aoVoiceLock");
-  const unlockBtn = $("aoVoiceUnlockBtn");
-  if (aoVoiceLocked && !aoVoiceUnlocked) {
-    lock.textContent = "🔒 Verrouillée — des clips sont déjà animés avec cette voix";
+function aoSetVoiceEditable(editable, sp = 1) {
+  const ids = aoVoiceIds(sp);
+  AO_VOICE_FIELDS.forEach((f) => { const el = $(ids.prefix + f); if (el) el.disabled = !editable; });
+  if ($(ids.save)) $(ids.save).disabled = !editable;
+}
+
+// État d'UNE fiche voix (verrou si des tours de CE personnage sont déjà animés avec cette voix).
+function aoRenderSpeakerVoice(sp, profile, sheet, locked) {
+  const ids = aoVoiceIds(sp);
+  if (!locked) delete aoVoiceUnlockedBy[sp];
+  const unlocked = !!aoVoiceUnlockedBy[sp];
+  aoWriteVoice(ids.prefix, profile || {});
+  if ($(ids.sheet)) $(ids.sheet).textContent = sheet ? "Consigne envoyée à Google : " + sheet : "";
+  const lock = $(ids.lock);
+  const unlockBtn = $(ids.unlock);
+  if (!lock || !unlockBtn) return;
+  if (locked && !unlocked) {
+    lock.textContent = "🔒 Verrouillée — des tours sont déjà animés avec cette voix";
     lock.className = "voice-lock on";
     unlockBtn.classList.remove("hidden");
-    aoSetVoiceEditable(false);
+    aoSetVoiceEditable(false, sp);
   } else {
-    lock.textContent = aoVoiceUnlocked ? "🔓 Déverrouillée — les clips déjà faits garderont l'ancienne voix" : "Modifiable";
-    lock.className = "voice-lock" + (aoVoiceUnlocked ? " warn" : "");
+    lock.textContent = unlocked ? "🔓 Déverrouillée — les tours déjà faits garderont l'ancienne voix" : "Modifiable";
+    lock.className = "voice-lock" + (unlocked ? " warn" : "");
     unlockBtn.classList.add("hidden");
-    aoSetVoiceEditable(true);
+    aoSetVoiceEditable(true, sp);
   }
+}
+
+// Personnages qui parlent d'après la réponse GET /ad (fiches voix + personnages « speaks »).
+function aoGallerySpeakers(r) {
+  const set = new Set([1]);
+  Object.keys(r.voice_profiles || {}).forEach((k) => { if (Number(k) >= 1 && Number(k) <= 4) set.add(Number(k)); });
+  const chars = (r.personas && Array.isArray(r.personas.characters)) ? r.personas.characters : [];
+  chars.forEach((c) => { if (c.speaks && Number(c.n) >= 1 && Number(c.n) <= 4) set.add(Number(c.n)); });
+  return [...set].sort((x, y) => x - y);
+}
+
+function aoLockedFor(r, sp) {
+  const v = r.voice_locked;
+  if (v && typeof v === "object") return !!v[String(sp)];
+  return sp === 1 ? !!v : false;   // ancienne réponse : un seul booléen (perso 1)
+}
+
+function aoRenderVoiceBlock(r) {
+  const profiles = r.voice_profiles || {};
+  const sheets = r.voice_sheets || {};
+  $("aoEVoiceTitle1").textContent = `🎙️ Fiche voix — personnage 1${aoCharName(1).startsWith("Perso ") ? "" : " (" + aoCharName(1) + ")"}`;
+  aoRenderSpeakerVoice(1, profiles["1"] || r.voice_profile || {}, sheets["1"] || r.voice_sheet || "", aoLockedFor(r, 1));
+  const box = $("aoEVoiceExtra");
+  const extra = aoGallerySpeakers(r).filter((n) => n > 1);
+  box.innerHTML = extra.map((n) => {
+    const ids = aoVoiceIds(n);
+    return `<div class="card-block ao-voice-block">` +
+      `<div class="ao-voice-head"><b>🎙️ Fiche voix — personnage ${n}${aoCharName(n).startsWith("Perso ") ? "" : " (" + esc(aoCharName(n)) + ")"}</b>` +
+      `<span id="${ids.lock}" class="voice-lock"></span></div>` +
+      aoVoiceFormHtml(ids.prefix) +
+      `<div class="muted small" id="${ids.sheet}"></div>` +
+      `<div class="row"><button class="btn small" id="${ids.save}" type="button">💾 Enregistrer la voix</button>` +
+      `<button class="btn small danger-outline hidden" id="${ids.unlock}" type="button">🔓 Déverrouiller</button></div></div>`;
+  }).join("");
+  aoFillVoiceSelects();
+  extra.forEach((n) => {
+    const ids = aoVoiceIds(n);
+    $(ids.save).addEventListener("click", () => aoSaveVoice(n));
+    $(ids.unlock).addEventListener("click", () => aoUnlockVoice(n));
+    aoRenderSpeakerVoice(n, profiles[String(n)] || {}, sheets[String(n)] || "", aoLockedFor(r, n));
+  });
 }
 
 async function aoConfirmUnlock() {
   return showModal({
     title: "Déverrouiller la fiche voix ?",
     message:
-      "Des clips sont déjà animés avec la voix actuelle. Si tu la modifies, les clips déjà faits " +
-      "auront une autre voix que les suivants (il faudrait les réanimer pour tout harmoniser).\n\nDéverrouiller quand même ?",
+      "Des tours sont déjà animés avec la voix actuelle de ce personnage. Si tu la modifies, les tours " +
+      "déjà faits auront une autre voix que les suivants (il faudrait les réanimer pour tout harmoniser).\n\nDéverrouiller quand même ?",
     confirmText: "Déverrouiller", cancelText: "Annuler", danger: true,
   });
 }
 
-$("aoVoiceUnlockBtn").addEventListener("click", async () => {
+async function aoUnlockVoice(sp) {
   if (!(await aoConfirmUnlock())) return;
-  aoVoiceUnlocked = true;
-  const sheet = $("aoVoiceSheet").textContent;
-  aoRenderVoiceBlock({ voice_locked: true, voice_profile: aoReadVoice("aoEV"), voice_sheet: "" });
-  $("aoVoiceSheet").textContent = sheet;   // on garde la consigne actuelle affichée
+  aoVoiceUnlockedBy[sp] = true;
+  const ids = aoVoiceIds(sp);
+  const sheet = $(ids.sheet) ? $(ids.sheet).textContent : "";
+  aoRenderSpeakerVoice(sp, aoReadVoice(ids.prefix), "", true);
+  if ($(ids.sheet)) $(ids.sheet).textContent = sheet;   // on garde la consigne actuelle affichée
   toast("Fiche voix déverrouillée : modifie-la puis « Enregistrer la voix ».");
-});
+}
 
-$("aoVoiceSaveBtn").addEventListener("click", async () => {
+async function aoSaveVoice(sp) {
   if (!aoAdId) return toast("Génère d'abord le Plan 1.");
+  const ids = aoVoiceIds(sp);
   const patch = (force) =>
     api(AO_API + "/voice/" + aoAdId, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voice_profile: aoReadVoice("aoEV"), force: !!force }),
+      body: JSON.stringify({ voice_profile: aoReadVoice(ids.prefix), speaker: sp, force: !!force }),
     });
   let res;
   try {
-    res = await patch(aoVoiceUnlocked);
+    res = await patch(!!aoVoiceUnlockedBy[sp]);
   } catch (e) {
     if (!/verrouill/i.test(e.message)) return toast(e.message);
     if (!(await aoConfirmUnlock())) return;
-    aoVoiceUnlocked = true;
+    aoVoiceUnlockedBy[sp] = true;
     try { res = await patch(true); } catch (e2) { return toast(e2.message); }
   }
-  toast("Fiche voix enregistrée ✓");
-  // Déverrouillage valable pour CETTE sauvegarde seulement : la prochaine modification d'une
-  // voix déjà utilisée redemandera confirmation.
-  aoVoiceUnlocked = false;
-  aoRenderVoiceBlock({
-    voice_locked: res.voice_locked, voice_profile: res.voice_profile, voice_sheet: res.voice_sheet,
-  });
-  // Le débit change la durée Omni des plans → on met à jour durées + estimation SANS re-rendre
-  // les cartes (préserve les prompts image édités et pas encore régénérés).
+  toast(`Fiche voix du personnage ${sp} enregistrée ✓`);
+  // Déverrouillage valable pour CETTE sauvegarde seulement.
+  delete aoVoiceUnlockedBy[sp];
+  const locked = (res.voice_locked && typeof res.voice_locked === "object")
+    ? !!res.voice_locked[String(sp)] : !!res.voice_locked;
+  const sheet = res.voice_sheet || (res.voice_sheets && res.voice_sheets[String(sp)]) || "";
+  const profile = res.voice_profile || (res.voice_profiles && res.voice_profiles[String(sp)]) || aoReadVoice(ids.prefix);
+  aoRenderSpeakerVoice(sp, profile, sheet, locked);
+  // Le débit change la durée des tours → durées + estimation SANS re-rendre les cartes.
   aoRefreshDurations();
-});
+}
+
+$("aoVoiceUnlockBtn").addEventListener("click", () => aoUnlockVoice(1));
+$("aoVoiceSaveBtn").addEventListener("click", () => aoSaveVoice(1));
 
 async function aoRefreshDurations() {
   try {
@@ -3082,7 +3275,7 @@ async function aoRefreshDurations() {
       const dur = card && card.querySelector(".ao-dur");
       if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
     });
-    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts);
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts, ad.max_spoken);
     aoRenderAnimEstimate();
   } catch (_) { /* non bloquant */ }
 }
@@ -3111,7 +3304,7 @@ function renderAoRefs() {
     });
     cell.appendChild(img);
     cell.appendChild(rm);
-    cell.appendChild(refKindSelect(aoRefsKinds[idx], (v) => { aoRefsKinds[idx] = v; }, AO_REF_KIND_OPTS));
+    cell.appendChild(refKindSelect(aoRefsKinds[idx], (v) => { aoRefsKinds[idx] = v; }, aoRefKindOpts()));
     box.appendChild(cell);
   });
 }
@@ -3196,17 +3389,31 @@ function aoBlockHead(s) {
 let aoPersonas = null;   // personnages du dernier plan {p1, p2, p1_en, p2_en} (EN = Claude)
 let aoPlanBible = null;  // bible visuelle du dernier plan (découpage client), renvoyée au Plan 1
 const AO_BIBLE_FIELDS = { character1: "aoBibleCharacter1", character2: "aoBibleCharacter2",
+  character3: "aoBibleCharacter3", character4: "aoBibleCharacter4",
   set: "aoBibleSet", product: "aoBibleProduct", positions: "aoBiblePositions" };
 
-// Segments (tours Omni) d'un plan client : texte, durée, mouvement, tour déjà fait.
+// Tours Omni d'un plan : qui parle, durée chronométrée, mots max, avant / pendant / après,
+// badge « muet », avertissements du tour, tour déjà fait. Rétrocompat : ancien tour {text, motion}.
 function aoSegmentsHtml(segs) {
   if (!Array.isArray(segs) || !segs.length) return "";
-  return `<ul class="ao-segs">` + segs.map((x, i) =>
-    `<li class="${x.done ? "done" : ""}"><div class="ao-seg-head"><b>${x.done ? "✓" : "○"} Tour ${i + 1}</b>` +
-    `<span>~${esc(x.seconds ?? "?")} s</span></div>` +
-    `<div>💬 ${aoHighlightBrackets(x.text)}</div>` +
-    (x.motion ? `<div class="ao-seg-motion">🎥 ${esc(x.motion)}</div>` : "") + `</li>`
-  ).join("") + `</ul>`;
+  return `<ul class="ao-segs">` + segs.map((x, i) => {
+    const mute = !!x.mute || !String(x.text || "").trim();
+    const who = x.speaker_name || (x.speaker ? aoCharName(x.speaker) : "");
+    const gest = (lbl, txt, beats) => (txt || (beats && beats.length))
+      ? `<div class="ao-seg-gest">${lbl} ${esc(txt || "")}${beats && beats.length ? ` <span class="muted">[${esc(beats.join(", "))}]</span>` : ""}</div>`
+      : "";
+    const warns = Array.isArray(x.warnings) ? x.warnings.filter(Boolean) : [];
+    return `<li class="${x.done ? "done" : ""}"><div class="ao-seg-head"><b>${x.done ? "✓" : "○"} Tour ${i + 1}</b>` +
+      (mute ? `<span class="ao-turn-badge mute">muet</span>` : (who ? `<span class="ao-turn-badge">🗣️ ${esc(who)}</span>` : "")) +
+      `<span>~${esc(x.seconds ?? "?")} s</span>` +
+      (!mute && x.max_words != null ? `<span class="muted small">max ${esc(x.max_words)} mots</span>` : "") +
+      `</div>` +
+      (mute ? "" : `<div>💬 ${aoHighlightBrackets(x.text)}</div>`) +
+      gest("⏮ avant :", x.avant, x.beats_avant) +
+      gest("🎥 pendant :", x.pendant || x.motion, null) +
+      gest("⏭ après :", x.apres, x.beats_apres) +
+      warns.map((w) => `<div class="ao-seg-warn">⚠ ${esc(w)}</div>`).join("") + `</li>`;
+  }).join("") + `</ul>`;
 }
 
 function aoPlanTitle(s) {
@@ -3217,12 +3424,21 @@ function aoPlanTitle(s) {
   return `Plan ${esc(s.label || s.n)}`;
 }
 
+// Bible : personnages 1..4 — seuls ceux décrits (ou présents dans la pub) sont affichés.
 function aoRenderBible(bible) {
   const box = $("aoBibleBox");
   const has = bible && bible.character1;
   box.classList.toggle("hidden", !has);
   if (!has) return;
   Object.entries(AO_BIBLE_FIELDS).forEach(([k, id]) => { $(id).value = bible[k] || ""; });
+  const chars = (aoPersonas && Array.isArray(aoPersonas.characters)) ? aoPersonas.characters : [];
+  for (let n = 1; n <= 4; n++) {
+    const c = chars.find((x) => Number(x.n) === n);
+    const used = n <= 2 || !!bible["character" + n] || !!c;
+    $("aoBibleWrap" + n).classList.toggle("hidden", !used);
+    const role = c ? (c.speaks ? "parle" : "muet") : (n === 1 ? "parle" : "muet");
+    $("aoBibleLbl" + n).textContent = `Personnage ${n}${c && c.name ? " (" + c.name + ")" : ""} — ${role}`;
+  }
   $("aoBibleMsg").textContent = "";
 }
 
@@ -3243,7 +3459,7 @@ $("aoBibleSaveBtn").addEventListener("click", async () => {
 
 // Deux sections : « Répliques trop longues » (mots PAR TOUR) seulement s'il y en a ; les autres
 // alertes (durée, valeurs [à valider], fiche voix…) sous leur propre titre.
-function aoRenderWarnings(boxId, warnings, maxWords, alerts) {
+function aoRenderWarnings(boxId, warnings, maxWords, alerts, maxSpoken) {
   const box = $(boxId);
   const list = (warnings || []).filter(Boolean);
   const other = (alerts || []).filter(Boolean);
@@ -3251,7 +3467,8 @@ function aoRenderWarnings(boxId, warnings, maxWords, alerts) {
   const ul = (items) => "<ul>" + items.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>";
   box.innerHTML =
     (list.length
-      ? `<div class="ao-w-title">⚠ Répliques trop longues${maxWords ? ` (max ~${esc(maxWords)} mots par tour, soit 10 s)` : ""}</div>` +
+      ? `<div class="ao-w-title">⚠ Répliques trop longues${maxWords ? ` (max ~${esc(maxWords)} mots par tour` +
+        `${maxSpoken ? ` de ${esc(maxSpoken)} s` : ""}, moins si le tour a des gestes)` : ""}</div>` +
         ul(list) +
         `<div class="muted small">Au-delà, Google risque de couper la phrase. Raccourcis le dialogue ou découpe-le.</div>`
       : "") +
@@ -3299,20 +3516,49 @@ async function aoPhotoDataUrl(file, max = 1024) {
   } catch (_) { return url; }
 }
 
-// Une photo par type (visage, visage2, produit) : celles que Claude regarde pour écrire la bible.
+// Une photo par type (visage1..visage4, produit) : celles que Claude regarde pour la bible.
 async function aoBiblePhotos() {
   const out = [];
   const seen = new Set();
   for (let i = 0; i < aoRefsFiles.length; i++) {
-    const kind = aoRefsKinds[i];
-    if (!["visage", "visage2", "produit"].includes(kind) || seen.has(kind)) continue;
+    const kind = aoRefsKinds[i] === "visage" ? "visage1" : aoRefsKinds[i];
+    if (!["visage1", "visage2", "visage3", "visage4", "produit"].includes(kind) || seen.has(kind)) continue;
     seen.add(kind);
     out.push({ kind, data: await aoPhotoDataUrl(aoRefsFiles[i]) });
   }
   return out;
 }
 
-// -- Étape 3 : plan de tournage --
+// Corps commun à /plan et /validate-doc (style, personnages 1..4, fiches voix par personnage).
+// Anciens champs persona1/persona2/voice_profile envoyés aussi (rétrocompat serveur).
+async function aoPlanBody(mode, script, withPhotos) {
+  return {
+    script,
+    persona: $("aoPersona").value.trim(),
+    characters: aoReadCharacters(),
+    persona1: $("aoPersona1").value.trim(),
+    persona2: $("aoPersona2").value.trim(),
+    product: $("aoProduct").value.trim(),
+    ambiance: $("aoAmbiance").value.trim(),
+    style: aoStyle(),
+    manual: mode === "manual",
+    mode,
+    voice_profile: aoReadVoice("aoV"),
+    voice_profiles: aoReadVoiceProfiles(),
+    ref_photos: withPhotos ? await aoBiblePhotos() : [],
+  };
+}
+
+function aoAcceptPlan(r, msg) {
+  aoShots = r.shots || [];
+  aoPersonas = r.personas || null;
+  aoPlanBible = r.bible || null;
+  if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
+  msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
+  renderAoPlan(aoShots, r);
+}
+
+// -- Étape 3 : plan de tournage (auto → document à relire ; client/manuel → plan direct) --
 $("aoPlanBtn").addEventListener("click", async () => {
   const script = $("aoScript").value;   // VERBATIM
   const mode = aoMode();
@@ -3320,32 +3566,27 @@ $("aoPlanBtn").addEventListener("click", async () => {
   const msg = $("aoPlanMsg");
   if (!script.trim()) return toast(mode === "client" ? "Colle le document du client." : "Écris le script (ce que la personne doit dire).");
   msg.innerHTML = mode === "client" ? "🎬 Lecture du document client + traduction des mises en scène…"
-    : manual ? "🎬 Préparation de tes plans…" : "🎬 Découpage du script en plans…";
+    : manual ? "🎬 Préparation de tes plans…" : "🎬 Le réalisateur écrit le découpage par idée…";
   $("aoPlanBtn").disabled = true;
+  $("aoPlanArea").classList.add("hidden");
+  $("aoReviewArea").classList.add("hidden");
   try {
-    const refPhotos = mode === "client" ? await aoBiblePhotos() : [];
+    const body = await aoPlanBody(mode, script, mode === "client");
     const r = await api(AO_API + "/plan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        script,
-        persona: $("aoPersona").value.trim(),
-        persona1: $("aoPersona1").value.trim(),
-        persona2: $("aoPersona2").value.trim(),
-        product: $("aoProduct").value.trim(),
-        ambiance: $("aoAmbiance").value.trim(),
-        manual,
-        mode,
-        voice_profile: aoReadVoice("aoV"),
-        ref_photos: refPhotos,
-      }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
-    aoShots = r.shots || [];
-    aoPersonas = r.personas || null;
-    aoPlanBible = r.bible || null;
-    if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
-    msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
-    renderAoPlan(aoShots, r);
+    if (r.review) {
+      // Mode auto : document à RELIRE, aucun plan ni image avant « Valider le découpage ».
+      aoPersonas = r.personas || null;
+      aoShots = [];
+      $("aoReviewDoc").value = r.doc || "";
+      $("aoReviewMsg").textContent = "";
+      aoRenderWarnings("aoPlanWarnings", r.warnings, null, r.alerts);
+      $("aoReviewArea").classList.remove("hidden");
+      msg.innerHTML = `<div class="ok">✓ Découpage écrit : ${esc(r.blocks ?? "?")} bloc(s)${r.dry_run ? " (simulation)" : ""} — relis-le ci-dessous puis valide.</div>`;
+      return;
+    }
+    aoAcceptPlan(r, msg);
   } catch (e) {
     msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
   } finally {
@@ -3353,7 +3594,43 @@ $("aoPlanBtn").addEventListener("click", async () => {
   }
 });
 
-const AO_REF_LABEL = { visage: "Visage perso 1", visage2: "Visage perso 2", produit: "Produit", decor: "Décor", style: "Style" };
+// Mode auto : le document relu/édité part au pipeline « Découpage client » (bible avec photos,
+// tours chronométrés, réfs). Rien n'est généré en images avant cette validation.
+$("aoValidateDocBtn").addEventListener("click", async () => {
+  const doc = $("aoReviewDoc").value;
+  if (!doc.trim()) return toast("Le document de découpage est vide.");
+  const msg = $("aoPlanMsg");
+  $("aoValidateDocBtn").disabled = true;
+  $("aoReviewMsg").textContent = "⏳ Bible + tours chronométrés…";
+  try {
+    const body = await aoPlanBody("client", $("aoScript").value, true);
+    body.doc = doc;
+    const r = await api(AO_API + "/validate-doc", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    $("aoReviewMsg").textContent = "✓ Découpage validé.";
+    aoAcceptPlan(r, msg);
+  } catch (e) {
+    $("aoReviewMsg").textContent = "";
+    msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
+  } finally {
+    $("aoValidateDocBtn").disabled = false;
+  }
+});
+
+const AO_REF_LABEL = { visage: "Visage perso 1", visage1: "Visage perso 1", visage2: "Visage perso 2",
+  visage3: "Visage perso 3", visage4: "Visage perso 4", produit: "Produit", decor: "Décor", style: "Style" };
+
+// Libellé d'un type de réf avec le nom du personnage (« Visage perso 2 (Julie) »).
+function aoRefLabel(k) {
+  const m = /^visage(\d?)$/.exec(k || "");
+  if (m) {
+    const n = m[1] || "1";
+    const nm = aoCharName(n);
+    return `Visage perso ${n}` + (nm.startsWith("Perso ") ? "" : ` (${nm})`);
+  }
+  return AO_REF_LABEL[k] || k;
+}
 
 function renderAoPlan(shots, r) {
   aoLastEstimate = r.estimate || null;
@@ -3362,7 +3639,7 @@ function renderAoPlan(shots, r) {
   let prevBlock = null;
   shots.forEach((s) => {
     const refs = Array.isArray(s.refs_needed) ? s.refs_needed : [];
-    const refsTxt = refs.length ? refs.map((k) => AO_REF_LABEL[k] || k).join(", ") : "plan neutre";
+    const refsTxt = refs.length ? refs.map(aoRefLabel).join(", ") : "plan neutre";
     const segs = Array.isArray(s.segments) ? s.segments : [];
     if (!segs.length && s.block_n && s.block_count > 1 && s.block_n !== prevBlock) {
       const head = document.createElement("div");
@@ -3384,13 +3661,13 @@ function renderAoPlan(shots, r) {
           `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`);
     list.appendChild(div);
   });
-  aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words, r.alerts);
+  aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words, r.alerts, r.max_spoken);
   const e = r.estimate || {};
   $("aoEstimate").innerHTML =
     `<b>Coût estimé :</b> ${usd(e.usd_total)} ` +
     `<span class="muted">(images ${usd(e.usd_images)} · vidéo + voix Omni ${usd(e.usd_video)} ` +
     `pour ~${Math.round(e.seconds_total || 0)} s, ${e.shots || shots.length} plan(s) à ~${usd(aoRate())}/s)</span>` +
-    (r.max_words ? `<div class="card-sub">Max ~${esc(r.max_words)} mots par plan avec ce débit.</div>` : "") +
+    (r.max_words ? `<div class="card-sub">Max ~${esc(r.max_words)} mots par tour${r.max_spoken ? ` de ${esc(r.max_spoken)} s` : ""} avec ce débit (moins si le tour a des gestes).</div>` : "") +
     `<div class="card-sub">Payé seulement en mode réel. En simulation : $0. La vidéo n'est payée que sur les plans validés.</div>` +
     aoTier1Html(Number(e.usd_video) || 0, e.tier1_warning);
   $("aoPlanArea").classList.remove("hidden");
@@ -3418,6 +3695,8 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   fd.append("confirm", "true");
   fd.append("ref_kinds", JSON.stringify(aoRefsKinds));
   fd.append("voice_profile", JSON.stringify(aoReadVoice("aoV")));
+  fd.append("voice_profiles", JSON.stringify(aoReadVoiceProfiles()));
+  fd.append("style", aoStyle());
   fd.append("personas", JSON.stringify(aoPersonas || {}));
   if (aoPlanBible) fd.append("bible", JSON.stringify(aoPlanBible));
   aoRefsFiles.forEach((f) => fd.append("files", f, f.name));
@@ -3428,7 +3707,7 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
     return toast(e.message);
   }
   aoAdId = res.ad_id;
-  aoVoiceUnlocked = false;
+  aoVoiceUnlockedBy = {};
   aoShowImgProgress();
   pollSceneJob(res.job_id, {
     ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
@@ -3491,9 +3770,10 @@ async function loadAoGallery(adId) {
   $("aoValidation").classList.remove("hidden");
   aoGalleryShots = r.shots || [];
   aoOmniDailyLimit = r.omni_daily_limit || null;
+  if (r.personas) aoPersonas = r.personas;   // noms des personnages (tours, réfs, fiches voix)
   aoRenderBible(r.bible);
   aoRenderVoiceBlock(r);
-  aoRenderWarnings("aoWarnings", r.warnings, r.max_words, r.alerts);
+  aoRenderWarnings("aoWarnings", r.warnings, r.max_words, r.alerts, r.max_spoken);
   const g = $("aoGallery");
   renderOverviewBanner(g, r, "avatar_omni", adId);
   g.innerHTML = "";
@@ -3605,7 +3885,9 @@ function aoShotCard(s) {
     `<button class="btn small btn-test" title="Anime uniquement ce plan">Tester ce plan</button>` +
     `</div></div>`;
 
-  card.querySelector(".body").insertBefore(planRefsControls(s, AO_REF_KIND_OPTS), card.querySelector(".actions"));
+  // Anciennes pubs : « visage » = visage1 (même puce) ; le serveur accepte les deux.
+  if (Array.isArray(s.refs_needed)) s.refs_needed = s.refs_needed.map((k) => (k === "visage" ? "visage1" : k));
+  card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".actions"));
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");
@@ -3689,11 +3971,17 @@ async function aoRefreshMeta(s, card) {
     if (fresh) {
       s.duration_s = fresh.duration_s;
       const g = aoGalleryShots.find((x) => x.clip_id === s.clip_id);
-      if (g) { g.duration_s = fresh.duration_s; g.dialogue = fresh.dialogue; }
+      if (g) { g.duration_s = fresh.duration_s; g.dialogue = fresh.dialogue; g.segments = fresh.segments; }
+      // Tours re-chronométrés après édition du dialogue → liste des tours mise à jour.
+      const segsEl = card.querySelector(".ao-segs");
+      if (segsEl && Array.isArray(fresh.segments) && fresh.segments.length) {
+        s.segments = fresh.segments;
+        segsEl.outerHTML = aoSegmentsHtml(fresh.segments);
+      }
     }
     const dur = card.querySelector(".ao-dur");
     if (dur) dur.textContent = `⏱️ ~${s.duration_s || "?"} s`;
-    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts);
+    aoRenderWarnings("aoWarnings", ad.warnings, ad.max_words, ad.alerts, ad.max_spoken);
     aoRenderAnimEstimate();
   } catch (_) { /* non bloquant */ }
 }

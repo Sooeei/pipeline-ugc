@@ -101,6 +101,10 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("voice_profile", "TEXT"),            # JSON : fiche voix Avatar IA (Omni)
         ("personas", "TEXT"),                 # JSON : personnages Avatar IA {p1, p2, p1_en, p2_en}
         ("bible", "TEXT"),                    # JSON : bible visuelle EN (découpage client)
+        ("style", "TEXT DEFAULT 'realiste'"), # Avatar IA : « realiste » | « 3d »
+        # JSON : fiches voix PAR personnage qui parle {"1": profil, "3": profil} ; absent →
+        # repli sur voice_profile (= personnage 1, anciennes pubs).
+        ("voice_profiles", "TEXT"),
     ],
     "clips": [
         ("prompt_image", "TEXT"),
@@ -353,6 +357,26 @@ def set_ad_bible(ad_id: int, bible_json: str) -> None:
     con = connect()
     try:
         con.execute("UPDATE ads SET bible=? WHERE id=?", (bible_json, ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def set_ad_style(ad_id: int, style: str) -> None:
+    """Style visuel d'une pub Avatar IA (« realiste » | « 3d », normalisé)."""
+    con = connect()
+    try:
+        con.execute("UPDATE ads SET style=? WHERE id=?", (config_app.normalize_omni_style(style), ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def set_ad_voice_profiles(ad_id: int, voice_profiles_json: str) -> None:
+    """Fiches voix PAR personnage (JSON {"1": profil, …}) d'une pub Avatar IA."""
+    con = connect()
+    try:
+        con.execute("UPDATE ads SET voice_profiles=? WHERE id=?", (voice_profiles_json, ad_id))
         con.commit()
     finally:
         con.close()

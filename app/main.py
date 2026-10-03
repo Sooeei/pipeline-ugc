@@ -168,6 +168,7 @@ def create_app() -> FastAPI:
             ],
             "spend_cap_usd": _spend_cap_usd(),
             "omni_daily_request_limit": _omni_daily_limit(),
+            "omni_max_spoken_clip_seconds": _omni_max_spoken(),
             "dry_run": s.get("dry_run", "1") == "1",
             "avatars": db.list_avatars(),
             "voices": db.list_voices(),
@@ -261,6 +262,9 @@ def create_app() -> FastAPI:
             db.set_setting("spend_cap_usd", str(max(0.0, float(body.spend_cap_usd))))
         if body.omni_daily_request_limit is not None:
             db.set_setting("omni_daily_request_limit", str(max(1, int(body.omni_daily_request_limit))))
+        if body.omni_max_spoken_clip_seconds is not None:
+            db.set_setting("omni_max_spoken_clip_seconds",
+                           str(config_app.clamp_omni_max_spoken(body.omni_max_spoken_clip_seconds)))
         db.set_setting("dry_run", "1" if body.dry_run else "0")
         db.log_activity("reglages", "Réglages enregistrés.")
         return {"ok": True}
@@ -738,49 +742,49 @@ def create_app() -> FastAPI:
     # -------------------------------------------------- AVATAR IA (Omni : Nano Banana → Google Omni)
     @app.post("/api/avatar-omni/plan")
     def avatar_omni_plan(body: AvatarOmniPlanIn) -> dict[str, Any]:
-        """Découpe le script VERBATIM en plans ≤ MAX_WORDS (débit de la fiche voix) + visuels
-        d'une personne UGC. Estimation sur les VRAIES durées Omni de chaque dialogue."""
+        """Plan Avatar IA. Mode « auto » : Claude « réalisateur » écrit le DOCUMENT CLIENT (blocs
+        par idée, dialogues VERBATIM, directions 🎬) → renvoyé pour RELECTURE, aucun plan ni image
+        (validation : /validate-doc). Mode « client » : document du client → tours chronométrés.
+        Mode « manuel » : blocs de l'utilisateur → tours chronométrés. Estimation sur la SOMME
+        des tours (débit de la fiche voix du speaker de chaque tour)."""
         cfg = load_provider_config()
-        profile = config_app.normalize_voice_profile(body.voice_profile)
-        wps = config_app.voice_words_per_sec(profile)
         mode = body.mode if body.mode in ("auto", "manual", "client") else (
             "manual" if body.manual else "auto"
         )
-        try:
-            # Personnages saisis en FR → traduits en ANGLAIS une fois (stockés sur la pub ensuite).
-            personas = brain.translate_personas(cfg, body.persona1, body.persona2)
-            if mode == "client":
-                result = brain.generate_avatar_omni_client_plan(
-                    cfg, body.script, personas=personas, product=body.product,
-                    ambiance=body.ambiance, words_per_sec=wps,
-                    photos=_bible_photos(body.ref_photos),
+        ctx = _omni_plan_context(cfg, body)
+        if mode == "auto":
+            try:
+                res = brain.generate_avatar_omni_auto_doc(
+                    cfg, body.script, brief=body.persona, personas=ctx["personas"],
+                    product=body.product, ambiance=body.ambiance, style=ctx["style"],
                 )
-            else:
-                result = brain.generate_avatar_omni_plan(
-                    cfg, body.script, persona=brain.personas_brief(body.persona, personas),
-                    product=body.product, ambiance=body.ambiance, manual=(mode == "manual"),
-                    words_per_sec=wps,
-                )
-        except brain.BrainProviderError as exc:
-            raise HTTPException(502, str(exc)) from exc
-        except brain.BrainError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        result["mode"] = mode
-        result["personas"] = personas
-        result.setdefault("alerts", [])
-        if vw := config_app.voice_extra_warning(profile, body.product):
-            result["alerts"].append(vw)
-        for s in result["shots"]:
-            s["duration_s"] = _shot_omni_seconds(s, wps)   # client : SOMME des tours
-        result["estimate"] = _omni_estimate(result["shots"], wps)
-        result["dry_run"] = cfg.dry_run
-        db.log_activity("avatar_omni", f"Plan Avatar IA : {len(result['shots'])} plans.")
-        return result
+            except brain.BrainProviderError as exc:
+                raise HTTPException(502, str(exc)) from exc
+            except brain.BrainError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            db.log_activity("avatar_omni", f"Document auto Avatar IA : {res.get('blocks', 0)} bloc(s).")
+            return {
+                "mode": "auto", "review": True, "doc": res.get("doc", ""),
+                "blocks": int(res.get("blocks") or 0), "personas": ctx["personas"],
+                "warnings": list(res.get("warnings") or []), "alerts": ctx["alerts"],
+                "style": ctx["style"], "max_spoken": ctx["max_spoken"], "dry_run": cfg.dry_run,
+            }
+        return _omni_plan_response(cfg, body, ctx, mode, body.script)
+
+    @app.post("/api/avatar-omni/validate-doc")
+    def avatar_omni_validate_doc(body: AvatarOmniValidateDocIn) -> dict[str, Any]:
+        """Document (auto relu / édité) VALIDÉ → pipeline client identique (bible avec photos,
+        tours chronométrés, réfs). Même réponse que le mode « client » ; aucune image générée."""
+        cfg = load_provider_config()
+        if not body.doc.strip():
+            raise HTTPException(400, "Document vide : relis ou régénère le découpage.")
+        return _omni_plan_response(cfg, body, _omni_plan_context(cfg, body), "client", body.doc)
 
     @app.post("/api/avatar-omni/estimate")
     def avatar_omni_estimate(body: AvatarOmniEstimateIn) -> dict[str, Any]:
-        wps = config_app.voice_words_per_sec(body.voice_profile)
-        return _omni_estimate(body.shots, wps)
+        profiles = config_app.normalize_voice_profiles(body.voice_profiles,
+                                                        legacy=body.voice_profile or None)
+        return _omni_estimate(body.shots, _wps_for_profiles(profiles, body.voice_profile))
 
     @app.post("/api/avatar-omni/generate-images")
     async def avatar_omni_generate_images(
@@ -789,22 +793,30 @@ def create_app() -> FastAPI:
         confirm: bool = Form(False),
         ref_kinds: str = Form(""),
         voice_profile: str = Form(""),
+        voice_profiles: str = Form(""),
         personas: str = Form(""),
         bible: str = Form(""),
+        style: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
         """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
-        validation. La fiche voix et les personnages (FR + EN) sont ENREGISTRÉS dès maintenant
-        (même voix et mêmes personnes sur tous les plans)."""
+        validation. Les fiches voix (une par personnage qui parle), les personnages (FR + EN) et
+        le style sont ENREGISTRÉS dès maintenant (mêmes voix et mêmes personnes sur tous les
+        plans). ads.voice_profile = fiche du personnage 1 (rétrocompat)."""
         cfg = load_provider_config()
         shots = _parse_avatar_omni_shots(shots_json)
-        profile_json = _json(config_app.normalize_voice_profile(voice_profile))
+        profiles = config_app.normalize_voice_profiles(voice_profiles, legacy=voice_profile or None)
+        profile_json = _json(profiles.get("1") or config_app.normalize_voice_profile(voice_profile))
+        profiles_json = _json(profiles)
         personas_json = _json(_resolve_personas(cfg, personas))
         bible_json = _json(brain.normalize_bible(bible)) if bible.strip() else ""
+        style_v = config_app.normalize_omni_style(style)
 
         def _on_ad(aid: int) -> None:
             db.set_ad_voice_profile(aid, profile_json)
+            db.set_ad_voice_profiles(aid, profiles_json)
             db.set_ad_personas(aid, personas_json)
+            db.set_ad_style(aid, style_v)
             if bible_json:
                 db.set_ad_bible(aid, bible_json)
 
@@ -832,7 +844,8 @@ def create_app() -> FastAPI:
             ad = db.get_ad(int(clip["ad_id"])) or {}
             shot = body.prompt_image.strip() or str(clip.get("shot_prompt") or "")
             body = RegenerateIn(
-                prompt_image=brain.compose_client_prompt_image(pipeline.ad_bible(ad), shot),
+                prompt_image=brain.compose_client_prompt_image(pipeline.ad_bible(ad), shot,
+                                                               style=pipeline.ad_style(ad)),
                 confirm=body.confirm,
             )
             db.update_clip(clip_id, shot_prompt=shot, segments=_json(
@@ -856,20 +869,20 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Ce plan n'appartient pas à un « Avatar IA ».")
         _check_voiceover_len(body.text, what="Texte", hint="")
         db.update_clip(clip_id, script=body.text)
-        wps = config_app.voice_words_per_sec((db.get_ad(int(clip["ad_id"])) or {}).get("voice_profile"))
-        max_words = config_app.omni_max_words(wps)
+        ad = db.get_ad(int(clip["ad_id"])) or {}
+        wps_for, max_spoken = pipeline.ad_wps_for(ad), pipeline.omni_max_spoken()
         if pipeline.clip_segments(clip) and body.text.strip():
-            # Découpage client : nouveaux segments (mouvements gardés par position), progression
-            # d'animation remise à zéro (le texte a changé).
-            segs = brain.client_resegment(body.text, pipeline.clip_segments(clip), max_words, wps,
-                                          str(clip.get("direction") or ""))
-            db.update_clip(clip_id, segments=_json([{"text": s["text"], "motion": s["motion"]}
-                                                    for s in segs]))
+            # Plan à tours : nouveaux tours chronométrés (speaker et gestes gardés par position),
+            # progression d'animation remise à zéro (le texte a changé).
+            turns = brain.client_retime(body.text, pipeline.clip_segments(clip), wps_for=wps_for,
+                                        max_spoken=max_spoken, direction=str(clip.get("direction") or ""))
+            db.update_clip(clip_id, segments=_json(_clean_turns(turns)))
         fresh = db.get_clip(clip_id) or {}
-        warning = _clip_word_warnings(fresh, max_words)
+        warning = _clip_word_warnings(fresh, wps_for, max_spoken)
         return {
-            "ok": True, "duration_s": pipeline.clip_omni_seconds(fresh, wps),
-            "max_words": max_words, "warning": " · ".join(warning),
+            "ok": True,
+            "duration_s": pipeline.clip_omni_seconds(fresh, None, wps_for=wps_for, max_spoken=max_spoken),
+            "max_words": _plain_max_words(wps_for(1), max_spoken), "warning": " · ".join(warning),
         }
 
     @app.post("/api/avatar-omni/consistency/{ad_id}")
@@ -891,33 +904,40 @@ def create_app() -> FastAPI:
         ad = db.get_ad(ad_id)
         if ad is None or ad.get("kind") != "avatar_omni":
             raise HTTPException(404, "Pub introuvable.")
-        profile = config_app.normalize_voice_profile(ad.get("voice_profile"))
-        wps = config_app.voice_words_per_sec(profile)
-        max_words = config_app.omni_max_words(wps)
+        profiles = pipeline.ad_voice_profiles(ad)
+        profile = profiles.get("1") or config_app.normalize_voice_profile(ad.get("voice_profile"))
+        wps_for, max_spoken = pipeline.ad_wps_for(ad), pipeline.omni_max_spoken()
+        max_words = _plain_max_words(wps_for(1), max_spoken)
+        personas = config_app.normalize_personas(ad.get("personas"))
+        names = {int(c["n"]): c["name"] for c in personas["characters"] if c.get("name")}
         resp = _ad_shots_response(
             ad_id,
             lambda c: {
                 "dialogue": c.get("script") or "",
-                "duration_s": pipeline.clip_omni_seconds(c, wps),
+                "duration_s": pipeline.clip_omni_seconds(c, None, wps_for=wps_for, max_spoken=max_spoken),
                 **{k: c.get(k) for k in _BLOCK_FIELDS},
                 "label": _block_label(c),
-                "segments": _segments_view(c, wps),
+                "segments": _segments_view(c, wps_for, max_spoken, names),
                 "shot_prompt": c.get("shot_prompt") or "",
                 "refs_sent": _refs_sent(c),
             },
         )
-        clips_by_id = {int(c["id"]): c for c in db.clips_for_ad(ad_id)}
+        clips = db.clips_for_ad(ad_id)
+        clips_by_id = {int(c["id"]): c for c in clips}
         resp["warnings"] = [
             w for s in resp["shots"]
-            for w in _clip_word_warnings(clips_by_id.get(int(s["clip_id"])) or {}, max_words)
+            for w in _clip_word_warnings(clips_by_id.get(int(s["clip_id"])) or {}, wps_for, max_spoken)
         ]
         resp["alerts"] = []
         bw = brain.bracket_values_warning([s["dialogue"] for s in resp["shots"]])
         if bw:
             resp["alerts"].append(bw)
-        if vw := config_app.voice_extra_warning(profile):
-            resp["alerts"].append(vw)
-        resp["personas"] = pipeline.ad_personas(ad)
+        for vp in profiles.values():
+            if (vw := config_app.voice_extra_warning(vp)) and vw not in resp["alerts"]:
+                resp["alerts"].append(vw)
+        resp["alerts"].extend(_omni_refs_alerts(ad_id, clips))
+        resp["personas"] = personas
+        resp["style"] = pipeline.ad_style(ad)
         bible = pipeline.ad_bible(ad)
         resp["bible"] = bible
         resp["bible_text"] = brain.bible_text(bible) if bible else ""
@@ -928,10 +948,16 @@ def create_app() -> FastAPI:
                     f"{config_app.OMNI_MAX_TOTAL_SECONDS} s par vidéo étendue) — coupe ce bloc en deux."
                 )
         resp["max_words"] = max_words
+        resp["max_spoken"] = max_spoken
         resp["omni_daily_limit"] = _omni_daily_limit()
+        speakers = _ad_speakers(personas, profiles)
+        resp["voice_profiles"] = {str(n): config_app.speaker_voice_profile(profiles, n, ad.get("voice_profile"))
+                                  for n in speakers}
+        resp["voice_sheets"] = {k: config_app.voice_sheet(v) for k, v in resp["voice_profiles"].items()}
+        resp["voice_locked"] = {str(n): _speaker_locked(clips, n) for n in speakers}
+        # Rétrocompat (personnage 1) : fiche unique et sa consigne.
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
-        resp["voice_locked"] = any(s["status"] == "pret" for s in resp["shots"])
         return resp
 
     @app.patch("/api/avatar-omni/bible/{ad_id}")
@@ -945,22 +971,26 @@ def create_app() -> FastAPI:
         if not bible["character1"]:
             raise HTTPException(400, "La bible doit décrire au moins le personnage 1.")
         db.set_ad_bible(ad_id, _json(bible))
+        style = pipeline.ad_style(ad)
         n = 0
         for c in db.clips_for_ad(ad_id):
             if c.get("shot_prompt") is not None:
                 db.update_clip(int(c["id"]), prompt_image=brain.compose_client_prompt_image(
-                    bible, str(c.get("shot_prompt") or "")))
+                    bible, str(c.get("shot_prompt") or ""), style=style))
                 n += 1
         return {"ok": True, "bible": bible, "bible_text": brain.bible_text(bible), "updated": n}
 
     @app.patch("/api/avatar-omni/voice/{ad_id}")
     def avatar_omni_voice(ad_id: int, body: VoiceProfileIn) -> dict[str, Any]:
-        """Modifie la fiche voix. VERROUILLÉE dès qu'un clip est animé (« pret ») : `force` =
-        déverrouillage explicite (les clips déjà faits garderont l'ancienne voix)."""
+        """Modifie la fiche voix du personnage `speaker` (1..4, défaut 1). VERROUILLÉE dès qu'un
+        tour de CE personnage est animé : `force` = déverrouillage explicite (les tours déjà faits
+        garderont l'ancienne voix). Les tours pas encore animés sont rechronométrés (débit)."""
         ad = db.get_ad(ad_id)
         if ad is None or ad.get("kind") != "avatar_omni":
             raise HTTPException(400, "Avatar IA introuvable.")
-        locked = any(c.get("status") == "pret" for c in db.clips_for_ad(ad_id))
+        speaker = max(1, min(config_app.OMNI_MAX_CHARACTERS, int(body.speaker or 1)))
+        clips = db.clips_for_ad(ad_id)
+        locked = _speaker_locked(clips, speaker)
         if locked and not body.force:
             raise HTTPException(
                 409,
@@ -968,10 +998,21 @@ def create_app() -> FastAPI:
                 "Déverrouille-la pour la modifier (les clips déjà faits auront une autre voix).",
             )
         profile = config_app.normalize_voice_profile(body.voice_profile)
-        db.set_ad_voice_profile(ad_id, _json(profile))
+        profiles = pipeline.ad_voice_profiles(ad)
+        profiles[str(speaker)] = profile
+        db.set_ad_voice_profiles(ad_id, _json(dict(sorted(profiles.items()))))
+        if speaker == 1:
+            db.set_ad_voice_profile(ad_id, _json(profile))
+        fresh = db.get_ad(ad_id) or {}
+        wps_for, max_spoken = pipeline.ad_wps_for(fresh), pipeline.omni_max_spoken()
+        for c in clips:   # nouveau débit → nouvelles durées des tours pas encore animés
+            segs = pipeline.clip_segments(c)
+            if segs:
+                db.update_clip(int(c["id"]), segments=_json(pipeline.retime_turns(segs, wps_for, max_spoken)))
         return {
-            "ok": True, "voice_profile": profile,
+            "ok": True, "speaker": speaker, "voice_profile": profile,
             "voice_sheet": config_app.voice_sheet(profile), "voice_locked": locked,
+            "voice_profiles": pipeline.ad_voice_profiles(fresh),
         }
 
     @app.post("/api/avatar-omni/animate/{ad_id}")
@@ -1435,6 +1476,7 @@ class SettingsIn(BaseModel):
     audio_format: str = ""   # format de sortie des voix : "mp3" (défaut) | "wav"
     spend_cap_usd: float | None = None   # plafond de dépense ($) ; None = ne pas changer
     omni_daily_request_limit: int | None = None   # quota Google Omni (requêtes/jour) ; None = idem
+    omni_max_spoken_clip_seconds: int | None = None   # max d'un tour Omni PARLÉ (3..10 s) ; None = idem
     dry_run: bool = True
     # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices (comme les avatars).
 
@@ -1570,11 +1612,20 @@ class AvatarOmniPlanIn(BaseModel):
     voice_profile: dict[str, Any] = {}   # fiche voix (débit → MAX_WORDS et durées)
     # Photos de réf lues par Claude pour la bible (découpage client) : [{kind, data(data URL)}]
     ref_photos: list[dict[str, Any]] = []
+    # Jusqu'à 4 personnages : [{n, name, fr, speaks}] (FR, traduits en EN par Claude)
+    characters: list[dict[str, Any]] = []
+    style: str = ""                      # "realiste" (défaut) | "3d"
+    voice_profiles: dict[str, Any] = {}  # fiches voix PAR personnage qui parle {"1": {...}, "3": {...}}
+
+
+class AvatarOmniValidateDocIn(AvatarOmniPlanIn):
+    doc: str = ""           # document (auto) relu / édité, au format du découpage client
 
 
 class AvatarOmniEstimateIn(BaseModel):
-    shots: list[dict[str, Any]] = []     # [{dialogue, segments?}] — client : Σ des tours
+    shots: list[dict[str, Any]] = []     # [{dialogue, segments?}] — Σ des tours
     voice_profile: dict[str, Any] = {}
+    voice_profiles: dict[str, Any] = {}
 
 
 class BibleIn(BaseModel):
@@ -1583,6 +1634,7 @@ class BibleIn(BaseModel):
 
 class VoiceProfileIn(BaseModel):
     voice_profile: dict[str, Any] = {}
+    speaker: int = 1        # personnage dont on modifie la fiche (1..4)
     force: bool = False     # déverrouillage explicite (des clips sont déjà animés)
 
 
@@ -1692,7 +1744,21 @@ def _parse_shots(shots_json: str) -> list[dict[str, Any]]:
 
 def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
     """Plans « Avatar IA (Omni) ». dialogue = ce que la personne DIT, stocké VERBATIM (Omni fait
-    voix + lip-sync) ; refs_needed conservé."""
+    voix + lip-sync) ; refs_needed conservé. Un plan à tours sans prompt_motion reçoit le geste
+    « pendant » de son 1er tour (le mouvement vit dans les tours)."""
+    import json
+
+    try:
+        raw = json.loads(shots_json)
+    except json.JSONDecodeError:
+        raw = None
+    if isinstance(raw, list):
+        for s in raw:
+            if isinstance(s, dict) and not str(s.get("prompt_motion") or "").strip() and s.get("segments"):
+                first = next((x for x in s["segments"] if isinstance(x, dict)), {})
+                s["prompt_motion"] = str(first.get("pendant") or first.get("motion") or "") \
+                    or "Natural subtle movements, facing the camera."
+        shots_json = json.dumps(raw, ensure_ascii=False)
     return _parse_shot_list(
         shots_json, "Plan Avatar IA",
         lambda n, pi, pm, s: _with_refs_needed({
@@ -1704,18 +1770,47 @@ def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
     )
 
 
+_TURN_TEXT_KEYS = ("avant", "pendant", "apres", "motion")
+
+
+def _clean_turns(segs: list[Any]) -> list[dict[str, Any]]:
+    """Tours à stocker (sans progression) : forme canonique omni_timing (speaker, avant / pendant
+    / après, gestes, muet, durée) ; « motion » gardé pour les anciens segments."""
+    from . import omni_timing
+
+    out = []
+    for x in segs:
+        if not pipeline.is_turn(x):
+            continue
+        t = omni_timing.normalize_turn(x)
+        clean: dict[str, Any] = {
+            "text": t["text"], "speaker": t["speaker"], "mute": t["mute"],
+            "beats_avant": t["beats_avant"][:12], "beats_apres": t["beats_apres"][:12],
+            "seconds": int(t.get("seconds") or 0),
+        }
+        for k in _TURN_TEXT_KEYS:
+            if str(t.get(k) or ""):
+                clean[k] = str(t[k])[:3000]
+        if isinstance(x, dict) and x.get("max_words") not in (None, ""):
+            try:
+                clean["max_words"] = int(x["max_words"])
+            except (TypeError, ValueError):
+                pass
+        out.append(clean)
+    return out
+
+
 def _segment_fields(s: dict[str, Any]) -> dict[str, Any]:
-    """Découpage client : segments (texte + mouvement, sans progression) + partie propre du
-    prompt image. Le texte des segments doit reconstituer le dialogue du plan (vérifié)."""
+    """Plan à tours : tours chronométrés (sans progression) + partie propre du prompt image. Les
+    textes des tours PARLÉS doivent reconstituer le dialogue du plan (vérifié) ; les tours muets
+    (gestes seuls) sont gardés à leur place."""
     out: dict[str, Any] = {}
     segs = s.get("segments")
     if isinstance(segs, list) and segs:
-        clean = [
-            {"text": str(x.get("text") or ""), "motion": str(x.get("motion") or "")[:3000]}
-            for x in segs if isinstance(x, dict) and str(x.get("text") or "").strip()
-        ]
+        clean = _clean_turns(segs)
+        spoken = [x["text"] for x in clean if x["text"].strip()]
         dialogue = str(s.get("dialogue", "")).strip()
-        if clean and brain.realign_to_script(dialogue, [x["text"] for x in clean]) is not None:
+        if spoken and brain.realign_to_script(dialogue, spoken) is not None:
             out["segments"] = clean
     if str(s.get("shot_prompt") or "").strip():
         out["shot_prompt"] = str(s["shot_prompt"]).strip()[:4000]
@@ -1751,27 +1846,179 @@ def _refs_sent(c: dict[str, Any]) -> list[str]:
     return [str(r.get("kind") or "") for r in data if isinstance(r, dict)] if isinstance(data, list) else []
 
 
-def _clip_word_warnings(c: dict[str, Any], max_words: int) -> list[str]:
-    """« X mots (max N) » d'un plan Avatar IA : PAR TOUR en découpage client (un segment = un
-    tour de 10 s), sur le dialogue entier sinon (un plan = un clip)."""
+def _plain_max_words(wps: float, max_spoken: int) -> int:
+    """Mots max d'un tour sans geste : floor((max − marges) × débit)."""
+    from . import omni_timing
+
+    return int(omni_timing.omni_turn_timing("", wps=wps, max_spoken=max_spoken)["max_words"])
+
+
+def _clip_word_warnings(c: dict[str, Any], wps_for: Callable[[int], float], max_spoken: int) -> list[str]:
+    """« X mots (max N) » d'un plan Avatar IA : PAR TOUR (mots max du tour = durée max − gestes −
+    marges, au débit du speaker), sur le dialogue entier pour un plan classique (un clip)."""
+    from . import omni_timing
+
     segs = pipeline.clip_segments(c)
     if segs:
-        return brain.omni_turn_warnings(_block_label(c) or c.get("scene_n"),
-                                        [str(s["text"]) for s in segs], max_words)
+        label = _block_label(c) or c.get("scene_n")
+        out = []
+        for j, s in enumerate(segs, 1):
+            t = omni_timing.normalize_turn(s)
+            tm = omni_timing.turn_timing(t, wps=wps_for(t["speaker"]), max_spoken=max_spoken)
+            if not tm["mute"] and tm["words"] > tm["max_words"]:
+                out.append(f"Plan {label}, tour {j} : {tm['words']} mots (max {tm['max_words']}) — "
+                           f"phrase trop longue pour un tour de {max_spoken} s ; raccourcis-la.")
+        return out
+    wps = wps_for(1)
     w = brain.omni_dialogue_warning(int(c.get("scene_n") or 0), str(c.get("script") or ""),
-                                    max_words, "dialogue")
+                                    config_app.omni_max_words(wps), "dialogue")
     return [w] if w else []
 
 
-def _segments_view(c: dict[str, Any], wps: float) -> list[dict[str, Any]]:
-    """Segments d'un plan client pour l'UI : texte, mouvement, durée, tour déjà fait ou non."""
-    segs = pipeline.clip_segments(c)
-    return [
-        {"text": s["text"], "motion": s.get("motion") or "",
-         "seconds": config_app.omni_segment_seconds(str(s["text"]), wps, first=(i == 0)),
-         "done": bool(s.get("interaction_id"))}
-        for i, s in enumerate(segs)
-    ]
+def _segments_view(
+    c: dict[str, Any], wps_for: Callable[[int], float], max_spoken: int,
+    names: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Tours d'un plan pour l'UI : texte, speaker (+ nom), avant / pendant / après, gestes, muet,
+    durée (celle envoyée à Google), mots max du tour, avertissements, tour déjà fait ou non."""
+    from . import omni_timing
+
+    out = []
+    for s in pipeline.clip_segments(c):
+        t = omni_timing.normalize_turn(s)
+        sp = int(t["speaker"])
+        tm = pipeline.turn_plan(t, wps_for(sp), max_spoken)
+        raw = omni_timing.turn_timing(t, wps=wps_for(sp), max_spoken=max_spoken)
+        warnings = list(raw["warnings"]) + [w for w in (s.get("warnings") or []) if isinstance(w, str)]
+        if not tm["mute"] and tm["words"] > tm["max_words"]:
+            warnings.append(f"{tm['words']} mots (max {tm['max_words']} pour {max_spoken} s).")
+        out.append({
+            "text": t["text"], "speaker": sp, "speaker_name": (names or {}).get(sp, ""),
+            "avant": t["avant"], "pendant": t["pendant"], "apres": t["apres"],
+            "beats_avant": t["beats_avant"], "beats_apres": t["beats_apres"], "mute": t["mute"],
+            "seconds": int(tm["seconds"]), "max_words": int(tm["max_words"]),
+            "warnings": list(dict.fromkeys(warnings)), "done": bool(s.get("interaction_id")),
+            "motion": t["pendant"],   # rétrocompat (ancien front)
+        })
+    return out
+
+
+def _speaker_locked(clips: list[dict[str, Any]], speaker: int) -> bool:
+    """Fiche voix du personnage verrouillée : un tour de CE personnage est déjà animé (ou, plan
+    classique / ancienne pub, un clip « pret » quand speaker = 1)."""
+    from . import omni_timing
+
+    for c in clips:
+        segs = pipeline.clip_segments(c)
+        if not segs:
+            if speaker == 1 and c.get("status") == "pret":
+                return True
+            continue
+        for s in segs:
+            t = omni_timing.normalize_turn(s)
+            if t["speaker"] != speaker or t["mute"]:
+                continue
+            if s.get("interaction_id") or c.get("status") == "pret":
+                return True
+    return False
+
+
+def _ad_speakers(personas: dict[str, Any], profiles: dict[str, Any]) -> list[int]:
+    """Personnages qui PARLENT (fiche voix) : personnage 1 toujours, + ceux marqués « parle »
+    ou qui ont déjà une fiche."""
+    nums = {1} | {int(c["n"]) for c in personas.get("characters", []) if c.get("speaks")}
+    nums |= {int(k) for k in profiles if str(k).isdigit()}
+    return sorted(n for n in nums if 1 <= n <= config_app.OMNI_MAX_CHARACTERS)
+
+
+def _omni_refs_alerts(ad_id: int, clips: list[dict[str, Any]]) -> list[str]:
+    """« Trop de personnages à l'image pour ce plan » (réfs utiles > 4) pour chaque plan."""
+    typed = db.list_ref_images_typed(ad_id)
+    if not typed:
+        return []
+    ref = _consistency_ref(clips)
+    out = []
+    for c in clips:
+        anchor = str(ref["image_path"]) if ref and int(ref["id"]) != int(c["id"]) else ""
+        w = pipeline.omni_refs_overflow_warning(
+            pipeline._norm_refs_needed(c.get("refs_needed")), typed, anchor,
+            first_speaker=pipeline.clip_first_speaker(c), label=_block_label(c) or str(c["scene_n"]))
+        if w:
+            out.append(w)
+    return out
+
+
+def _wps_for_profiles(profiles: dict[str, Any], legacy: Any = None) -> Callable[[int], float]:
+    return lambda n: config_app.speaker_words_per_sec(profiles, n, legacy or None)
+
+
+def _omni_plan_context(cfg: Any, body: AvatarOmniPlanIn) -> dict[str, Any]:
+    """Entrées communes /plan et /validate-doc : personnages traduits (1..4), fiches voix par
+    speaker (repli : voice_profile = personnage 1), style, max d'un tour parlé, alertes voix."""
+    profiles = config_app.normalize_voice_profiles(body.voice_profiles, legacy=body.voice_profile or None)
+    try:
+        if body.characters:
+            chars = [{"n": c.get("n"), "name": c.get("name") or "", "fr": c.get("fr") or "",
+                      "speaks": bool(c.get("speaks", c.get("n") == 1))}
+                     for c in body.characters if isinstance(c, dict)]
+            personas = brain.translate_personas(cfg, characters=chars)
+        else:
+            personas = brain.translate_personas(cfg, body.persona1, body.persona2)
+    except brain.BrainProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except brain.BrainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    personas = config_app.normalize_personas(personas)
+    alerts = []
+    for vp in profiles.values() or [config_app.normalize_voice_profile(body.voice_profile)]:
+        if (vw := config_app.voice_extra_warning(vp, body.product)) and vw not in alerts:
+            alerts.append(vw)
+    return {
+        "profiles": profiles, "personas": personas, "alerts": alerts,
+        "style": config_app.normalize_omni_style(body.style),
+        "max_spoken": pipeline.omni_max_spoken(),
+        "wps_for": _wps_for_profiles(profiles, body.voice_profile),
+    }
+
+
+def _omni_plan_response(
+    cfg: Any, body: AvatarOmniPlanIn, ctx: dict[str, Any], mode: str, text: str,
+) -> dict[str, Any]:
+    """Plan (mode client / manuel) : tours chronométrés + estimation sur la SOMME des tours."""
+    wps_for = ctx["wps_for"]
+    try:
+        if mode == "client":
+            result = brain.generate_avatar_omni_client_plan(
+                cfg, text, personas=ctx["personas"], product=body.product,
+                ambiance=body.ambiance, words_per_sec=wps_for(1),
+                photos=_bible_photos(body.ref_photos), voice_profiles=ctx["profiles"],
+                style=ctx["style"], max_spoken=ctx["max_spoken"],
+            )
+        else:
+            result = brain.generate_avatar_omni_plan(
+                cfg, text, persona=brain.personas_brief(body.persona, ctx["personas"]),
+                product=body.product, ambiance=body.ambiance, manual=(mode == "manual"),
+                words_per_sec=wps_for(1), voice_profiles=ctx["profiles"], style=ctx["style"],
+                max_spoken=ctx["max_spoken"],
+            )
+    except brain.BrainProviderError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except brain.BrainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    result["mode"] = mode
+    result["personas"] = ctx["personas"]
+    result["style"] = ctx["style"]
+    result["max_spoken"] = ctx["max_spoken"]
+    result.setdefault("alerts", [])
+    for a in ctx["alerts"]:
+        if a not in result["alerts"]:
+            result["alerts"].append(a)
+    for s in result["shots"]:
+        s["duration_s"] = _shot_omni_seconds(s, wps_for, ctx["max_spoken"])   # SOMME des tours
+    result["estimate"] = _omni_estimate(result["shots"], wps_for, ctx["max_spoken"])
+    result["dry_run"] = cfg.dry_run
+    db.log_activity("avatar_omni", f"Plan Avatar IA : {len(result['shots'])} plans.")
+    return result
 
 
 _PHOTO_MEDIA = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -1792,7 +2039,8 @@ def _bible_photos(raw: list[dict[str, Any]]) -> list[dict[str, str]]:
             continue
         kind = str(ph.get("kind") or "").strip().lower()
         mt = re.match(r"data:(image/[\w.+-]+);base64,(.+)$", str(ph.get("data") or ""), re.DOTALL)
-        if kind not in brain.BIBLE_PHOTO_KINDS or kind in seen or not mt or mt.group(1) not in _PHOTO_MEDIA:
+        norm = config_app.normalize_omni_ref_kind(kind)
+        if kind not in brain.BIBLE_PHOTO_KINDS or norm in seen or not mt or mt.group(1) not in _PHOTO_MEDIA:
             continue
         data = mt.group(2).strip()
         try:
@@ -1801,7 +2049,7 @@ def _bible_photos(raw: list[dict[str, Any]]) -> list[dict[str, str]]:
             continue
         if size > _PHOTO_MAX_BYTES:
             continue
-        seen.add(kind)
+        seen.add(norm)
         out.append({"kind": kind, "media_type": mt.group(1), "data": data})
     return out
 
@@ -1815,9 +2063,10 @@ def _block_label(c: dict[str, Any]) -> str:
     return str(c["block_n"])
 
 
-def _resolve_personas(cfg: Any, raw: str) -> dict[str, str]:
-    """Personnages reçus avec la génération : {p1, p2, p1_en, p2_en}. Traduction EN manquante
-    (texte FR modifié après le plan) → Claude la refait ; jamais de FR brut dans les prompts."""
+def _resolve_personas(cfg: Any, raw: str) -> dict[str, Any]:
+    """Personnages reçus avec la génération → forme config_app.normalize_personas (1..4 + p1/p2
+    rétrocompat). Traduction EN manquante (texte FR modifié après le plan) → Claude la refait ;
+    jamais de FR brut dans les prompts."""
     import json
 
     try:
@@ -1826,10 +2075,18 @@ def _resolve_personas(cfg: Any, raw: str) -> dict[str, str]:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    p = {k: str(data.get(k) or "").strip() for k in ("p1", "p2", "p1_en", "p2_en")}
-    if (p["p1"] and not p["p1_en"]) or (p["p2"] and not p["p2_en"]):
+    p = config_app.normalize_personas(data)
+    if any(c["fr"] and not c["en"] for c in p["characters"]):
         try:
-            p = brain.translate_personas(cfg, p["p1"], p["p2"])
+            if data.get("characters"):
+                chars = [{k: c[k] for k in ("n", "name", "fr", "speaks")} for c in p["characters"]]
+                translated = config_app.normalize_personas(brain.translate_personas(cfg, characters=chars))
+                en = {c["n"]: c["en"] for c in translated["characters"]}
+                for c in p["characters"]:
+                    c["en"] = c["en"] or en.get(c["n"], "")
+                p = config_app.normalize_personas(p)
+            else:
+                p = config_app.normalize_personas(brain.translate_personas(cfg, p["p1"], p["p2"]))
         except brain.BrainProviderError as exc:
             raise HTTPException(502, str(exc)) from exc
         except brain.BrainError as exc:
@@ -1862,29 +2119,43 @@ def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any
     )
 
 
-def _shot_omni_seconds(s: dict[str, Any], words_per_sec: float) -> int:
-    """Durée Omni d'un plan (non encore en base) : somme de ses tours (découpage client) ou
-    durée de son dialogue (un seul clip ≤ 10 s)."""
-    segs = [x for x in (s.get("segments") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+def _as_wps_for(words_per_sec: Any) -> Callable[[int], float]:
+    """Débit par speaker : accepte un débit unique (ancien appel) ou une fonction speaker → débit."""
+    if callable(words_per_sec):
+        return words_per_sec
+    return lambda _n: float(words_per_sec or config_app.GROK_WORDS_PER_SEC)
+
+
+def _shot_omni_seconds(s: dict[str, Any], words_per_sec: Any, max_spoken: int | None = None) -> int:
+    """Durée Omni d'un plan (non encore en base) : somme de ses tours (muets compris) ou durée
+    de son dialogue (plan classique, un seul clip ≤ 10 s)."""
+    wps_for = _as_wps_for(words_per_sec)
+    segs = [x for x in (s.get("segments") or []) if pipeline.is_turn(x)]
     if segs:
-        return pipeline.segments_seconds(segs, words_per_sec)
-    return config_app.omni_clip_seconds(str(s.get("dialogue") or ""), words_per_sec)
+        return pipeline.segments_seconds(segs, None, wps_for=wps_for, max_spoken=max_spoken)
+    return config_app.omni_clip_seconds(str(s.get("dialogue") or ""), wps_for(1))
 
 
-def _omni_estimate(shots: list[dict[str, Any]], words_per_sec: float) -> dict[str, Any]:
-    """Estimation Avatar IA sur les VRAIES durées Omni de chaque plan (fiche voix) ; un plan
-    client compte la SOMME de ses tours."""
-    return cost.estimate_avatar_omni([_shot_omni_seconds(s, words_per_sec) for s in shots])
+def _omni_estimate(shots: list[dict[str, Any]], words_per_sec: Any, max_spoken: int | None = None) -> dict[str, Any]:
+    """Estimation Avatar IA sur les VRAIES durées Omni de chaque plan (débit de la fiche voix du
+    speaker de chaque tour) ; un plan à tours compte la SOMME de ses tours."""
+    return cost.estimate_avatar_omni([_shot_omni_seconds(s, words_per_sec, max_spoken) for s in shots])
 
 
 def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:
-    """Estimation Omni des plans à animer, avec la fiche voix TELLE QUE STOCKÉE sur la pub."""
-    wps = config_app.voice_words_per_sec(ad.get("voice_profile"))
-    return cost.estimate_avatar_omni([pipeline.clip_omni_seconds(c, wps) for c in clips])
+    """Estimation Omni des plans à animer, avec les fiches voix TELLES QUE STOCKÉES sur la pub."""
+    wps_for, max_spoken = pipeline.ad_wps_for(ad), pipeline.omni_max_spoken()
+    return cost.estimate_avatar_omni(
+        [pipeline.clip_omni_seconds(c, None, wps_for=wps_for, max_spoken=max_spoken) for c in clips])
 
 
 def _norm_currency(value: str) -> str:
     return "eur" if str(value or "").strip().lower() == "eur" else "usd"
+
+
+def _omni_max_spoken() -> int:
+    """Max d'un tour Omni PARLÉ (s) : setting `omni_max_spoken_clip_seconds`, sinon 8, borné 3..10."""
+    return pipeline.omni_max_spoken()
 
 
 def _omni_daily_limit() -> int:
@@ -2026,7 +2297,8 @@ async def _save_ref_images(
     return saved
 
 
-_REF_KINDS = {"visage", "visage2", "produit", "decor", "style"}   # visage2 = personnage 2
+# visage = visage1 (anciennes pubs) ; visage1..visage4 = personnages 1..4 (Avatar IA).
+_REF_KINDS = {"visage", "visage1", "visage2", "visage3", "visage4", "produit", "decor", "style"}
 
 # Phrase type pour l'échantillon de voix (jalon 5) — courte, neutre, pour juger le timbre.
 _VOICE_SAMPLE_TEXT = "Bonjour, voici un aperçu de ma voix pour vos publicités."

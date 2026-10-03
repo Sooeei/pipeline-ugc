@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from . import claude_code, config_app, cost, providers
+from . import claude_code, config_app, cost, omni_timing, providers
 from .providers import ProviderConfig
 
 # --- System prompt (collé tel quel, ne pas reformuler) ---
@@ -1362,17 +1362,31 @@ def _avatar_omni_manual_shots(
     return shots
 
 
+def _styled_prompt_image(prompt: str, style: str) -> str:
+    """Prompt image des modes manuel / ancien auto : style 3D → le réalisme photo est remplacé
+    par la phrase 3D (adultes, visages génériques) ; jamais de nom de studio."""
+    out = scrub_brand_names(prompt)
+    if config_app.normalize_omni_style(style) != "3d":
+        return out
+    out = re.sub(r"\bphoto-?realistic\b|\bphotoreal\b", "3D animated", out, flags=re.IGNORECASE)
+    return f"{out}\n{_IMAGE_SUFFIX_3D}"
+
+
 def generate_avatar_omni_plan(
     cfg: ProviderConfig, script: str, persona: str = "", product: str = "",
-    ambiance: str = "", manual: bool = False, words_per_sec: float | None = None,
+    ambiance: str = "", manual: bool = False, words_per_sec: float | None = None, *,
+    voice_profiles: Any = None, style: str = config_app.DEFAULT_OMNI_STYLE,
+    max_spoken: int = config_app.OMNI_MAX_SPOKEN_CLIP_SECONDS,
 ) -> dict[str, Any]:
     """Plan « Avatar IA (Omni) » : {"ad", "shots":[{n, prompt_image, prompt_motion, dialogue,
-    refs_needed}], "warnings", "max_words"}.
+    refs_needed, (manuel) segments, duration_s}], "warnings", "max_words"}.
 
-    - AUTO : le cerveau DÉCOUPE le script VERBATIM (concat == script) en plans ≤ MAX_WORDS mots
-      (MAX_WORDS = omni_max_words(débit de la fiche voix)), coupés sur des phrases entières.
-    - MANUEL : chaque bloc (ligne vide / « --- ») = un plan, rien n'est coupé ni modifié.
-    `warnings` = plans dont le dialogue dépasse MAX_WORDS. persona/produit/ambiance guident le
+    - AUTO (ancien, conservé pour la rétrocompat ; le nouveau mode auto passe par
+      generate_avatar_omni_auto_doc → document client) : le cerveau DÉCOUPE le script VERBATIM
+      (concat == script) en plans ≤ MAX_WORDS mots, coupés sur des phrases entières.
+    - MANUEL : chaque bloc (ligne vide / « --- ») = un plan, rien n'est coupé ni modifié ; ses
+      TOURS sont chronométrés (omni_timing, ≤ max_spoken s, personnage 1, débit de sa fiche voix).
+    `warnings` = tours (manuel) ou plans (auto) trop longs. persona/produit/ambiance guident le
     VISUEL seulement ; le nettoyage des marques ne touche jamais le dialogue."""
     if not script.strip():
         raise BrainError("Script vide : écris le texte que ton avatar doit dire.")
@@ -1400,7 +1414,20 @@ def generate_avatar_omni_plan(
         # Garde-fou verbatim MANUEL : les dialogues des plans == MES segments, mot pour mot.
         if [s["dialogue"] for s in shots] != segments:
             raise BrainVerbatimError("Découpage manuel altéré (les dialogues ne sont pas mes segments).")
-        warn_kind = "bloc"
+        # Chronométreur : chaque bloc = des tours ≤ max_spoken s (personnage 1, sa fiche voix).
+        max_spoken = config_app.clamp_omni_max_spoken(max_spoken)
+        wps_for = _wps_resolver(voice_profiles, words_per_sec)
+        timer_warnings: list[str] = []
+        for sh in shots:
+            sh["segments"] = time_turns(
+                [{"text": sh["dialogue"], "speaker": 1, "pendant": sh["prompt_motion"]}],
+                wps_for=wps_for, max_spoken=max_spoken)
+            sh["duration_s"] = sum(int(t["seconds"]) for t in sh["segments"])
+            sh["prompt_image"] = _styled_prompt_image(sh["prompt_image"], style)
+            timer_warnings.extend(turn_warnings(sh["n"], sh["segments"]))
+        return {"ad": _slug(script), "shots": shots, "warnings": timer_warnings,
+                "max_words": turn_max_words(max_spoken, wps_for(1)), "max_spoken": max_spoken,
+                "style": config_app.normalize_omni_style(style)}
     else:
         if cfg.dry_run:
             raw = _simulate_avatar_omni_plan(script, product, ambiance, max_words)
@@ -1438,6 +1465,8 @@ def generate_avatar_omni_plan(
             )
         shots = aligned
         warn_kind = "phrase"
+        for sh in shots:
+            sh["prompt_image"] = _styled_prompt_image(str(sh["prompt_image"]), style)
     warnings = [
         w for s in shots
         if (w := omni_dialogue_warning(int(s["n"]), str(s["dialogue"]), max_words, warn_kind))
@@ -1450,10 +1479,11 @@ def generate_avatar_omni_plan(
 # ANGLAIS. Claude les traduit UNE fois au moment du plan ; la version anglaise est stockée sur la
 # pub et c'est elle (jamais le texte français brut) qui part dans prompt_image et le prompt Omni.
 PERSONAS_TRANSLATE_SYSTEM_PROMPT = """\
-Tu traduis en ANGLAIS des descriptions de PERSONNAGES rédigées en français, pour des prompts de
-génération d'image et de vidéo photoréalistes. Garde TOUS les détails visuels (genre, âge, tenue,
-accessoires, coiffure, attitude), n'ajoute RIEN, n'invente rien, formule courte et descriptive
-(30 mots maximum par personnage), sans guillemets. Une description vide reste vide.
+Tu traduis en ANGLAIS des descriptions de PERSONNAGES (jusqu'à 4) rédigées en français, pour des
+prompts de génération d'image et de vidéo. Garde TOUS les détails visuels (genre, âge, tenue,
+accessoires, coiffure, attitude ; pour un objet ou une mascotte qui parle : forme, couleurs,
+matière, yeux, bouche), n'ajoute RIEN, n'invente rien, formule courte et descriptive (30 mots
+maximum par personnage), sans guillemets. Une description vide reste vide.
 Réponds UNIQUEMENT avec le JSON : {"characters":[{"id":1,"en":"..."},{"id":2,"en":"..."}]}
 """
 
@@ -1462,30 +1492,71 @@ def _clean_persona(text: str) -> str:
     return " ".join(str(text or "").replace('"', "").split())[:300]
 
 
-def translate_personas(cfg: ProviderConfig, persona1: str, persona2: str = "") -> dict[str, str]:
-    """{p1, p2, p1_en, p2_en} : descriptions FR saisies + leur traduction ANGLAISE (Claude).
+def _input_characters(
+    persona1: str = "", persona2: str = "", characters: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Personnages saisis → [{n, name, fr, speaks}] (1..4, triés). `characters` prime ; sinon
+    l'ancienne saisie persona1 (parle) / persona2 (muet)."""
+    out: dict[int, dict[str, Any]] = {}
+    if characters is not None:
+        for c in characters:
+            if not isinstance(c, dict):
+                continue
+            try:
+                n = int(c.get("n") or 0)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= config_app.OMNI_MAX_CHARACTERS:
+                name = " ".join(str(c.get("name") or "").split())[:40]
+                fr = _clean_persona(str(c.get("fr") or ""))
+                if name or fr:
+                    out[n] = {"n": n, "name": name, "fr": fr, "speaks": bool(c.get("speaks", n == 1))}
+    else:
+        for n, txt in ((1, persona1), (2, persona2)):
+            fr = _clean_persona(txt)
+            if fr:
+                out[n] = {"n": n, "name": "", "fr": fr, "speaks": n == 1}
+    return [out[n] for n in sorted(out)]
 
-    Simulation : aucune API → la « traduction » reprend le texte saisi (fichiers de démo)."""
-    p1, p2 = _clean_persona(persona1), _clean_persona(persona2)
-    out = {"p1": p1, "p2": p2, "p1_en": "", "p2_en": ""}
-    if not p1 and not p2:
-        return out
+
+def characters_of(personas: Any) -> list[dict[str, Any]]:
+    """Personnages d'une pub (forme normalize_personas ou ancienne {p1, p2, p1_en, p2_en})."""
+    return config_app.normalize_personas(personas or {})["characters"]
+
+
+def translate_personas(
+    cfg: ProviderConfig, persona1: str = "", persona2: str = "", *,
+    characters: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Personnages saisis en FR (jusqu'à 4) + leur traduction ANGLAISE (Claude) → forme
+    config_app.normalize_personas : {"characters": [{n, name, fr, en, speaks}], "p1", "p2",
+    "p1_en", "p2_en"}. `characters` = [{n, name, fr, speaks}] ; sinon persona1 (parle) /
+    persona2 (muet). Simulation : aucune API → la « traduction » reprend le texte saisi."""
+    chars = _input_characters(persona1, persona2, characters)
+
+    def _result(en_by_n: dict[int, str]) -> dict[str, Any]:
+        return config_app.normalize_personas({"characters": [
+            {**c, "en": en_by_n.get(c["n"], "")} for c in chars]})
+
+    todo = [c for c in chars if c["fr"]]
+    if not todo:
+        return _result({})
     if cfg.dry_run:
-        out.update(p1_en=p1, p2_en=p2)
-        return out
+        return _result({c["n"]: c["fr"] for c in todo})
     if not _brain_ready(cfg):
         raise BrainError("Clé Anthropic manquante (Réglages).")
-    user = (
-        f"PERSONNAGE 1 : {p1 or '(vide)'}\nPERSONNAGE 2 : {p2 or '(vide)'}\n\n"
-        "Traduis (JSON strict)."
+    lines = "\n".join(
+        f"PERSONNAGE {c['n']}{' (' + c['name'] + ')' if c['name'] else ''} : {c['fr'] or '(vide)'}"
+        for c in chars
     )
+    user = f"{lines}\n\nTraduis (JSON strict, un objet par personnage, avec son id)."
     last_transient = False
     for attempt in range(_attempts(cfg)):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
             items = _call_claude_json(
-                cfg, system=PERSONAS_TRANSLATE_SYSTEM_PROMPT, user=user, max_tokens=800,
+                cfg, system=PERSONAS_TRANSLATE_SYSTEM_PROMPT, user=user, max_tokens=1200,
                 result_key="characters", empty_msg="traduction des personnages vide",
             )
         except _BrainRetryable:
@@ -1497,25 +1568,47 @@ def translate_personas(cfg: ProviderConfig, persona1: str, persona2: str = "") -
                 continue
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
         by_id = {str(it.get("id")): _clean_persona(it.get("en", "")) for it in items if isinstance(it, dict)}
-        en1, en2 = by_id.get("1", ""), by_id.get("2", "")
-        if (p1 and not en1) or (p2 and not en2):
+        en = {c["n"]: by_id.get(str(c["n"]), "") for c in todo}
+        if not all(en.values()):
             continue   # traduction incomplète → on relance
-        out.update(p1_en=en1 if p1 else "", p2_en=en2 if p2 else "")
-        return out
+        return _result(en)
     if last_transient:
         raise BrainProviderError(_OVERLOADED_MESSAGE)
     raise BrainError("Traduction des personnages impossible pour le moment — réessaie.")
 
 
-def personas_brief(persona: str, personas: dict[str, str] | None) -> str:
+def personas_brief(persona: str, personas: Any) -> str:
     """Brief persona envoyé au cerveau (modes auto / manuel) : persona libre + personnages EN."""
-    p = personas or {}
     parts = [persona.strip()] if persona and persona.strip() else []
-    if p.get("p1_en"):
-        parts.append(f"PERSONNAGE 1 (celui qui PARLE) : {p['p1_en']}")
-    if p.get("p2_en"):
-        parts.append(f"PERSONNAGE 2 (MUET, présent dans le cadre) : {p['p2_en']}")
+    for c in characters_of(personas):
+        desc = c["en"] or c["fr"]
+        if not desc:
+            continue
+        name = f" ({c['name']})" if c["name"] else ""
+        role = "celui qui PARLE" if c["speaks"] else "MUET, présent dans le cadre"
+        parts.append(f"PERSONNAGE {c['n']}{name} — {role} : {desc}")
     return "\n".join(parts)
+
+
+def _characters_text(personas: Any) -> str:
+    """Liste des personnages pour les prompts Claude (n, nom, parle/muet, description EN)."""
+    lines = []
+    for c in characters_of(personas):
+        name = f" « {c['name']} »" if c["name"] else ""
+        role = "parle" if c["speaks"] else "muet"
+        lines.append(f"- PERSONNAGE {c['n']}{name} ({role}) : {c['en'] or c['fr'] or '(non décrit)'}")
+    return "\n".join(lines) or "- PERSONNAGE 1 (parle) : (non décrit — déduis-le du script)"
+
+
+def _style_text(style: str) -> str:
+    """Consigne de STYLE pour les prompts Claude (bible, réalisateur, visuels)."""
+    if config_app.normalize_omni_style(style) == "3d":
+        return (f"3D ANIMÉ — {config_app.OMNI_3D_STYLE}. Personnages stylisés de film d'animation ; "
+                "un personnage peut être un OBJET ou une MASCOTTE qui parle (avec bouche et yeux) ; "
+                "tout humain reste ADULTE, jamais d'enfant, visage générique. Ne cite JAMAIS de "
+                "studio ni d'œuvre (pas de nom de studio d'animation).")
+    return ("RÉALISTE — photo UGC smartphone, personnes PHOTORÉALISTES, ADULTES, visages génériques "
+            "(jamais une personne réelle ou célèbre).")
 
 
 # ============================================================ AVATAR IA — DÉCOUPAGE CLIENT
@@ -1647,31 +1740,33 @@ def _split_block_dialogue(dialogue: str, max_words: int) -> list[str]:
 
 
 AVATAR_OMNI_BIBLE_SYSTEM_PROMPT = """\
-Tu es directeur artistique de pubs UGC vidéo verticales 9:16. À partir des PERSONNAGES, du PRODUIT,
-de l'AMBIANCE et de TOUTES les DIRECTIONS DE MISE EN SCÈNE du client (en français), tu écris UNE
-« BIBLE VISUELLE » EN ANGLAIS qui fixe ce qui ne doit JAMAIS changer d'un plan à l'autre.
+Tu es directeur artistique de pubs UGC vidéo verticales 9:16. À partir des PERSONNAGES (jusqu'à 4,
+chacun « parle » ou « muet »), du PRODUIT, de l'AMBIANCE, du STYLE et de TOUTES les DIRECTIONS DE
+MISE EN SCÈNE du client (en français), tu écris UNE « BIBLE VISUELLE » EN ANGLAIS qui fixe ce qui ne
+doit JAMAIS changer d'un plan à l'autre.
 
 RÈGLES :
-- "character1" : le personnage qui PARLE — genre, âge apparent, morphologie, coiffure, tenue
-  COMPLÈTE (haut, bas, couleurs, matières), accessoires. Sois EXPLICITE sur les deux mains quand
-  c'est pertinent (ex. « black nitrile gloves on BOTH hands »). Personne PHOTORÉALISTE, ADULTE,
-  visage générique (jamais une personne réelle ou célèbre).
-- "character2" : le personnage MUET (s'il existe) — même précision. Si un personnage n'est pas
-  décrit mais que les directions en ont besoin (« la modèle », « elle »…), PROPOSE-le toi-même ; s'il
-  n'y a vraiment qu'une personne, laisse "character2" vide.
+- "character1" … "character4" : un champ par PERSONNAGE N (même numéro) — genre, âge apparent,
+  morphologie, coiffure, tenue COMPLÈTE (haut, bas, couleurs, matières), accessoires. Sois EXPLICITE
+  sur les deux mains quand c'est pertinent (ex. « black nitrile gloves on BOTH hands »). Humains :
+  ADULTES, visage générique (jamais une personne réelle ou célèbre). Champ vide si le personnage
+  n'existe pas. Si un personnage n'est pas décrit mais que les directions en ont besoin (« la
+  modèle », « elle »…), PROPOSE-le toi-même au numéro libre suivant.
+- STYLE : respecte la consigne de style fournie. En 3D animée, un personnage peut être un objet ou
+  une mascotte qui parle (décris sa forme, ses couleurs, ses yeux et sa bouche) ; jamais de nom de
+  studio ni d'œuvre.
 - "set" : le décor fixe (lieu, comptoir/table, miroir, fond, lumière), cohérent avec les directions.
 - "product" : description visuelle FIXE du produit du client (forme du flacon, couleurs, bouchon,
   étiquette), identique partout. AUCUNE marque tierce (un produit concurrent cité par le client
   devient « a generic foundation bottle », jamais son nom).
 - "positions" : placement PAR DÉFAUT des personnages et objets dans le cadre (qui est à gauche /
   à droite, debout / assis, distance à la caméra, où sont posés les produits).
-- PHOTOS DE RÉFÉRENCE : si une photo « visage » (personnage 1), « visage2 » (personnage 2) ou
+- PHOTOS DE RÉFÉRENCE : si une photo « visageN » (personnage N ; « visage » = personnage 1) ou
   « produit » est jointe, la description correspondante COMMENCE EXACTEMENT par
-  « EXACTLY the person in the "visage" reference photo » (resp. « EXACTLY the person in the
-  "visage2" reference photo », « EXACTLY the product in the "produit" reference photo »), puis ne
-  décrit QUE ce qui est VISIBLE sur la photo (genre, âge apparent, cheveux, carnation…) + la
-  tenue / les accessoires DEMANDÉS par les directions (gants…). N'invente AUCUN trait qui
-  contredirait la photo (âge, genre, couleur de cheveux…).
+  « EXACTLY the person in the "<type>" reference photo » (ex. « EXACTLY the person in the "visage2"
+  reference photo », « EXACTLY the product in the "produit" reference photo »), puis ne décrit QUE
+  ce qui est VISIBLE sur la photo (genre, âge apparent, cheveux, carnation…) + la tenue / les
+  accessoires DEMANDÉS par les directions (gants…). N'invente AUCUN trait qui contredirait la photo.
 - PERSONNAGES NON DÉCRITS : DÉDUIS l'âge, le genre et le profil du SCRIPT (dialogues ET
   directions) : « peaux matures », « mes plis », « mes rides », « depuis la ménopause » → une
   femme de 55 ans et plus ; « je maquille », « mon salon » → un(e) maquilleur(se) professionnel(le) ;
@@ -1680,16 +1775,18 @@ RÈGLES :
   « peaux matures »).
 - Aucun texte à l'image, aucun nom de marque autre que celui du produit du client.
 Réponds UNIQUEMENT avec le JSON :
-  {"bible":{"character1":"...","character2":"...","set":"...","product":"...","positions":"..."}}
+  {"bible":{"character1":"...","character2":"...","character3":"","character4":"","set":"...",
+  "product":"...","positions":"..."}}
 """
 
 AVATAR_OMNI_CLIENT_SYSTEM_PROMPT = """\
 Tu es directeur photo de pubs UGC vidéo verticales 9:16. Le CLIENT a DÉJÀ découpé sa pub : UN
-BLOC = UN PLAN = UNE image de départ = UNE vidéo continue. Pour chaque plan tu reçois son dialogue
-découpé en SEGMENTS (déjà fixés : tu NE les changes PAS) et SA DIRECTION DE MISE EN SCÈNE (🎬, en
-français). Une BIBLE VISUELLE (personnages, décor, produit, positions) est fournie : elle est
-ajoutée AUTOMATIQUEMENT à chaque image, tu ne la recopies PAS. Ta SEULE tâche : TRADUIRE fidèlement
-la direction en anglais. Tu n'INVENTES PAS de mise en scène.
+BLOC = UN PLAN = UNE image de départ = UNE vidéo continue, faite de TOURS Google Omni enchaînés
+(un tour = un clip de quelques secondes ; le CODE chronomètre chaque tour). Pour chaque plan tu
+reçois son DIALOGUE (verbatim) et SA DIRECTION DE MISE EN SCÈNE (🎬, en français). Une BIBLE
+VISUELLE (personnages, décor, produit, positions) est ajoutée AUTOMATIQUEMENT à chaque image : tu ne
+la recopies PAS. Ta tâche : TRADUIRE fidèlement la direction en anglais et la RÉPARTIR sur les
+tours. Tu n'INVENTES PAS de mise en scène.
 
 RÈGLES :
 - LA DIRECTION DU CLIENT PRIME sur toute règle par défaut : si elle demande de compter sur les
@@ -1698,34 +1795,78 @@ RÈGLES :
 - "shot" : ce qui est PROPRE à l'image de départ de CE plan (cadrage, qui fait quoi au début,
   objets en main, écarts par rapport aux positions par défaut) + l'ÉTAT DE CONTINUITÉ en cours.
   Ne répète pas la bible. En anglais, 60 mots maximum.
-- "motions" : EXACTEMENT UN mouvement par SEGMENT, dans l'ordre : la PROGRESSION de l'action du
-  bloc répartie sur les segments en suivant le dialogue de chaque segment (ex. quatre gestes
-  comptés sur les doigts : chaque segment montre les gestes nommés dans SON texte ; « quatre
-  affaires » → les quatre doigts levés dans le segment qui le dit). Gestes, regards, expressions,
-  réactions du personnage muet, caméra sobre. Pas de dialogue dedans. En anglais.
+- "turns" : la vidéo du plan découpée en TOURS, dans l'ordre :
+  • "text" : tranche EXACTE et CONTIGUË du dialogue, copiée MOT POUR MOT (rien d'ajouté, rien
+    d'enlevé, mêmes [crochets]) ; la concaténation des "text" non vides = le dialogue COMPLET du
+    plan. "" pour un tour MUET (gestes seuls, sans parole). Coupe en fin de phrase.
+  • "speaker" : numéro du personnage qui DIT ce texte. UN SEUL personnage parle par tour : si la
+    réplique change de locuteur, c'est un NOUVEAU tour. Seuls les personnages marqués « parle »
+    peuvent parler ; les autres réagissent sans jamais parler.
+  • "avant" / "pendant" / "apres" : ce qui se passe AVANT la réplique, PENDANT qu'elle est dite,
+    APRÈS elle (anglais, court : gestes, regards, réactions des autres personnages ; caméra sobre).
+  • "beats_avant" / "beats_apres" : gestes qui PRENNENT DU TEMPS avant / après la réplique, choisis
+    UNIQUEMENT dans cette liste de clés : {{BEATS}}. Un geste fait PENDANT la parole ne va PAS dans
+    les beats. Un geste long (appliquer, transformation, déplacement) va de préférence dans un tour
+    muet dédié.
+  • "mute" : true pour un tour sans parole.
+  Un tour parlé reste court (≈ {{MAX_WORDS}} mots maximum) : sinon, coupe-le en plusieurs tours.
 - CONTINUITÉ : un changement d'état (maquillage appliqué sur une moitié du visage, personne
   assise, produit posé, bras croisés…) reste vrai dans TOUS les plans suivants tant que la direction
   ne l'annule pas. Écris l'état à la fin du plan dans "state_after" (anglais, court).
 - AUCUNE marque tierce : un produit concurrent cité par le client devient « a generic foundation
   bottle ». Aucun texte incrusté, sous-titre ni watermark (l'étiquette du produit du client peut
-  être lisible si la direction le demande).
-- "refs_needed" : photos de référence utiles parmi "visage" (personnage 1), "visage2"
-  (personnage 2), "produit", "decor", "style" ; [] si aucune.
+  être lisible si la direction le demande). Aucun nom de studio d'animation.
+- "refs_needed" : photos de référence utiles parmi "visage1".."visage4" (visage du personnage N
+  quand il est À L'IMAGE dans ce plan), "produit", "decor", "style" ; [] si aucune.
 Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
-  {"shots":[{"shot":"...","motions":["...","..."],"state_after":"...","refs_needed":["visage"]}]}
+  {"shots":[{"shot":"...","turns":[{"text":"...","speaker":1,"avant":"...","pendant":"...",
+  "apres":"...","beats_avant":[],"beats_apres":["sourire"],"mute":false}],"state_after":"...",
+  "refs_needed":["visage1"]}]}
 """
 
-_BIBLE_KEYS = ("character1", "character2", "set", "product", "positions")
+AVATAR_OMNI_DIRECTOR_SYSTEM_PROMPT = """\
+Tu es RÉALISATEUR de pubs UGC vidéo verticales 9:16. Tu reçois le SCRIPT (ce que disent les
+personnages, VERBATIM), un brief, les PERSONNAGES (jusqu'à 4, chacun « parle » ou « muet »), le
+produit, le décor et le STYLE. Tu écris le DÉCOUPAGE de la pub en BLOCS PAR IDÉE (hook, problème,
+révélation, démo, preuve, offre, CTA…), comme un document de découpage client.
+
+RÈGLES :
+- "dialogue" : tranche EXACTE et CONTIGUË du script, copiée MOT POUR MOT (même ponctuation, mêmes
+  tournures, mêmes fautes, mêmes [crochets]) ; la concaténation des dialogues, dans l'ordre, = le
+  script ENTIER. Ne reformule, ne corrige, n'ajoute, n'enlève, ne réordonne RIEN.
+- Un bloc = une idée = un plan continu (≈ 5 à 25 s de parole). Le hook est son propre bloc.
+- "title" : titre court en MAJUSCULES (ex. « HOOK », « LE PROBLÈME », « LA PREUVE », « CTA »).
+- "direction" : mise en scène EN FRANÇAIS, concrète et filmable : qui est à l'image, QUI PARLE
+  (nom ou « personnage N » ; un seul personnage parle à la fois), gestes calés sur des MOTS précis
+  du dialogue (« sur "quatre affaires", il lève quatre doigts »), regards, produit à l'image ou non
+  (et en main de qui), changements d'état (assis, produit posé…). Pas de texte à l'écran, pas de
+  musique. Un personnage MUET réagit (regards, expressions) mais ne parle jamais.
+- STYLE : respecte la consigne de style fournie (3D animée : personnages stylisés, objets ou
+  mascottes qui parlent possibles ; humains toujours ADULTES, visages génériques ; aucun nom de
+  studio).
+Réponds UNIQUEMENT avec le JSON :
+  {"blocks":[{"title":"HOOK","dialogue":"...","direction":"..."}]}
+"""
+
+_CHARACTER_KEYS = tuple(f"character{i}" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1))
+_BIBLE_KEYS = (*_CHARACTER_KEYS, "set", "product", "positions")
 _BIBLE_LABELS = {
-    "character1": "CHARACTER 1 (speaks)", "character2": "CHARACTER 2 (silent)", "set": "SET",
-    "product": "PRODUCT", "positions": "DEFAULT POSITIONS",
+    **{f"character{i}": f"CHARACTER {i}" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1)},
+    "set": "SET", "product": "PRODUCT", "positions": "DEFAULT POSITIONS",
 }
 _IMAGE_SUFFIX = ("Photorealistic vertical 9:16 smartphone UGC video frame, natural light. "
                  "No text, no captions, no watermark.")
+_IMAGE_SUFFIX_3D = (f"{config_app.OMNI_3D_STYLE}, vertical 9:16 frame. Any human is an adult with a "
+                    "generic face, no children. No text, no captions, no watermark.")
+
+
+def image_suffix(style: str = config_app.DEFAULT_OMNI_STYLE) -> str:
+    """Dernière ligne de chaque prompt image Avatar IA selon le style de la pub."""
+    return _IMAGE_SUFFIX_3D if config_app.normalize_omni_style(style) == "3d" else _IMAGE_SUFFIX
 
 
 def normalize_bible(raw: Any) -> dict[str, str]:
-    """Bible visuelle {character1, character2, set, product, positions} (dict ou JSON)."""
+    """Bible visuelle {character1..character4, set, product, positions} (dict ou JSON)."""
     data: Any = raw
     if isinstance(raw, str | bytes):
         try:
@@ -1744,9 +1885,11 @@ def bible_text(bible: Any) -> str:
     return "VISUAL BIBLE (identical in every shot) —\n" + "\n".join(lines)
 
 
-def compose_client_prompt_image(bible: Any, shot: str) -> str:
-    """prompt_image d'un plan client = bible (injectée par le CODE) + ce qui change dans ce plan."""
-    return f"{bible_text(bible)}\n\nTHIS SHOT: {(shot or '').strip()}\n{_IMAGE_SUFFIX}"
+def compose_client_prompt_image(bible: Any, shot: str, style: str = config_app.DEFAULT_OMNI_STYLE) -> str:
+    """prompt_image d'un plan client = bible (injectée par le CODE) + ce qui change dans ce plan
+    + la ligne de style (réaliste UGC ou 3D animée). Aucun nom de studio (scrub_brand_names)."""
+    shot_txt = scrub_brand_names((shot or "").strip())
+    return f"{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}\n{image_suffix(style)}"
 
 
 def _third_party_names(dialogues: list[str]) -> list[str]:
@@ -1769,18 +1912,28 @@ def _scrub_third_party(text: str, names: list[str]) -> str:
     return scrub_brand_names(out)
 
 
-# Photos de référence lues par Claude pour écrire la bible (vision) : type → (champ, préfixe).
-BIBLE_PHOTO_KINDS = ("visage", "visage2", "produit")
-_PHOTO_PREFIX = {
-    "visage": ("character1", 'EXACTLY the person in the "visage" reference photo'),
-    "visage2": ("character2", 'EXACTLY the person in the "visage2" reference photo'),
-    "produit": ("product", 'EXACTLY the product in the "produit" reference photo'),
-}
-_PHOTO_LABEL = {
-    "visage": 'Photo de référence "visage" = PERSONNAGE 1 (celui qui parle) :',
-    "visage2": 'Photo de référence "visage2" = PERSONNAGE 2 (muet) :',
-    "produit": 'Photo de référence "produit" = PRODUIT DU CLIENT :',
-}
+# Photos de référence lues par Claude pour écrire la bible (vision). « visage » (anciennes pubs)
+# = personnage 1 ; « visage1 ».. « visage4 » = personnages 1..4 ; « produit » = produit du client.
+BIBLE_PHOTO_KINDS = ("visage", *config_app.OMNI_FACE_KINDS, "produit")
+
+
+def _photo_target(kind: str) -> tuple[str, str] | None:
+    """Type de photo → (champ de la bible, préfixe imposé) ; None si le type n'est pas lu."""
+    k = str(kind or "").strip().lower()
+    if k == "produit":
+        return "product", 'EXACTLY the product in the "produit" reference photo'
+    n = config_app.omni_face_index(k)
+    if n:
+        return f"character{n}", f'EXACTLY the person in the "{k}" reference photo'
+    return None
+
+
+def _photo_label(kind: str) -> str:
+    k = str(kind or "").strip().lower()
+    if k == "produit":
+        return 'Photo de référence "produit" = PRODUIT DU CLIENT :'
+    return f'Photo de référence "{k}" = PERSONNAGE {config_app.omni_face_index(k)} :'
+
 
 # Indices de profil tirés du SCRIPT (dialogues + directions), quand les personnages sont vides.
 _MATURE_RE = re.compile(
@@ -1831,74 +1984,105 @@ def _hints_text(hints: dict[str, str]) -> str:
 
 def enforce_photo_prefixes(bible: dict[str, str], photo_kinds: list[str]) -> dict[str, str]:
     """Une photo de ce type existe → la description commence par « EXACTLY the … in the "<type>"
-    reference photo » (imposé par le CODE, même si Claude l'a oublié)."""
+    reference photo » (imposé par le CODE, même si Claude l'a oublié). Une seule photo par champ
+    (la première : « visage » et « visage1 » visent tous deux le personnage 1)."""
     out = dict(bible)
+    done: set[str] = set()
     for kind in dict.fromkeys(photo_kinds):
-        if kind not in _PHOTO_PREFIX:
+        target = _photo_target(kind)
+        if target is None or target[0] in done:
             continue
-        key, prefix = _PHOTO_PREFIX[kind]
+        key, prefix = target
+        done.add(key)
         cur = (out.get(key) or "").strip()
         if not cur.startswith(prefix):
             out[key] = prefix + (f" — {cur}" if cur else "")
     return out
 
 
+def _apply_bible_style(bible: dict[str, str], style: str) -> dict[str, str]:
+    """Style 3D : la phrase de style ouvre le décor (donc chaque prompt image) ; aucun nom de
+    studio dans aucun champ (scrub_brand_names)."""
+    out = {k: scrub_brand_names(v) if v else v for k, v in bible.items()}
+    if config_app.normalize_omni_style(style) == "3d" and config_app.OMNI_3D_STYLE not in out.get("set", ""):
+        out["set"] = f"{config_app.OMNI_3D_STYLE}. {out.get('set', '')}".strip()
+    return out
+
+
 def _canned_bible(
-    personas: dict[str, str] | None, product: str, ambiance: str,
+    personas: Any, product: str, ambiance: str,
     blocks: list[dict[str, Any]] | None = None, photo_kinds: list[str] | None = None,
+    style: str = config_app.DEFAULT_OMNI_STYLE,
 ) -> dict[str, str]:
     """Bible déterministe (simulation) : champs saisis, sinon profil DÉDUIT du script (jamais un
     « créateur UGC » générique quand le script dit autre chose) ; préfixes des photos présentes."""
-    p1, p2 = _client_characters_en(personas)
+    descs = {c["n"]: c["en"] or c["fr"] for c in characters_of(personas)}
     hints = script_profile_hints(blocks or [])
-    p1, p2 = p1 or hints["character1"], p2 or hints["character2"]
+    descs[1] = descs.get(1) or hints["character1"]
+    descs[2] = descs.get(2) or hints["character2"]
+    present = [n for n in sorted(descs) if descs[n]]
     scene, _ = _parse_context(ambiance)
+    if len(present) > 1:
+        sides = ["on the left", "on the right", "in the background on the left",
+                 "in the background on the right"]
+        positions = "; ".join(f"Character {n} stands {sides[i % 4]}, facing the camera"
+                              for i, n in enumerate(present))
+        positions += "; products rest on the counter between them"
+    else:
+        positions = "Character 1 faces the camera, centered, products on the counter in front"
     bible = {
-        "character1": p1 or "an adult person, generic ordinary face, casual neutral outfit",
-        "character2": p2,
+        "character1": descs[1] or "an adult person, generic ordinary face, casual neutral outfit",
+        **{f"character{n}": descs.get(n, "") for n in range(2, config_app.OMNI_MAX_CHARACTERS + 1)},
         "set": scene or "a bright, clean bathroom counter with a large mirror, soft daylight",
         "product": product.strip() or "the product bottle exactly as in the reference photos",
-        "positions": ("Character 1 stands on the left facing the camera; Character 2 sits on the "
-                      "right, facing the camera; products rest on the counter between them")
-        if p2 else "Character 1 faces the camera, centered, products on the counter in front",
+        "positions": positions,
     }
-    return enforce_photo_prefixes(bible, photo_kinds or [])
+    return _apply_bible_style(enforce_photo_prefixes(bible, photo_kinds or []), style)
 
 
 def generate_client_bible(
-    cfg: ProviderConfig, blocks: list[dict[str, Any]], personas: dict[str, str] | None,
-    product: str, ambiance: str, photos: list[dict[str, str]] | None = None,
+    cfg: ProviderConfig, blocks: list[dict[str, Any]], personas: Any,
+    product: str, ambiance: str, photos: list[dict[str, str]] | None = None, *,
+    style: str = config_app.DEFAULT_OMNI_STYLE,
 ) -> dict[str, str]:
-    """Bible visuelle EN (UNE fois par pub). Claude VOIT les photos « visage », « visage2 »,
-    « produit » (vision) et lit les DIALOGUES : rien d'inventé ni de contradictoire. Simulation →
-    bible déterministe (champs, indices du script, préfixes des photos présentes)."""
-    photos = [ph for ph in (photos or []) if ph.get("kind") in BIBLE_PHOTO_KINDS]
-    kinds = [ph["kind"] for ph in photos]
+    """Bible visuelle EN (UNE fois par pub). Claude VOIT les photos « visage1..4 » (ou « visage »,
+    « visage2 ») et « produit » (vision) et lit les DIALOGUES : rien d'inventé ni de
+    contradictoire. Simulation → bible déterministe (champs, indices du script, préfixes des
+    photos présentes). Style 3D : phrase de style dans le décor, jamais de nom de studio."""
+    photos = [ph for ph in (photos or []) if str(ph.get("kind") or "").lower() in BIBLE_PHOTO_KINDS]
+    kinds = [str(ph["kind"]).lower() for ph in photos]
     if cfg.dry_run:
-        return _canned_bible(personas, product, ambiance, blocks, kinds)
-    p = personas or {}
+        return _canned_bible(personas, product, ambiance, blocks, kinds, style)
+    chars = {c["n"]: c for c in characters_of(personas)}
+    char_lines = []
+    for n in sorted(set(chars) | {1, 2}):
+        c = chars.get(n)
+        role = "parle" if (c["speaks"] if c else n == 1) else "muet"
+        name = f" « {c['name']} »" if c and c["name"] else ""
+        desc = (c["en"] or c["fr"]) if c else ""
+        char_lines.append(f"PERSONNAGE {n}{name} ({role}) : {desc or '(non décrit — déduis-le du script)'}")
     directions = "\n".join(f"[Bloc {b['block_n']}] {b['direction'] or '(aucune)'}" for b in blocks)
     dialogues = "\n".join(f"[Bloc {b['block_n']}] {b['dialogue']}" for b in blocks)
     joined = ", ".join(f'"{k}"' for k in dict.fromkeys(kinds)) or "aucune"
     user = (
+        f"STYLE : {_style_text(style)}\n"
         f"PHOTOS DE RÉFÉRENCE JOINTES : {joined}\n"
-        f"PERSONNAGE 1 (parle) : {p.get('p1_en') or p.get('p1') or '(non décrit — déduis-le du script)'}\n"
-        f"PERSONNAGE 2 (muet) : {p.get('p2_en') or p.get('p2') or '(non décrit — déduis-le du script)'}\n"
+        + "\n".join(char_lines) + "\n"
         f"INDICES DÉDUITS DU SCRIPT :\n{_hints_text(script_profile_hints(blocks))}\n"
         f"PRODUIT DU CLIENT : {product.strip() or '(non précisé — déduis-le des directions)'}\n"
         f"AMBIANCE / DÉCOR : {ambiance or '(non précisé)'}\n\n"
-        f"DIALOGUES (dits par le personnage 1, dans l'ordre) :\n{dialogues}\n\n"
+        f"DIALOGUES (dans l'ordre) :\n{dialogues}\n\n"
         f"DIRECTIONS DU CLIENT (toutes, dans l'ordre) :\n{directions}\n\nÉcris la bible (JSON strict)."
     )
-    images = [{"label": _PHOTO_LABEL[ph["kind"]], "media_type": ph["media_type"], "data": ph["data"]}
-              for ph in photos]
+    images = [{"label": _photo_label(k), "media_type": ph["media_type"], "data": ph["data"]}
+              for k, ph in zip(kinds, photos, strict=True)]
     last_transient = False
     for attempt in range(_attempts(cfg)):
         if attempt > 0:
             _brain_backoff_sleep(attempt - 1)
         try:
             data = _call_claude_data(cfg, system=AVATAR_OMNI_BIBLE_SYSTEM_PROMPT, user=user,
-                                     max_tokens=2000, images=images or None)
+                                     max_tokens=2500, images=images or None)
         except _BrainRetryable:
             last_transient = False
             continue
@@ -1909,62 +2093,97 @@ def generate_client_bible(
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
         bible = normalize_bible(data.get("bible"))
         if bible["character1"] and bible["set"]:
-            return enforce_photo_prefixes(bible, kinds)
+            return _apply_bible_style(enforce_photo_prefixes(bible, kinds), style)
     if last_transient:
         raise BrainProviderError(_OVERLOADED_MESSAGE)
     raise BrainError("La bible visuelle n'a pas pu être écrite — réessaie.")
 
 
-def _client_characters_en(personas: dict[str, str] | None) -> tuple[str, str]:
-    p = personas or {}
-    return str(p.get("p1_en") or ""), str(p.get("p2_en") or "")
+def _speaking_numbers(personas: Any) -> list[int]:
+    """Numéros des personnages qui PARLENT (au moins le personnage 1)."""
+    return [c["n"] for c in characters_of(personas) if c["speaks"]] or [1]
 
 
 def _call_claude_client_visuals(
     cfg: ProviderConfig, product_name: str, ambiance: str, plans: list[dict[str, Any]],
     persona: str = "", attempt: int = 0, *, bible: dict[str, str] | None = None,
-    state_before: str = "",
+    state_before: str = "", personas: Any = None, style: str = config_app.DEFAULT_OMNI_STYLE,
+    max_words: int = 17,
 ) -> list[dict[str, Any]]:
     lines = []
     for p in plans:
         title = f" — {p['block_title']}" if p.get("block_title") else ""
-        segs = "\n".join(f"    [segment {i}] {s['text']}" for i, s in enumerate(p["segments"], 1))
         lines.append(
-            f"[Plan {p['label']}] BLOC {p['block_n']}{title} — {len(p['segments'])} segment(s)\n"
+            f"[Plan {p['label']}] BLOC {p['block_n']}{title}\n"
             f"  Direction du client (FR) : {p['direction'] or '(aucune — cadrage sobre face caméra)'}\n"
-            f"  Segments du dialogue (fixés, ne pas changer) :\n{segs}"
+            f"  Dialogue (VERBATIM, à répartir sur les tours sans rien changer) :\n    {p['dialogue']}"
         )
     correction = (
-        "\n\n[RAPPEL] Un objet par plan, dans l'ordre, et EXACTEMENT un mouvement par segment. "
-        "JSON strict. Traduis la direction, n'invente rien." if attempt > 0 else ""
+        "\n\n[RAPPEL] Un objet par plan, dans l'ordre ; les \"text\" des tours sont des tranches "
+        "EXACTES du dialogue ; un seul speaker par tour. JSON strict. Traduis la direction, "
+        "n'invente rien." if attempt > 0 else ""
     )
     user = (
         f"{bible_text(bible)}\n\n"
+        f"STYLE : {_style_text(style)}\n"
+        f"PERSONNAGES :\n{_characters_text(personas)}\n"
         f"ÉTAT DE CONTINUITÉ AVANT CE LOT : {state_before or '(début de la vidéo)'}\n"
         f"PRODUIT (visuel seulement) : {product_name.strip() or '(voir la bible)'}\n"
         f"AMBIANCE / DÉCOR : {ambiance or '(voir la bible)'}\n\n"
         "PLANS :\n" + "\n".join(lines) + f"\n\nÉcris UNIQUEMENT le JSON (un objet par plan).{correction}"
     )
-    n_segs = sum(len(p["segments"]) for p in plans)
+    system = (AVATAR_OMNI_CLIENT_SYSTEM_PROMPT
+              .replace("{{BEATS}}", ", ".join(config_app.OMNI_BEATS))
+              .replace("{{MAX_WORDS}}", str(max_words)))
+    n_words = sum(config_app.spoken_word_count(p["dialogue"]) for p in plans)
     return _call_claude_json(
-        cfg, system=AVATAR_OMNI_CLIENT_SYSTEM_PROMPT, user=user,
-        max_tokens=min(16000, 1500 + 350 * len(plans) + 250 * n_segs), result_key="shots",
+        cfg, system=system, user=user,
+        max_tokens=min(16000, 2000 + 500 * len(plans) + 40 * n_words), result_key="shots",
         empty_msg="visuels du découpage client manquants",
     )
 
 
-def _client_canned_visual(plan: dict[str, Any], product: str) -> tuple[str, list[str], list[str]]:
+def _client_canned_turns(plan: dict[str, Any], speaker: int = 1) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Visuel déterministe (simulation, ou IA indisponible) : la direction du client est reprise
-    telle quelle (rien d'inventé) ; un mouvement par segment, dans l'ordre."""
+    telle quelle (rien d'inventé) ; UN tour parlé (le chronométreur le redécoupe), speaker par
+    défaut ; réfs = visages décrits (client_refs filtre)."""
     direction = plan.get("direction") or "sober framing, facing the camera"
-    k = len(plan["segments"])
     shot = f"Client staging at the start of this shot (French, follow it exactly): {direction}"
-    motions = [
-        f"Segment {i}/{k} — continue the client staging in order (French), matching this line: "
-        f"{direction}" for i in range(1, k + 1)
-    ]
-    refs = ["visage", "visage2"] if plan.get("has_p2") else ["visage"]   # « produit » : client_refs
-    return shot, motions, refs
+    turns = [{"text": plan["dialogue"], "speaker": speaker, "pendant": ""}]
+    refs = [config_app.omni_face_kind(n) for n in plan.get("faces") or [1]]
+    return shot, turns, refs
+
+
+def _canned_pendant(i: int, k: int, direction: str) -> str:
+    return (f"Segment {i}/{k} — continue the client staging in order (French), matching this line: "
+            f"{direction or 'sober framing, facing the camera'}")
+
+
+def client_turns_from_claude(
+    raw_turns: Any, dialogue: str, speakers: list[int],
+) -> list[dict[str, Any]] | None:
+    """Tours renvoyés par Claude → tours canoniques dont les textes parlés sont des tranches
+    EXACTES du dialogue du bloc (realign_to_script), speaker valide (sinon le 1er qui parle).
+    None si Claude a modifié le texte (l'appelant se rabat sur le découpage du code)."""
+    if not isinstance(raw_turns, list):
+        return None
+    turns = [omni_timing.normalize_turn(t) for t in raw_turns if isinstance(t, dict)]
+    for t in turns:
+        for k in ("interaction_id", "mp4_path", "done", "motion"):
+            t.pop(k, None)
+    spoken = [t for t in turns if not t["mute"]]
+    if not spoken:
+        return None
+    aligned = realign_to_script(dialogue, [t["text"] for t in spoken])
+    if aligned is None:
+        return None
+    for t, txt in zip(spoken, aligned, strict=True):
+        t["text"] = txt
+    valid = speakers or [1]
+    for t in turns:
+        if t["speaker"] not in valid:
+            t["speaker"] = valid[0]
+    return turns
 
 
 # Direction qui dit EXPLICITEMENT qu'un seul personnage est à l'image (→ pas de « visage2 »).
@@ -1992,24 +2211,36 @@ def bible_shows_product(bible: dict[str, str]) -> bool:
 
 def client_refs(
     refs: list[str], bible: dict[str, str], direction: str, product: str = "",
-    has_third_party: bool = False,
+    has_third_party: bool = False, *, speakers: list[int] | None = None, first_speaker: int = 1,
 ) -> list[str]:
-    """Réfs d'un plan client, imposées par le CODE (Claude peut en oublier) :
-    - « visage » dès que la bible décrit le personnage 1 ; « visage2 » aussi dès qu'elle décrit
-      le personnage 2 — sauf si la direction dit explicitement qu'un seul est à l'image ;
+    """Réfs d'un plan client, imposées par le CODE (Claude peut en oublier). Visages en
+    « visage1 ».. « visage4 » (« visage » / « visage2 » d'anciennes réponses acceptés) :
+    - personnages 1 et 2 dès que la bible les décrit ; 3 et 4 s'ils PARLENT dans ce plan ou si
+      Claude les a demandés — sauf direction « seul à l'image » : alors seuls ceux qui parlent ;
+    - ordre : le speaker du 1er tour d'abord, puis par numéro ;
     - « produit » dès que le flacon est À L'IMAGE : la bible le place dans le cadre, ou la
       direction le mentionne (ou nomme le produit) — sauf si le bloc cite une marque tierce et
       que la direction met un flacon en main sans nommer le produit du client (ce flacon est
       alors le produit concurrent : la photo du produit du client serait fausse).
     Les autres réfs (décor, style) proposées par Claude sont gardées."""
-    out = [r for r in refs if r not in ("visage", "visage2", "produit")]
+    rn = [config_app.normalize_omni_ref_kind(r) for r in refs]
+    out = [r for r in rn if r not in config_app.OMNI_FACE_KINDS and r != "produit"]
     d = direction or ""
     solo = bool(_CLIENT_SOLO_RE.search(d))
-    heads: list[str] = []
-    if bible.get("character1"):
-        heads.append("visage")
-    if bible.get("character2") and not solo:
-        heads.append("visage2")
+    spk = set(speakers or [])
+    faces: list[int] = []
+    for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
+        if not bible.get(f"character{n}"):
+            continue
+        if solo:
+            keep = n in (spk or {1})
+        elif n <= 2:
+            keep = True
+        else:
+            keep = n in spk or config_app.omni_face_kind(n) in rn
+        if keep:
+            faces.append(n)
+    faces.sort(key=lambda n: (n != first_speaker, n))
     names_product = bool(product.strip()) and product.strip().lower() in d.lower()
     bottle_in_direction = bool(_CLIENT_BOTTLE_RE.search(d))
     third_party_in_hand = has_third_party and bottle_in_direction and not names_product
@@ -2017,7 +2248,8 @@ def client_refs(
         wants_product = False
     else:
         wants_product = (names_product or bottle_in_direction or bible_shows_product(bible)
-                         or ("produit" in refs and not has_third_party))
+                         or ("produit" in rn and not has_third_party))
+    heads = [config_app.omni_face_kind(n) for n in faces]
     return heads + (["produit"] if wants_product else []) + out
 
 
@@ -2032,46 +2264,99 @@ def _client_segments(dialogue: str, max_words: int, wps: float | None) -> list[d
     ]
 
 
+def _wps_resolver(voice_profiles: Any, words_per_sec: float | None):  # noqa: ANN202
+    """Débit (mots/s) par speaker : fiche voix du speaker, sinon `words_per_sec`, sinon fiche du
+    personnage 1, sinon débit par défaut."""
+    profiles = config_app.normalize_voice_profiles(voice_profiles) if voice_profiles else {}
+
+    def wps_for(speaker: int) -> float:
+        prof = profiles.get(str(int(speaker or 1)))
+        if prof:
+            return config_app.voice_words_per_sec(prof)
+        if words_per_sec and words_per_sec > 0:
+            return float(words_per_sec)
+        if "1" in profiles:
+            return config_app.voice_words_per_sec(profiles["1"])
+        return config_app.GROK_WORDS_PER_SEC
+
+    return wps_for
+
+
+def turn_max_words(max_spoken: int, wps: float) -> int:
+    """Mots max d'un tour parlé SANS geste : floor((max − LEAD_IN − TAIL) × débit)."""
+    return omni_timing.omni_turn_timing("", wps=wps, max_spoken=max_spoken)["max_words"]
+
+
+def time_turns(
+    turns: list[dict[str, Any]], *, wps_for: Any, max_spoken: int,
+) -> list[dict[str, Any]]:
+    """Chronomètre et redécoupe (omni_timing.split_turns) ; « motion » = « pendant » (rétrocompat
+    des anciens segments {text, motion})."""
+    out = omni_timing.split_turns(turns, wps_for=wps_for, max_spoken=max_spoken)
+    for t in out:
+        t["motion"] = t.get("pendant") or ""
+    return out
+
+
+def turn_warnings(label: Any, turns: list[dict[str, Any]]) -> list[str]:
+    """Avertissements PAR TOUR chronométré : « X mots (max N) » quand la réplique ne tient pas dans
+    le tour (max N calculé avec ses gestes), gestes inconnus, tour muet trop long…"""
+    out: list[str] = []
+    for j, t in enumerate(turns, 1):
+        words = config_app.spoken_word_count(str(t.get("text") or ""))
+        mw = t.get("max_words")
+        msgs: list[str] = []
+        skip: tuple[str, ...] = ()
+        if not t.get("mute") and isinstance(mw, int) and words > mw:
+            msgs.append(f"{words} mots (max {mw}) — phrase trop longue pour un tour, raccourcis-la.")
+            skip = ("Tour trop long", "Phrase trop longue")
+        msgs += [w for w in (t.get("warnings") or []) if not (skip and str(w).startswith(skip))]
+        out.extend(f"Plan {label}, tour {j} : {m}" for m in dict.fromkeys(msgs))
+    return out
+
+
 def generate_avatar_omni_client_plan(
-    cfg: ProviderConfig, doc: str, personas: dict[str, str] | None = None, product: str = "",
+    cfg: ProviderConfig, doc: str, personas: Any = None, product: str = "",
     ambiance: str = "", words_per_sec: float | None = None,
-    photos: list[dict[str, str]] | None = None,
+    photos: list[dict[str, str]] | None = None, *, voice_profiles: Any = None,
+    style: str = config_app.DEFAULT_OMNI_STYLE,
+    max_spoken: int = config_app.OMNI_MAX_SPOKEN_CLIP_SECONDS,
 ) -> dict[str, Any]:
     """Plan « Avatar IA » en DÉCOUPAGE CLIENT : 1 BLOC = 1 PLAN = 1 image = 1 vidéo continue.
 
-    Le dialogue du bloc est découpé en SEGMENTS (≤ MAX_WORDS, phrases entières, verbatim) : un
-    tour Omni par segment (extension de la vidéo). Une BIBLE visuelle (Claude, une fois) est
-    injectée par le code dans chaque prompt_image ; Claude traduit la direction 🎬 en « shot » +
-    un mouvement par segment. `photos` = photos de réf (visage / visage2 / produit) que Claude
-    VOIT pour écrire la bible. Renvoie {"ad", "shots", "warnings" (répliques trop longues, PAR
-    TOUR), "alerts" (durée, crochets, IA indisponible), "max_words", "blocks", "bible"}."""
+    La vidéo du plan = des TOURS Omni enchaînés (1er tour + extensions). Claude traduit la
+    direction 🎬 et répartit le dialogue en tours {text, speaker, avant, pendant, apres, beats,
+    mute} ; le CODE vérifie le verbatim (sinon découpage du code), chronomètre chaque tour avec
+    le débit de la fiche voix de son speaker et redécoupe les tours trop longs (omni_timing :
+    ≤ max_spoken s parlé, ≤ 10 s muet, UN seul speaker par tour). Une BIBLE visuelle (Claude, une
+    fois, avec les photos) est injectée par le code dans chaque prompt_image ; style réaliste ou
+    3D. Renvoie {"ad", "shots", "warnings" (PAR TOUR), "alerts" (durée, crochets, IA
+    indisponible), "max_words", "max_spoken", "style", "blocks", "bible"}."""
     if len(doc or "") > MAX_SCRIPT_CHARS:
         raise BrainError(
             f"Document trop long ({len(doc)} caractères, max {MAX_SCRIPT_CHARS}). "
             "Découpe-le en plusieurs pubs."
         )
+    style = config_app.normalize_omni_style(style)
+    max_spoken = config_app.clamp_omni_max_spoken(max_spoken)
     blocks = parse_client_doc(doc)
     if len(blocks) > config_app.OBJET_MAX_SHOTS:
         raise BrainError(
             f"{len(blocks)} blocs (> {config_app.OBJET_MAX_SHOTS}). Réduis le document ou fais "
             "plusieurs pubs."
         )
-    max_words = config_app.omni_max_words(words_per_sec)
-    p2 = bool(_client_characters_en(personas)[1])
-    plans: list[dict[str, Any]] = []
-    for b in blocks:
-        segs = _client_segments(b["dialogue"], max_words, words_per_sec)
-        if not segs:   # défense en profondeur : les segments sont des tranches du bloc
-            raise BrainVerbatimError(f"Bloc {b['block_n']} : découpage refusé (texte altéré).")
-        plans.append({
-            "dialogue": b["dialogue"], "segments": segs, "block_n": b["block_n"],
-            "block_sub": 1, "block_count": 1, "block_title": b["title"],
-            "timecode": b["timecode"], "direction": b["direction"],
-            "label": str(b["block_n"]), "has_p2": p2,
-        })
-    bible = generate_client_bible(cfg, blocks, personas, product, ambiance, photos)
+    wps_for = _wps_resolver(voice_profiles, words_per_sec)
+    speakers = _speaking_numbers(personas)
+    max_words = turn_max_words(max_spoken, wps_for(speakers[0]))
+    bible = generate_client_bible(cfg, blocks, personas, product, ambiance, photos, style=style)
     names = _third_party_names([b["dialogue"] for b in blocks])
     bible = {k: _scrub_third_party(v, names) if v else v for k, v in bible.items()}
+    faces = [n for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1) if bible.get(f"character{n}")]
+    plans = [{
+        "dialogue": b["dialogue"], "block_n": b["block_n"], "block_sub": 1, "block_count": 1,
+        "block_title": b["title"], "timecode": b["timecode"], "direction": b["direction"],
+        "label": str(b["block_n"]), "faces": faces,
+    } for b in blocks]
     warnings: list[str] = []
     alerts: list[str] = []
     visuals: list[dict[str, Any]] = []
@@ -2080,7 +2365,8 @@ def generate_avatar_omni_client_plan(
             raise BrainError("Clé Anthropic manquante (Réglages).")
         state = ""
         for batch in _batches(plans, config_app.BRAIN_SHOTS_PER_BATCH):
-            call = functools.partial(_call_claude_client_visuals, bible=bible, state_before=state)
+            call = functools.partial(_call_claude_client_visuals, bible=bible, state_before=state,
+                                     personas=personas, style=style, max_words=max_words)
             try:
                 got = _one_visuals_batch_with_retry(
                     cfg, product, ambiance, batch, "", _BRAIN_MAX_ATTEMPTS, call=call,  # type: ignore[arg-type]
@@ -2100,22 +2386,34 @@ def generate_avatar_omni_client_plan(
     shots: list[dict[str, Any]] = []
     for i, p in enumerate(plans):
         v = visuals[i] if i < len(visuals) else {}
-        c_shot, c_motions, c_refs = _client_canned_visual(p, product)
+        c_shot, c_turns, c_refs = _client_canned_turns(p, speakers[0])
         shot = _scrub_third_party(str(v.get("shot") or "").strip() or c_shot, names)
-        motions = [str(m).strip() for m in (v.get("motions") or []) if str(m).strip()]
-        if len(motions) != len(p["segments"]):
-            motions = (motions + c_motions[len(motions):])[: len(p["segments"])]
-        segs = [{**s, "motion": _scrub_third_party(m, names)} for s, m in zip(p["segments"], motions, strict=True)]
+        turns = client_turns_from_claude(v.get("turns"), p["dialogue"], speakers) if v else None
+        canned = turns is None
+        if canned and v:
+            alerts.append(f"Plan {p['label']} : répartition en tours non conforme au dialogue "
+                          "(texte modifié) — découpage automatique par phrases appliqué.")
+        timed = time_turns(turns or c_turns, wps_for=wps_for, max_spoken=max_spoken)
+        for j, t in enumerate(timed, 1):
+            if canned and not t["mute"]:
+                t["pendant"] = _canned_pendant(j, len(timed), p["direction"])
+            for k in ("avant", "pendant", "apres"):
+                t[k] = _scrub_third_party(t[k], names) if t[k] else ""
+            t["motion"] = t["pendant"]
         rn = _norm_refs_needed(v.get("refs_needed")) if v else None
+        spoken_by = [t["speaker"] for t in timed if not t["mute"]]
         refs = client_refs(rn if rn is not None else c_refs, bible, p["direction"], product,
-                           has_third_party=bool(_third_party_names([p["dialogue"]])))
-        total = sum(int(s["seconds"]) for s in segs)
+                           has_third_party=bool(_third_party_names([p["dialogue"]])),
+                           speakers=sorted(set(spoken_by)),
+                           first_speaker=spoken_by[0] if spoken_by else speakers[0])
+        total = sum(int(t["seconds"]) for t in timed)
+        first_motion = next((t["pendant"] for t in timed if t["pendant"]), "")
         shots.append({
             "n": i + 1, "shot_prompt": shot,
-            "prompt_image": compose_client_prompt_image(bible, shot),
-            "prompt_motion": segs[0]["motion"],
+            "prompt_image": compose_client_prompt_image(bible, shot, style),
+            "prompt_motion": first_motion,
             "refs_needed": refs,
-            "dialogue": p["dialogue"], "segments": segs, "duration_s": total,
+            "dialogue": p["dialogue"], "segments": timed, "duration_s": total,
             **{k: p[k] for k in ("block_n", "block_sub", "block_count", "block_title",
                                  "timecode", "direction", "label")},
         })
@@ -2124,13 +2422,13 @@ def generate_avatar_omni_client_plan(
                 f"Plan {p['label']} : ~{total} s de vidéo (max {config_app.OMNI_MAX_TOTAL_SECONDS} s "
                 "par vidéo étendue) — coupe ce bloc en deux dans le document du client."
             )
-        warnings.extend(omni_turn_warnings(p["label"], [s["text"] for s in segs], max_words))
+        warnings.extend(turn_warnings(p["label"], timed))
     bw = bracket_values_warning([s["dialogue"] for s in shots])
     if bw:
         alerts.append(bw)
     return {"ad": _slug(blocks[0]["title"] or blocks[0]["dialogue"]), "shots": shots,
             "warnings": warnings, "alerts": alerts, "max_words": max_words,
-            "blocks": len(blocks), "bible": bible}
+            "max_spoken": max_spoken, "style": style, "blocks": len(blocks), "bible": bible}
 
 
 def omni_turn_warnings(label: Any, turns: list[str], max_words: int) -> list[str]:
@@ -2159,6 +2457,170 @@ def client_resegment(dialogue: str, old_segments: list[dict[str, Any]], max_word
             f"Segment {i + 1}/{k} — continue the client staging in order (French): "
             f"{direction or 'sober framing, facing the camera'}")
     return segs
+
+
+def client_retime(
+    text: str, old_turns: list[dict[str, Any]], *, wps_for: Any,
+    max_spoken: int = config_app.OMNI_MAX_SPOKEN_CLIP_SECONDS, direction: str = "",
+) -> list[dict[str, Any]]:
+    """Dialogue d'un plan modifié → nouveaux tours chronométrés (verbatim). Les tours MUETS sont
+    gardés à leur place ; les tours parlés sont remplis, dans l'ordre, par les nouveaux morceaux
+    (speaker et gestes conservés par position ; un morceau en plus reprend le dernier speaker).
+    La progression d'animation repart de zéro."""
+    max_spoken = config_app.clamp_omni_max_spoken(max_spoken)
+    old = [omni_timing.normalize_turn(t) for t in old_turns or []]
+    for t in old:
+        for k in ("interaction_id", "mp4_path", "done", "motion", "seconds", "max_words", "warnings"):
+            t.pop(k, None)
+    spoken_old = [t for t in old if not t["mute"]]
+    first = spoken_old[0]["speaker"] if spoken_old else 1
+    default_pendant = (f"continue the client staging (French): "
+                       f"{direction or 'sober framing, facing the camera'}")
+    pieces = [t["text"] for t in omni_timing.split_turns(
+        [{"text": text or "", "speaker": first}], wps_for=wps_for, max_spoken=max_spoken)
+        if not t["mute"]]
+    rebuilt: list[dict[str, Any]] = []
+    queue = list(pieces)
+    last: dict[str, Any] = {"speaker": first, "pendant": default_pendant}
+    for t in old:
+        if t["mute"]:
+            rebuilt.append(dict(t))
+            continue
+        if not queue:
+            continue
+        last = t
+        rebuilt.append({**t, "text": queue.pop(0), "pendant": t["pendant"] or default_pendant})
+    for txt in queue:
+        rebuilt.append({"text": txt, "speaker": last["speaker"],
+                        "pendant": last.get("pendant") or default_pendant})
+    if not pieces:
+        rebuilt = [t for t in rebuilt if t["mute"]]
+    return time_turns(rebuilt, wps_for=wps_for, max_spoken=max_spoken) if rebuilt else []
+
+
+def _director_doc(blocks: list[dict[str, str]]) -> str:
+    """Blocs {title, dialogue, direction} → document au format du découpage client :
+    « BLOC N · — TITRE » / dialogue VERBATIM (ligne suivante : jamais confondu avec le titre) /
+    « 🎬 direction »."""
+    parts = []
+    for i, b in enumerate(blocks, 1):
+        title = " ".join(str(b.get("title") or "").replace("—", " ").upper().split())
+        title = re.sub(r"[🎬\[\]]", "", title).strip() or f"IDÉE {i}"
+        direction = " ".join(str(b.get("direction") or "").replace(_CLIENT_DIRECTION_MARK, " ").split())
+        parts.append(f"BLOC {i} · — {title}\n{str(b['dialogue']).strip()}\n"
+                     f"{_CLIENT_DIRECTION_MARK} {direction or 'Le personnage 1 parle face caméra, gestes sobres.'}")
+    return "\n\n".join(parts) + "\n"
+
+
+def _simulated_director_blocks(script: str, personas: Any, product: str) -> list[dict[str, str]]:
+    """Découpage réalisateur DÉTERMINISTE (simulation) : hook = 1re phrase, puis blocs de 2
+    phrases, dernier bloc « CTA » ; directions génériques FR. Dialogues = tranches exactes."""
+    sentences = omni_timing.split_sentences(script)
+    if not sentences:
+        return []
+    groups = [sentences[0]] + [" ".join(sentences[i:i + 2]) for i in range(1, len(sentences), 2)]
+    aligned = realign_to_script(script, groups) or [script.strip()]
+    chars = characters_of(personas)
+    speaker = next((c for c in chars if c["speaks"]), None)
+    who = (speaker["name"] if speaker and speaker["name"] else "Le personnage 1")
+    silent = [c["name"] or f"le personnage {c['n']}" for c in chars if not c["speaks"]]
+    react = (f" {', '.join(silent)[:1].upper()}{', '.join(silent)[1:]} réagit en silence "
+             "(regards, expressions), sans parler.") if silent else ""
+    prod = " Le produit est posé à l'image, étiquette visible." if product.strip() else ""
+    out = []
+    for i, d in enumerate(aligned):
+        if i == 0:
+            title = "HOOK"
+        elif i == len(aligned) - 1 and len(aligned) >= 3:
+            title = "CTA"
+        else:
+            title = f"IDÉE {i + 1}"
+        out.append({"title": title, "dialogue": d,
+                    "direction": f"{who} parle face caméra, gestes sobres.{react}{prod}"})
+    return out
+
+
+def generate_avatar_omni_auto_doc(
+    cfg: ProviderConfig, script: str, *, brief: str = "", personas: Any = None,
+    product: str = "", ambiance: str = "", style: str = config_app.DEFAULT_OMNI_STYLE,
+) -> dict[str, Any]:
+    """MODE AUTO : Claude « réalisateur » écrit le DOCUMENT CLIENT (blocs par idée, dialogue
+    VERBATIM, direction 🎬 en français) → {"doc", "blocks", "warnings"}. Rien n'est généré
+    ensuite tant que le document n'est pas relu et validé (pipeline client identique).
+    Garde-fou : les dialogues de parse_client_doc(doc) reconstituent le script à l'identique
+    (realign_to_script), sinon BrainVerbatimError. Simulation : document déterministe."""
+    if not (script or "").strip():
+        raise BrainError("Script vide : écris le texte que tes personnages doivent dire.")
+    if len(script) > MAX_SCRIPT_CHARS:
+        raise BrainError(
+            f"Script trop long ({len(script)} caractères, max {MAX_SCRIPT_CHARS}). "
+            "Découpe-le en plusieurs pubs."
+        )
+    style = config_app.normalize_omni_style(style)
+    if cfg.dry_run:
+        blocks = _simulated_director_blocks(script, personas, product)
+    else:
+        if not _brain_ready(cfg):
+            raise BrainError("Clé Anthropic manquante (Réglages).")
+        user = (
+            f"STYLE : {_style_text(style)}\n"
+            f"BRIEF : {brief.strip() or '(aucun)'}\n"
+            f"PERSONNAGES :\n{_characters_text(personas)}\n"
+            f"PRODUIT : {product.strip() or '(non précisé)'}\n"
+            f"DÉCOR / AMBIANCE : {ambiance.strip() or '(non précisé)'}\n\n"
+            f"SCRIPT (VERBATIM — à découper SANS rien changer) :\n{script}\n\n"
+            "Écris le découpage (JSON strict)."
+        )
+        blocks = []
+        verbatim_fail = last_transient = False
+        for attempt in range(_attempts(cfg)):
+            if attempt > 0:
+                _brain_backoff_sleep(attempt - 1)
+            try:
+                items = _call_claude_json(
+                    cfg, system=AVATAR_OMNI_DIRECTOR_SYSTEM_PROMPT, user=user,
+                    max_tokens=min(16000, 2500 + 3 * len(script)), result_key="blocks",
+                    empty_msg="découpage réalisateur vide",
+                )
+            except _BrainRetryable:
+                last_transient = False
+                continue
+            except Exception as exc:  # noqa: BLE001 - 529/réseau : on relance ; auth/400 : stop
+                if _is_transient_brain_error(exc):
+                    last_transient = True
+                    continue
+                raise BrainProviderError(_friendly_anthropic(exc)) from exc
+            items = [it for it in items if isinstance(it, dict) and str(it.get("dialogue") or "").strip()]
+            aligned = realign_to_script(script, [str(it["dialogue"]) for it in items]) if items else None
+            if aligned is None:
+                verbatim_fail = True
+                continue
+            blocks = [{"title": str(it.get("title") or ""), "dialogue": d,
+                       "direction": str(it.get("direction") or "")}
+                      for it, d in zip(items, aligned, strict=True)]
+            break
+        if not blocks:
+            if verbatim_fail:
+                raise BrainVerbatimError(
+                    "Découpage refusé : les dialogues du réalisateur ne reconstituent pas ton script "
+                    "à l'identique (texte modifié ou inventé) — relance."
+                )
+            if last_transient:
+                raise BrainProviderError(_OVERLOADED_MESSAGE)
+            raise BrainError("Le découpage automatique a échoué — réessaie.")
+    if not blocks:
+        raise BrainError("Le découpage automatique n'a produit aucun bloc.")
+    if len(blocks) > config_app.OBJET_MAX_SHOTS:
+        raise BrainError(f"{len(blocks)} blocs (> {config_app.OBJET_MAX_SHOTS}). Raccourcis le script.")
+    doc = _director_doc(blocks)
+    parsed = parse_client_doc(doc)
+    if realign_to_script(script, [b["dialogue"] for b in parsed]) is None:
+        raise BrainVerbatimError("Document généré non conforme au script (texte altéré) — relance.")
+    warnings = []
+    bw = bracket_values_warning([b["dialogue"] for b in parsed])
+    if bw:
+        warnings.append(bw)
+    return {"doc": doc, "blocks": len(parsed), "warnings": warnings}
 
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")

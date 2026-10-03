@@ -473,7 +473,10 @@ OMNI_MAX_TOTAL_SECONDS = 40
 # "auto" = on mesure sa durée (ffprobe) et on concatène les tours si ce n'est que la suite.
 # Forçable : "full" (garder le dernier fichier) / "continuation" (toujours concaténer).
 OMNI_EXTENSION_RETURNS = "auto"
-OMNI_SEND_DURATION = False            # response_format.duration non documenté → non envoyé
+# Durée envoyée à Google : VideoResponseFormat.duration (string « Ns », 3–10 s) — doc API
+# https://ai.google.dev/api/interactions-api ; aussi sur les tours d'extension (response_format
+# répété à chaque tour). Sans elle, Omni choisit lui-même (≈ 6 s) et coupe les répliques longues.
+OMNI_SEND_DURATION = True
 OMNI_MAX_INPUT_IMAGES = 2              # image du plan + ancre
 OMNI_TIER1_WINDOW_USD = 10.0           # plafond Google Tier 1 : 10 $ / 10 min
 # Quota Google Omni : requêtes PAR JOUR (1 tour = 1 requête). Réglable (setting
@@ -495,6 +498,73 @@ OMNI_DEFAULT_CAMERA = (
 )
 OMNI_INTRO_GESTURE = "The person looks into the lens with a small natural breath and a slight smile"
 _VOICE_TEXT_MAX = 120                  # longueur max d'un champ texte de la fiche voix
+
+# ---------- Chronométreur des tours Omni (code déterministe, voir app/omni_timing.py) ----------
+# Gestes types → durée (s). Modifiable. Clé inconnue → OMNI_BEAT_UNKNOWN_S + avertissement.
+OMNI_BEATS: dict[str, float] = {
+    "regard": 0.5, "reaction": 0.5, "sourire": 0.5,
+    "pointer": 1.0, "designer": 1.0, "lever_main": 1.0,
+    "prendre": 1.5, "tendre": 1.5, "tourner_objet": 1.5,
+    "deposer_produit": 1.5,
+    "appliquer": 3.0, "transformation": 3.0,
+    "deplacement": 2.0, "se_lever": 2.0, "s_asseoir": 2.0,
+}
+OMNI_BEAT_UNKNOWN_S = 1.0
+OMNI_LEAD_IN = 0.5                     # respiration muette avant la réplique
+OMNI_TAIL_SILENCE = 0.7                # silence tenu après la réplique
+# Tour PARLÉ : le lip-sync se dégrade après ~6-7 s → 8 s max (réglable, setting
+# `omni_max_spoken_clip_seconds`, borné 3..10). Tour MUET (gestes seuls) : 10 s max.
+OMNI_MAX_SPOKEN_CLIP_SECONDS = 8
+OMNI_MAX_MUTE_CLIP_SECONDS = 10
+OMNI_BEATS_TO_MUTE_TURN_S = 3.0        # Σ gestes ≥ 3 s → sortis dans un tour muet séparé
+
+# ---------- Style d'une pub Avatar IA (ads.style) ----------
+OMNI_3D_STYLE = ("3D animated feature film style, stylized characters, soft skin shading, big "
+                 "expressive eyes, cinematic lighting")
+OMNI_STYLES: dict[str, dict[str, str]] = {
+    "realiste": {"label": "Réaliste (photo UGC)",
+                 "phrase": "Photorealistic vertical 9:16 smartphone UGC video frame, natural light"},
+    "3d": {"label": "3D animée (film d'animation)", "phrase": OMNI_3D_STYLE},
+}
+DEFAULT_OMNI_STYLE = "realiste"
+
+# ---------- Personnages Avatar IA (jusqu'à 4) ----------
+OMNI_MAX_CHARACTERS = 4
+# Réfs visage par personnage : visage1..visage4. Rétrocompat : « visage » (anciennes pubs) =
+# visage1 ; « visage2 » inchangé. Le type STOCKÉ reste celui reçu ; toute comparaison passe par
+# normalize_omni_ref_kind (ne pas changer normalize_refs_needed : partagé avec Objet / Mashup).
+OMNI_FACE_KINDS = tuple(f"visage{i}" for i in range(1, OMNI_MAX_CHARACTERS + 1))
+
+
+def normalize_omni_style(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in OMNI_STYLES else DEFAULT_OMNI_STYLE
+
+
+def normalize_omni_ref_kind(kind: object) -> str:
+    """Type de réf Avatar IA canonique : « visage » → « visage1 » ; le reste en minuscules."""
+    k = str(kind or "").strip().lower()
+    return "visage1" if k == "visage" else k
+
+
+def omni_face_kind(n: int) -> str:
+    """Type de réf du visage du personnage n (1..4)."""
+    return f"visage{int(n)}"
+
+
+def omni_face_index(kind: object) -> int:
+    """Numéro de personnage d'un type de réf visage (« visage » → 1, « visage3 » → 3), 0 sinon."""
+    k = normalize_omni_ref_kind(kind)
+    return int(k[6:]) if k in OMNI_FACE_KINDS else 0
+
+
+def clamp_omni_max_spoken(value: object) -> int:
+    """Max d'un tour parlé (setting) : entier borné [OMNI_MIN_CLIP_SECONDS, OMNI_MAX_CLIP_SECONDS]."""
+    try:
+        v = int(float(str(value)))
+    except (TypeError, ValueError):
+        return OMNI_MAX_SPOKEN_CLIP_SECONDS
+    return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, v))
 
 
 def spoken_word_count(text: str) -> int:
@@ -665,3 +735,76 @@ def ensure_dirs() -> None:
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     OBJET_DIR.mkdir(parents=True, exist_ok=True)
     _ensured_dirs.add(key)
+
+
+# ---------- Avatar IA : personnages 1..4 et fiches voix PAR personnage ----------
+def normalize_personas(raw: Any) -> dict[str, Any]:
+    """Personnages Avatar IA (JSON ou dict) → forme canonique :
+    {"characters": [{"n", "name", "fr", "en", "speaks"}] (1..4, triés, sans trou de numéro
+    obligatoire), "p1", "p2", "p1_en", "p2_en"} — les clés p1/p2 (anciennes pubs, 2 personnages)
+    sont LUES si "characters" manque, et toujours RÉÉCRITES pour la rétrocompat.
+    Par défaut : personnage 1 parle, les autres sont muets."""
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except (TypeError, ValueError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    chars: dict[int, dict[str, Any]] = {}
+    for c in data.get("characters") or []:
+        if not isinstance(c, dict):
+            continue
+        try:
+            n = int(c.get("n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= OMNI_MAX_CHARACTERS:
+            chars[n] = {
+                "n": n, "name": " ".join(str(c.get("name") or "").split())[:40],
+                "fr": str(c.get("fr") or "").strip(), "en": str(c.get("en") or "").strip(),
+                "speaks": bool(c.get("speaks", n == 1)),
+            }
+    for n in (1, 2):   # anciennes pubs : p1 (parle) / p2 (muet)
+        fr, en = str(data.get(f"p{n}") or "").strip(), str(data.get(f"p{n}_en") or "").strip()
+        if n not in chars and (fr or en):
+            chars[n] = {"n": n, "name": "", "fr": fr, "en": en, "speaks": n == 1}
+    ordered = [chars[n] for n in sorted(chars)]
+    by_n = {c["n"]: c for c in ordered}
+    return {
+        "characters": ordered,
+        "p1": by_n.get(1, {}).get("fr", ""), "p2": by_n.get(2, {}).get("fr", ""),
+        "p1_en": by_n.get(1, {}).get("en", ""), "p2_en": by_n.get(2, {}).get("en", ""),
+    }
+
+
+def normalize_voice_profiles(raw: Any, legacy: Any = None) -> dict[str, dict[str, str]]:
+    """Fiches voix PAR personnage {"1": profil normalisé, "3": …} (clés "1".."4"). Si le
+    personnage 1 n'a pas de fiche, `legacy` (ads.voice_profile, anciennes pubs) la fournit."""
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except (TypeError, ValueError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    out: dict[str, dict[str, str]] = {}
+    for k, v in data.items():
+        if str(k) in {str(i) for i in range(1, OMNI_MAX_CHARACTERS + 1)} and isinstance(v, (dict, str)):
+            out[str(k)] = normalize_voice_profile(v)
+    if "1" not in out and legacy:
+        out["1"] = normalize_voice_profile(legacy)
+    return dict(sorted(out.items()))
+
+
+def speaker_voice_profile(profiles: Any, speaker: int = 1, legacy: Any = None) -> dict[str, str]:
+    """Fiche voix du personnage qui parle ; repli : personnage 1, puis `legacy`, puis défaut."""
+    p = normalize_voice_profiles(profiles, legacy)
+    return p.get(str(int(speaker or 1))) or p.get("1") or normalize_voice_profile(legacy)
+
+
+def speaker_words_per_sec(profiles: Any, speaker: int = 1, legacy: Any = None) -> float:
+    """Débit (mots/s) de la fiche voix du speaker — sert au chronométreur."""
+    return voice_words_per_sec(speaker_voice_profile(profiles, speaker, legacy))

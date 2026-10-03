@@ -459,6 +459,20 @@ mark.ao-val { background: color-mix(in srgb, var(--warn) 25%, transparent); colo
 .obj-shot .ao-meta .dl { font-size: 12px; }
 .obj-shot .ao-err { font-size: 12px; color: var(--err); }
 
+/* Avatar IA : personnages 1..4, tours chronométrés, relecture */
+.ao-chars { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.ao-char-row { display: grid; grid-template-columns: 22px minmax(90px, 1fr) minmax(160px, 3fr) auto auto; gap: 6px; align-items: center; }
+.ao-char-row.hidden { display: none; }
+.ao-char-n { font-weight: 700; text-align: center; color: var(--muted, #8b95a1); }
+.ao-char-row select, .ao-char-row input { margin: 0; }
+#aoCharAddBtn { align-self: flex-start; }
+.ao-turn-badge { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); margin-left: 6px; }
+.ao-turn-badge.mute { color: var(--warn); border-color: var(--warn); }
+.ao-seg-gest { font-size: 12px; color: var(--muted, #8b95a1); }
+.ao-seg-warn { font-size: 12px; color: var(--warn); }
+#aoReviewDoc { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.ao-voice-extra-title { margin-top: 10px; }
+
 /* Moteur du cerveau (Réglages) */
 .engine-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .engine-box legend { padding: 0 6px; font-weight: 600; }

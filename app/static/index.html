@@ -370,7 +370,15 @@
           <p class="muted">Une personne IA photoréaliste (adulte, visage générique) dit ton script face caméra.
             Google Omni génère la vidéo <b>et</b> la voix en une passe.
             <span class="ao-flag">🇫🇷 voix FR expérimentale</span> (Google n'évalue officiellement que l'anglais).</p>
-          <h2>2. Ton script &amp; ta personne</h2>
+          <h2>2. Ton script &amp; tes personnages</h2>
+          <div class="ao-modes" role="radiogroup" aria-label="Style visuel">
+            <span class="lbl">Style :</span>
+            <label class="check"><input type="radio" name="aoStyle" id="aoStyleReal" value="realiste" checked /> Réaliste (photo UGC)</label>
+            <label class="check"><input type="radio" name="aoStyle" id="aoStyle3d" value="3d" /> 3D animée (film d'animation)</label>
+          </div>
+          <p class="muted aoStyleHint hidden" id="aoStyleHint" style="margin-top:-4px">3D animée : personnages
+            stylisés (grands yeux expressifs, éclairage cinéma). Un objet ou une mascotte peut parler (avec
+            bouche et yeux). Toujours des adultes, jamais de nom de studio.</p>
           <div class="ao-modes" role="radiogroup" aria-label="Mode de découpage">
             <span class="lbl">Découpage :</span>
             <label class="check"><input type="radio" name="aoMode" id="aoModeAuto" value="auto" checked /> Auto</label>
@@ -378,8 +386,10 @@
             <label class="check"><input type="radio" name="aoMode" id="aoModeClient" value="client" /> Découpage client</label>
           </div>
           <p class="muted" style="margin-top:-4px">
-            <span class="aoModeHint" data-mode="auto">Auto : le cerveau découpe le script en plans
-              (phrases entières, verbatim).</span>
+            <span class="aoModeHint" data-mode="auto">Auto : le cerveau (réalisateur) écrit un
+              <b>document de découpage</b> par idée (hook, problème, démo, preuve, offre, CTA…) avec le
+              dialogue verbatim et une mise en scène 🎬. Tu le <b>relis et le corriges</b> avant toute
+              image, puis « Valider le découpage ».</span>
             <span class="aoModeHint hidden" data-mode="manual">Manuel : sépare chaque plan par une
               <b>ligne vide</b> (ou une ligne <b>« --- »</b>) ; chaque bloc devient un plan, dans l'ordre.
               Rien n'est coupé.</span>
@@ -397,13 +407,36 @@
             <textarea id="aoPersona" rows="2"
               placeholder="Ex. ton sincère, cible femmes 50-65 ans…"></textarea>
           </label>
-          <div class="row grid2">
-            <label>Personnage 1 — parle <span class="muted">(en français, traduit automatiquement)</span>
+          <div class="ao-chars" id="aoChars">
+            <div class="lbl">Personnages <span class="muted">(jusqu'à 4 — description en français, traduite
+              automatiquement ; un seul parle à la fois dans un tour)</span></div>
+            <div class="ao-char-row" id="aoCharRow1" data-n="1">
+              <span class="ao-char-n">1</span>
+              <input type="text" id="aoCharName1" maxlength="40" placeholder="Nom court (ex. Marc)" />
               <input type="text" id="aoPersona1" maxlength="300" placeholder="Ex. maquilleur homme, gants noirs" />
-            </label>
-            <label>Personnage 2 — muet <span class="muted">(optionnel)</span>
-              <input type="text" id="aoPersona2" maxlength="300" placeholder="Ex. femme ~60 ans, la modèle" />
-            </label>
+              <select id="aoCharSpeaks1"><option value="1">parle</option><option value="0">muet</option></select>
+            </div>
+            <div class="ao-char-row" id="aoCharRow2" data-n="2">
+              <span class="ao-char-n">2</span>
+              <input type="text" id="aoCharName2" maxlength="40" placeholder="Nom court (optionnel)" />
+              <input type="text" id="aoPersona2" maxlength="300" placeholder="Ex. femme ~60 ans, la modèle (optionnel)" />
+              <select id="aoCharSpeaks2"><option value="0">muet</option><option value="1">parle</option></select>
+            </div>
+            <div class="ao-char-row hidden" id="aoCharRow3" data-n="3">
+              <span class="ao-char-n">3</span>
+              <input type="text" id="aoCharName3" maxlength="40" placeholder="Nom court" />
+              <input type="text" id="aoPersona3" maxlength="300" placeholder="Description (ex. flacon mascotte qui parle)" />
+              <select id="aoCharSpeaks3"><option value="0">muet</option><option value="1">parle</option></select>
+              <button type="button" class="btn small ao-char-rm" data-n="3" title="Retirer">×</button>
+            </div>
+            <div class="ao-char-row hidden" id="aoCharRow4" data-n="4">
+              <span class="ao-char-n">4</span>
+              <input type="text" id="aoCharName4" maxlength="40" placeholder="Nom court" />
+              <input type="text" id="aoPersona4" maxlength="300" placeholder="Description" />
+              <select id="aoCharSpeaks4"><option value="0">muet</option><option value="1">parle</option></select>
+              <button type="button" class="btn small ao-char-rm" data-n="4" title="Retirer">×</button>
+            </div>
+            <button type="button" class="btn small" id="aoCharAddBtn">+ Ajouter un personnage</button>
           </div>
           <div class="row grid2">
             <label>Produit <span class="muted">(optionnel)</span>
@@ -417,7 +450,7 @@
             <textarea id="aoAmbiance" rows="2"
               placeholder="Ex. salle de bain lumineuse le matin, lumière naturelle douce…"></textarea>
           </label>
-          <label for="aoDropzone">Photos de référence <span class="muted">(optionnel — indique le type : visage, produit, décor, style ; en découpage client, ajoute-les AVANT le plan : Claude regarde visage / visage2 / produit pour écrire la bible)</span></label>
+          <label for="aoDropzone">Photos de référence <span class="muted">(optionnel — indique le type : visage du perso 1 à 4, produit, décor, style ; ajoute-les AVANT le plan : Claude regarde les visages et le produit pour écrire la bible)</span></label>
           <div id="aoDropzone" class="dropzone" tabindex="0" role="button"
                aria-label="Glisser-déposer ou sélectionner des images">
             <input type="file" id="aoRefs" accept="image/*" multiple class="hidden" />
@@ -427,7 +460,8 @@
           </div>
           <div id="aoRefsPreview" class="refs-preview"></div>
 
-          <h2>3. Fiche voix <span class="muted" style="font-size:13px;font-weight:400">— la même voix sur tous les plans</span></h2>
+          <h2>3. Fiches voix <span class="muted" style="font-size:13px;font-weight:400">— une par personnage qui parle, la même sur tous les plans</span></h2>
+          <div class="lbl" id="aoVoiceTitle1">🎙️ Personnage 1</div>
           <div class="voice-sheet">
             <label>Genre
               <select id="aoVGender">
@@ -452,10 +486,25 @@
             <label>Précision libre <span class="muted">(optionnel, en anglais)</span>
               <input type="text" id="aoVExtra" placeholder="Ex. slightly husky, smiling voice" maxlength="120" /></label>
           </div>
+          <div id="aoVoiceExtra"></div>
           <div class="row">
             <button class="btn primary" id="aoPlanBtn">🎬 Générer le plan</button>
           </div>
           <div id="aoPlanMsg" class="test-result"></div>
+
+          <!-- Mode auto : relecture du document de découpage AVANT toute image -->
+          <div id="aoReviewArea" class="hidden">
+            <h2>4. Relecture du découpage</h2>
+            <p class="muted">Le cerveau a écrit ce document au format « Découpage client » : <b>BLOC N</b>
+              (timecode et <b>— TITRE</b> optionnels), le dialogue <b>verbatim</b>, puis une ligne <b>🎬</b>
+              pour la mise en scène (qui parle, gestes calés sur des mots, produit à l'image…). Corrige-le
+              librement (sans changer le texte dit), puis valide : <b>aucune image n'est générée avant</b>.</p>
+            <textarea id="aoReviewDoc" rows="16"></textarea>
+            <div class="row">
+              <button class="btn primary" id="aoValidateDocBtn" type="button">✅ Valider le découpage</button>
+              <span id="aoReviewMsg" class="muted"></span>
+            </div>
+          </div>
 
           <!-- Étape 4 : plan + avertissements + coût -->
           <div id="aoPlanArea" class="hidden">
@@ -488,7 +537,7 @@
 
             <div class="card-block ao-voice-block">
               <div class="ao-voice-head">
-                <b>🎙️ Fiche voix de la pub</b>
+                <b id="aoEVoiceTitle1">🎙️ Fiche voix — personnage 1</b>
                 <span id="aoVoiceLock" class="voice-lock"></span>
               </div>
               <div class="voice-sheet">
@@ -520,14 +569,17 @@
                 <button class="btn small danger-outline hidden" id="aoVoiceUnlockBtn" type="button">🔓 Déverrouiller</button>
               </div>
             </div>
+            <div id="aoEVoiceExtra"></div>
 
             <div id="aoBibleBox" class="ao-bible card-block hidden">
               <div class="ao-voice-head">
                 <b>📖 Bible visuelle</b>
                 <span class="muted small">— ajoutée telle quelle à l'image de CHAQUE plan (en anglais). La modifier recompose les prompts, pas les images déjà faites.</span>
               </div>
-              <label>Personnage 1 (parle) <textarea id="aoBibleCharacter1" rows="2"></textarea></label>
-              <label>Personnage 2 (muet) <textarea id="aoBibleCharacter2" rows="2"></textarea></label>
+              <label id="aoBibleWrap1"><span id="aoBibleLbl1">Personnage 1</span> <textarea id="aoBibleCharacter1" rows="2"></textarea></label>
+              <label id="aoBibleWrap2"><span id="aoBibleLbl2">Personnage 2</span> <textarea id="aoBibleCharacter2" rows="2"></textarea></label>
+              <label id="aoBibleWrap3" class="hidden"><span id="aoBibleLbl3">Personnage 3</span> <textarea id="aoBibleCharacter3" rows="2"></textarea></label>
+              <label id="aoBibleWrap4" class="hidden"><span id="aoBibleLbl4">Personnage 4</span> <textarea id="aoBibleCharacter4" rows="2"></textarea></label>
               <label>Décor <textarea id="aoBibleSet" rows="2"></textarea></label>
               <label>Produit <textarea id="aoBibleProduct" rows="2"></textarea></label>
               <label>Positions par défaut <textarea id="aoBiblePositions" rows="2"></textarea></label>
@@ -708,6 +760,9 @@
           </label>
           <label>Quota Google Omni (requêtes / jour) <span class="muted">(1 tour = 1 requête ; Tier 1 = 20)</span>
             <input type="number" id="omniDailyLimit" min="1" step="1" placeholder="20" />
+          </label>
+          <label>Durée max d'un tour parlé (s) <span class="muted">(Avatar IA : 3 à 10 ; 8 recommandé — au-delà le lip-sync se dégrade)</span>
+            <input type="number" id="omniMaxSpoken" min="3" max="10" step="1" placeholder="8" />
           </label>
           <label class="check">
             <input type="checkbox" id="dryRun" />

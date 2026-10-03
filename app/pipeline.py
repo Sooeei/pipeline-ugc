@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import brain, config_app, cost, db, media
+from . import brain, config_app, cost, db, media, omni_timing
 from .providers import (
     ProviderConfig,
     ProviderError,
@@ -444,14 +444,21 @@ def generate_objet_images(
     if character_ref and kind != "avatar_omni":
         prefix = _CONSISTENCY_BY_KIND.get(kind, _CHARACTER_CONSISTENCY)
 
+    names = ad_character_names(ad_row) if kind == "avatar_omni" else {}
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
         shot_prefix = prefix
         if kind == "avatar_omni":
-            picked = select_omni_refs(needed, typed_refs, character_ref)
+            first = clip_first_speaker(db.get_clip(int(s["clip_id"])) or {})
+            picked = select_omni_refs(needed, typed_refs, character_ref, first_speaker=first)
+            warn = omni_refs_overflow_warning(needed, typed_refs, character_ref, first_speaker=first,
+                                              label=str(s.get("n") or ""))
+            if warn:   # > 4 réfs utiles : on garde visages > produit > ancre, et on le signale
+                emit({"scene": int(s["n"]), "phase": "image", "status": "en_cours", "message": warn})
+                db.log_activity("avatar_omni", warn)
             refs = [r["path"] for r in picked]
-            shot_prefix = omni_refs_legend(picked)
+            shot_prefix = omni_refs_legend(picked, names)
             db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
                 [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
         else:
@@ -492,47 +499,74 @@ def _select_clip_refs(
     return sel[: max(1, cap)]
 
 
-def select_omni_refs(
+def _omni_ref_candidates(
     needed: list[str] | None, typed_refs: list[dict[str, Any]], anchor: str = "",
-    cap: int = config_app.MAX_REFS_PER_IMAGE_CALL_OMNI,
-) -> list[dict[str, str]]:
-    """Réfs d'un plan Avatar IA (Omni), au plus `cap` (4), dans l'ordre de PRIORITÉ :
-    visage > visage2 > produit > ancre, puis les photos en plus (2e photo produit, décor, style,
-    réfs sans type). Une photo par type d'abord : l'ancre passe avant une 2e photo du même type.
-    `needed == []` (plan neutre) → aucune réf ; `None` → tous les types. Renvoie [{kind, path}]
-    (kind « ancre » pour l'image du plan validé)."""
+    first_speaker: int = 1,
+) -> tuple[list[dict[str, str]], int]:
+    """Toutes les réfs utiles d'un plan Avatar IA, dans l'ordre de PRIORITÉ, + le nombre de réfs
+    « essentielles » (1 visage par personnage à l'image, 1 photo produit, l'ancre).
+    Ordre : visages des personnages à l'image (celui qui parle au 1er tour d'abord, puis par
+    numéro) > produit > ancre, puis les photos en plus (2e photo d'un même type, décor, style,
+    réfs sans type). Types normalisés : « visage » = visage1 (anciennes pubs)."""
     if needed == []:
-        return []
+        return [], 0
+    norm = config_app.normalize_omni_ref_kind
+    need = None if needed is None else {norm(k) for k in needed}
 
-    def wanted(kind: str) -> bool:
-        return needed is None or kind == "" or kind in needed
+    def wanted(k: str) -> bool:
+        return need is None or k == "" or k in need
 
     refs = [{"kind": (t.get("kind") or "").strip().lower(), "path": str(t.get("path") or "")}
             for t in typed_refs if t.get("path")]
-    refs = [r for r in refs if wanted(r["kind"])]
+    refs = [r for r in refs if wanted(norm(r["kind"]))]
+    faces = sorted({config_app.omni_face_index(r["kind"]) for r in refs} - {0},
+                   key=lambda n: (n != int(first_speaker or 1), n))
+    order = [config_app.omni_face_kind(n) for n in faces] + ["produit"]
     first: list[dict[str, str]] = []
-    for kind in config_app.OMNI_REF_PRIORITY:
-        hit = next((r for r in refs if r["kind"] == kind), None)
+    for k in order:
+        hit = next((r for r in refs if norm(r["kind"]) == k), None)
         if hit:
             first.append(hit)
     if anchor:
         first.append({"kind": "ancre", "path": anchor})
+    rank = order + ["decor", "style", ""]
     rest = sorted((r for r in refs if r not in first),
-                  key=lambda r: (config_app.OMNI_REF_PRIORITY + ("decor", "style", "")).index(r["kind"])
-                  if r["kind"] in config_app.OMNI_REF_PRIORITY + ("decor", "style", "") else 99)
+                  key=lambda r: rank.index(norm(r["kind"])) if norm(r["kind"]) in rank else 99)
     out: list[dict[str, str]] = []
     for r in first + rest:
         if r["path"] not in {x["path"] for x in out}:
             out.append(r)
-    return out[: max(1, cap)]
+    return out, len({x["path"] for x in first})
+
+
+def select_omni_refs(
+    needed: list[str] | None, typed_refs: list[dict[str, Any]], anchor: str = "",
+    cap: int = config_app.MAX_REFS_PER_IMAGE_CALL_OMNI, first_speaker: int = 1,
+) -> list[dict[str, str]]:
+    """Réfs d'un plan Avatar IA (Omni), au plus `cap` (4) : visages des personnages À L'IMAGE
+    (speaker du 1er tour d'abord) > produit > ancre, puis les photos en plus. Une photo par type
+    d'abord : l'ancre passe avant une 2e photo du même type. `needed == []` (plan neutre) →
+    aucune réf ; `None` → tous les types. Renvoie [{kind, path}] (kind « ancre » = plan validé)."""
+    return _omni_ref_candidates(needed, typed_refs, anchor, first_speaker)[0][: max(1, cap)]
+
+
+def omni_refs_overflow_warning(
+    needed: list[str] | None, typed_refs: list[dict[str, Any]], anchor: str = "",
+    cap: int = config_app.MAX_REFS_PER_IMAGE_CALL_OMNI, first_speaker: int = 1, label: str = "",
+) -> str:
+    """Avertissement FR si les réfs essentielles du plan (visages + produit + ancre) dépassent
+    `cap` : trop de personnages à l'image, les dernières ne sont pas envoyées."""
+    _, essential = _omni_ref_candidates(needed, typed_refs, anchor, first_speaker)
+    if essential <= cap:
+        return ""
+    plan = f"Plan {label} : " if label else ""
+    return (f"{plan}trop de personnages à l'image pour ce plan — {essential} réfs utiles "
+            f"(visages + produit + ancre) pour {cap} max : {essential - cap} non envoyée(s) "
+            "(ordre : visages, produit, ancre).")
 
 
 # Rôle de chaque réf, nommé dans le prompt image Avatar IA (« reference image 1 = … »).
 _OMNI_REF_ROLES = {
-    "visage": "character 1's face (the speaker) — keep this exact face identical (same age, "
-              "features, skin, hair)",
-    "visage2": "character 2's face (the silent person) — keep this exact face identical (same "
-               "age, features, skin, hair)",
     "produit": "the client's product — reproduce it exactly (same bottle shape, colors, cap and "
                "label)",
     "ancre": "the validated previous shot — keep the same people, outfits, set and lighting; "
@@ -543,11 +577,21 @@ _OMNI_REF_ROLES = {
 }
 
 
-def omni_refs_legend(picked: list[dict[str, str]]) -> str:
-    """Légende des réfs placée en tête du prompt image Avatar IA ("" sans réf)."""
+def _omni_ref_role(kind: str, names: dict[int, str] | None = None) -> str:
+    n = config_app.omni_face_index(kind)
+    if n:
+        name = (names or {}).get(n, "")
+        who = f"character {n}'s face" + (f" ({name})" if name else "")
+        return f"{who} — keep this exact face identical (same age, features, skin, hair)"
+    return _OMNI_REF_ROLES.get(config_app.normalize_omni_ref_kind(kind), _OMNI_REF_ROLES[""])
+
+
+def omni_refs_legend(picked: list[dict[str, str]], names: dict[int, str] | None = None) -> str:
+    """Légende des réfs placée en tête du prompt image Avatar IA ("" sans réf). `names` =
+    {numéro de personnage: nom court} (facultatif)."""
     if not picked:
         return ""
-    lines = [f"reference image {i} = {_OMNI_REF_ROLES.get(r['kind'], _OMNI_REF_ROLES[''])}"
+    lines = [f"reference image {i} = {_omni_ref_role(r['kind'], names)}"
              for i, r in enumerate(picked, 1)]
     return "REFERENCE IMAGES (in order): " + "; ".join(lines) + ".\n\n"
 
@@ -816,6 +860,14 @@ def _log_omni_turn(plan_n: int, turn: int, turns: int, requested_s: int, mp4_pat
            f"{got_txt}, facturation API : {usage or 'non renvoyée'}")
     _log_detail(f"Omni {msg}")
     db.log_activity("avatar_omni", msg)
+    # 1er tour (vidéo seule, sans extension) : la durée REÇUE doit être celle DEMANDÉE
+    # (response_format.duration). Écart > 1 s → avertissement dans le journal.
+    if turn == 1 and got is not None and abs(got - float(requested_s)) > 1.0:
+        warn = (f"⚠ Plan {plan_n} : durée reçue {got:.1f} s ≠ durée demandée {requested_s} s "
+                "(écart > 1 s) — Google n'a pas respecté la durée envoyée : vérifie que la "
+                "phrase n'est pas coupée.")
+        _log_detail(f"Omni {warn}")
+        db.log_activity("avatar_omni", warn)
 
 
 def _assemble_chain(parts: list[str], expected_seconds: int, out_mp4: Path) -> None:
@@ -876,8 +928,21 @@ def build_omni_extension_prompt(
     return " ".join(parts)
 
 
+_TURN_ACTION_KEYS = ("avant", "pendant", "apres", "beats_avant", "beats_apres")
+
+
+def is_turn(s: Any) -> bool:
+    """Un tour valide : une réplique (texte), ou un tour MUET (gestes seuls, format chronométré)."""
+    if not isinstance(s, dict):
+        return False
+    if str(s.get("text") or "").strip():
+        return True
+    return bool(s.get("mute") or "speaker" in s) and any(s.get(k) for k in _TURN_ACTION_KEYS)
+
+
 def clip_segments(c: dict[str, Any]) -> list[dict[str, Any]]:
-    """Segments (tours Omni) d'un plan en découpage client ; [] pour un plan classique."""
+    """Tours Omni (segments) d'un plan à tours ; [] pour un plan classique (un seul clip). Les
+    tours MUETS (sans texte, gestes seuls) sont gardés ; les anciens {text, motion} aussi."""
     import json
 
     raw = c.get("segments")
@@ -885,24 +950,77 @@ def clip_segments(c: dict[str, Any]) -> list[dict[str, Any]]:
         data = json.loads(raw) if raw else []
     except (TypeError, ValueError):
         data = []
-    return [s for s in data if isinstance(s, dict) and str(s.get("text") or "").strip()] \
-        if isinstance(data, list) else []
+    return [s for s in data if is_turn(s)] if isinstance(data, list) else []
 
 
-def segments_seconds(segs: list[dict[str, Any]], words_per_sec: float | None) -> int:
-    """Durée d'une chaîne Omni = SOMME de ses tours (1er tour avec respiration d'intro)."""
-    return sum(
-        config_app.omni_segment_seconds(str(s["text"]), words_per_sec, first=(i == 0))
-        for i, s in enumerate(segs)
-    )
+def omni_max_spoken() -> int:
+    """Max d'un tour PARLÉ (s) : setting `omni_max_spoken_clip_seconds`, sinon 8, borné 3..10."""
+    return config_app.clamp_omni_max_spoken(
+        db.get_setting("omni_max_spoken_clip_seconds", "") or config_app.OMNI_MAX_SPOKEN_CLIP_SECONDS)
 
 
-def clip_omni_seconds(c: dict[str, Any], words_per_sec: float | None) -> int:
-    """Durée Omni d'un plan : somme de ses segments (découpage client) ou durée de son dialogue."""
+WpsFor = Callable[[int], float]
+
+
+def _wps_of(turn: dict[str, Any], words_per_sec: float | None, wps_for: WpsFor | None) -> float:
+    if wps_for is not None:
+        return float(wps_for(int(turn.get("speaker") or 1)))
+    return float(words_per_sec or config_app.GROK_WORDS_PER_SEC)
+
+
+def turn_plan(turn: Any, wps: float, max_spoken: int | None = None) -> dict[str, Any]:
+    """Chronométrage d'UN tour (omni_timing) : la durée STOCKÉE du tour (calculée au découpage,
+    mise à jour quand la fiche voix change) prime ; sinon calculée. Bornée aux limites Google
+    (3..10 s) ; t_speak_end ≤ durée → timecodes toujours cohérents avec la durée envoyée."""
+    t = omni_timing.normalize_turn(turn)
+    timing = omni_timing.turn_timing(t, wps=wps, max_spoken=max_spoken or omni_max_spoken())
+    seconds = int(t.get("seconds") or 0) or int(timing["seconds"])
+    seconds = max(config_app.OMNI_MIN_CLIP_SECONDS, min(config_app.OMNI_MAX_CLIP_SECONDS, seconds))
+    start = min(float(timing["t_speak_start"]), float(seconds))
+    end = max(start, min(float(timing["t_speak_end"]), float(seconds)))
+    return {**timing, "seconds": seconds, "t_speak_start": start, "t_speak_end": end}
+
+
+def segments_seconds(
+    segs: list[dict[str, Any]], words_per_sec: float | None, *,
+    wps_for: WpsFor | None = None, max_spoken: int | None = None,
+) -> int:
+    """Durée d'une chaîne Omni = SOMME de ses tours (muets compris), chronométrés par
+    omni_timing au débit de la fiche voix du speaker de chaque tour (`wps_for`)."""
+    return sum(int(turn_plan(s, _wps_of(s, words_per_sec, wps_for), max_spoken)["seconds"])
+               for s in segs)
+
+
+def clip_omni_seconds(
+    c: dict[str, Any], words_per_sec: float | None, *,
+    wps_for: WpsFor | None = None, max_spoken: int | None = None,
+) -> int:
+    """Durée Omni d'un plan : somme de ses tours, ou durée de son dialogue (plan classique)."""
     segs = clip_segments(c)
     if segs:
-        return segments_seconds(segs, words_per_sec)
-    return config_app.omni_clip_seconds(str(c.get("script") or ""), words_per_sec)
+        return segments_seconds(segs, words_per_sec, wps_for=wps_for, max_spoken=max_spoken)
+    wps = words_per_sec if wps_for is None else wps_for(1)
+    return config_app.omni_clip_seconds(str(c.get("script") or ""), wps)
+
+
+def clip_first_speaker(c: dict[str, Any]) -> int:
+    """Personnage qui parle au 1er tour parlé du plan (1 par défaut)."""
+    for s in clip_segments(c):
+        if str(s.get("text") or "").strip():
+            return int(omni_timing.normalize_turn(s)["speaker"])
+    return 1
+
+
+def clip_characters_in_frame(c: dict[str, Any], ad: dict[str, Any]) -> list[int]:
+    """Personnages À L'IMAGE dans ce plan : visages demandés (refs_needed visageN) + speakers des
+    tours ; sinon tous les personnages décrits (bible / personnages)."""
+    needed = _norm_refs_needed(c.get("refs_needed")) or []
+    nums = {config_app.omni_face_index(k) for k in needed} - {0}
+    nums |= {int(omni_timing.normalize_turn(s)["speaker"]) for s in clip_segments(c)
+             if str(s.get("text") or "").strip()}
+    if not nums:
+        nums = set(ad_character_descs(ad)) or {1}
+    return sorted(nums)
 
 
 class Tier1Pacer:
@@ -984,16 +1102,130 @@ def ad_bible(ad: dict[str, Any] | None) -> dict[str, str]:
     return brain.normalize_bible(raw) if raw else {}
 
 
-def ad_personas(ad: dict[str, Any] | None) -> dict[str, str]:
-    """Personnages d'une pub Avatar IA ({p1, p2, p1_en, p2_en}) ; {} si absents / illisibles."""
-    import json
-
+def ad_personas(ad: dict[str, Any] | None) -> dict[str, Any]:
+    """Personnages d'une pub Avatar IA, forme config_app.normalize_personas ({characters[n, name,
+    fr, en, speaks], p1, p2, p1_en, p2_en}) ; {} si absents / illisibles."""
     raw = (ad or {}).get("personas")
-    try:
-        data = json.loads(raw) if raw else {}
-    except (TypeError, ValueError):
-        data = {}
-    return {k: str(data.get(k) or "") for k in ("p1", "p2", "p1_en", "p2_en")} if data else {}
+    if not raw:
+        return {}
+    p = config_app.normalize_personas(raw)
+    return p if p["characters"] else {}
+
+
+def ad_character_descs(ad: dict[str, Any] | None) -> dict[int, str]:
+    """Description ANGLAISE de chaque personnage (n → texte) : la bible (characterN) d'abord —
+    mêmes mots que les images —, sinon la traduction EN des personnages."""
+    bible = ad_bible(ad)
+    personas = ad_personas(ad)
+    by_n = {int(c["n"]): c for c in personas.get("characters", [])}
+    out: dict[int, str] = {}
+    for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
+        desc = str(bible.get(f"character{n}") or "") or str((by_n.get(n) or {}).get("en") or "")
+        if desc.strip():
+            out[n] = desc.strip()
+    return out
+
+
+def ad_character_names(ad: dict[str, Any] | None) -> dict[int, str]:
+    """Nom court de chaque personnage (n → nom) ; seulement ceux qui en ont un."""
+    return {int(c["n"]): str(c["name"]) for c in ad_personas(ad).get("characters", []) if c.get("name")}
+
+
+def ad_style(ad: dict[str, Any] | None) -> str:
+    """Style de la pub : « realiste » (défaut, anciennes pubs) | « 3d »."""
+    return config_app.normalize_omni_style((ad or {}).get("style"))
+
+
+def ad_voice_profiles(ad: dict[str, Any] | None) -> dict[str, dict[str, str]]:
+    """Fiches voix par personnage ; repli : ads.voice_profile = personnage 1 (anciennes pubs)."""
+    a = ad or {}
+    return config_app.normalize_voice_profiles(a.get("voice_profiles"), legacy=a.get("voice_profile"))
+
+
+def ad_wps_for(ad: dict[str, Any] | None) -> WpsFor:
+    """Débit (mots/s) de la fiche voix de chaque speaker → chronométreur."""
+    profiles = ad_voice_profiles(ad)
+    legacy = (ad or {}).get("voice_profile")
+    return lambda n: config_app.speaker_words_per_sec(profiles, n, legacy)
+
+
+def ad_voice_sheet_for(ad: dict[str, Any] | None) -> Callable[[int], str]:
+    """Consigne voix (anglais) du speaker n — même voix sur tous les tours de ce personnage."""
+    profiles = ad_voice_profiles(ad)
+    legacy = (ad or {}).get("voice_profile")
+    return lambda n: config_app.voice_sheet(config_app.speaker_voice_profile(profiles, n, legacy))
+
+
+def retime_turns(segs: list[dict[str, Any]], wps_for: WpsFor, max_spoken: int | None = None) -> list[dict[str, Any]]:
+    """Recalcule la durée stockée des tours PAS encore animés (fiche voix modifiée) — sans les
+    redécouper ; les tours déjà faits gardent la durée réellement demandée."""
+    out = []
+    for s in segs:
+        if s.get("interaction_id") or not is_turn(s):
+            out.append(s)
+            continue
+        t = omni_timing.normalize_turn(s)
+        tm = omni_timing.turn_timing(t, wps=wps_for(t["speaker"]), max_spoken=max_spoken or omni_max_spoken())
+        out.append({**s, "seconds": int(tm["seconds"]), "max_words": int(tm["max_words"])})
+    return out
+
+
+def _omni_camera(style: str) -> str:
+    if config_app.normalize_omni_style(style) == "3d":
+        return (f"Vertical 9:16 shot, {config_app.OMNI_3D_STYLE}, with subtle natural camera "
+                "movement")
+    return config_app.OMNI_DEFAULT_CAMERA
+
+
+def build_omni_turn_prompt(
+    turn: Any, timing: dict[str, Any], *, first: bool, speaker_desc: str = "",
+    speaker_name: str = "", voice_sheet: str = "", others: list[str] | None = None,
+    has_anchor: bool = False, style: str = config_app.DEFAULT_OMNI_STYLE, n_people: int = 1,
+) -> str:
+    """Prompt Google Omni d'UN tour chronométré. Ordre : cadre (1er tour : <FIRST_FRAME> caméra +
+    style ; extension : « Extend this video… ») → partie MINUTÉE (omni_timing, timecodes = même
+    calcul que la durée envoyée) → son / lip-sync → autres personnages muets → interdits →
+    ancre (1er tour). UN seul personnage parle ; tour muet = « No dialogue ». Gestes nettoyés
+    des marques ; dialogue VERBATIM (crochets retirés)."""
+    t = omni_timing.normalize_turn(turn)
+    for k in ("avant", "pendant", "apres"):
+        t[k] = brain.scrub_brand_names(t[k])
+    is_3d = config_app.normalize_omni_style(style) == "3d"
+    if speaker_desc and speaker_name:
+        who = f"{speaker_name}, the speaking character ({speaker_desc}),"
+    elif speaker_desc:
+        who = f"The speaking character ({speaker_desc})"
+    else:
+        who = f"{speaker_name}, the speaking character," if speaker_name else "The person"
+    timed = omni_timing.build_turn_timecode_prompt(t, timing, speaker_desc=who, voice_sheet=voice_sheet)
+    if first:
+        parts = [f"<FIRST_FRAME> {_omni_camera(style)}, in a single unbroken scene with no scene cuts."]
+    else:
+        people = "same people" if n_people > 1 else "same person"
+        parts = [f"Extend this video: the scene continues in the same single unbroken shot, {people}, "
+                 "same set, same voices."]
+        if is_3d:
+            parts.append(f"Same {config_app.OMNI_3D_STYLE}.")
+    parts.append(timed)
+    if timing.get("mute") or t["mute"]:
+        parts.append("Nobody speaks: no lip movement. The audio is a quiet natural room tone. No music.")
+    else:
+        parts.append("Lips and expression stay in sync with every word; only the speaking character's "
+                     "lips move. The audio is their clear spoken voice up front over a quiet room tone. "
+                     "No music.")
+        if others:
+            s = "s" if len(others) > 1 else ""
+            parts.append(f"The other character{s} ({'; '.join(others)}) remain{'' if s else 's'} silent "
+                         "the whole time: no speech and no lip movement, only natural listening reactions.")
+    parts.append("No other speakers. No subtitles. No on-screen text.")
+    if first and has_anchor:
+        if n_people > 1:
+            parts.append("<IMAGE_REF_0> is the locked scene reference: keep the exact same people "
+                         "(faces, outfits) and the same voices. Use it as a reference, not as a literal frame.")
+        else:
+            parts.append("<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it "
+                         "as a reference, not as a literal frame.")
+    return " ".join(parts)
 
 
 def animate_avatar_omni_clips(
@@ -1026,14 +1258,17 @@ def animate_avatar_omni_clips(
             if c.get("image_path") and c.get("status") in ("valide", "echec")
         ]
     ad = db.get_ad(ad_id) or {}
-    profile = config_app.normalize_voice_profile(ad.get("voice_profile"))
-    wps = config_app.voice_words_per_sec(profile)
-    sheet = config_app.voice_sheet(profile)
-    personas = ad_personas(ad)   # descriptions ANGLAISES (jamais le texte français brut)
-    bible = ad_bible(ad)
+    wps_for = ad_wps_for(ad)          # débit de la fiche voix de CHAQUE speaker
+    sheet_for = ad_voice_sheet_for(ad)
+    wps = wps_for(1)
+    sheet = sheet_for(1)
+    max_spoken = omni_max_spoken()
+    style = ad_style(ad)
     # Mêmes descriptions que les images : la bible (si découpage client), sinon les personnages EN.
-    speaker = bible.get("character1") or personas.get("p1_en", "")
-    silent = bible.get("character2") or personas.get("p2_en", "")
+    descs = ad_character_descs(ad)
+    names = ad_character_names(ad)
+    speaker = descs.get(1, "")
+    silent = descs.get(2, "")
     # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
     ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
 
@@ -1044,7 +1279,8 @@ def animate_avatar_omni_clips(
     def _render(c: dict[str, Any], mp4: Path) -> None:
         if pacer is not None:
             n = int(c["scene_n"])
-            usd = clip_omni_seconds(c, wps) * config_app.OMNI_COST_PER_SECOND_USD
+            usd = clip_omni_seconds(c, wps, wps_for=wps_for, max_spoken=max_spoken) \
+                * config_app.OMNI_COST_PER_SECOND_USD
             pacer.acquire(usd, lambda w: emit({
                 "scene": n, "phase": "attente_tier1", "status": "en_cours",
                 "message": tier1_wait_message(w), "wait_s": round(w),
@@ -1072,10 +1308,12 @@ def animate_avatar_omni_clips(
             cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
 
     def _render_chain(c: dict[str, Any], mp4: Path) -> None:
-        """Découpage client : 1 plan = 1 vidéo continue = chaîne de tours Omni (1 par segment).
-        Tour 1 = image du plan (<FIRST_FRAME>) + segment 1, store=true ; tours suivants =
-        extension via previous_interaction_id (texte seul). Chaque tour réussi est ENREGISTRÉ
-        (id + fichier) → une reprise repart du dernier tour réussi. Résultat : UN mp4."""
+        """Plan à TOURS : 1 plan = 1 vidéo continue = chaîne de tours Omni (1 requête par tour,
+        muets compris). Tour 1 = image du plan (<FIRST_FRAME>), store=true ; tours suivants =
+        extension via previous_interaction_id (texte seul). Chaque tour : UN seul speaker, SA
+        fiche voix, durée chronométrée (omni_timing) envoyée à Google et timecodes du prompt
+        issus du MÊME calcul. Chaque tour réussi est ENREGISTRÉ (id + fichier) → une reprise
+        repart du dernier tour réussi. Résultat : UN mp4."""
         import json
 
         n = int(c["scene_n"])
@@ -1090,25 +1328,27 @@ def animate_avatar_omni_clips(
         if done == k and c.get("status") == "pret":
             segs, done = reset_segments_progress(segs), 0   # plan déjà animé : on refait tout
         has_anchor = ref is not None and int(ref["id"]) != clip_id
+        in_frame = clip_characters_in_frame(c, ad)
         for i in range(done, k):
             s = segs[i]
-            seconds = config_app.omni_segment_seconds(str(s["text"]), wps, first=(i == 0))
+            turn = omni_timing.normalize_turn(s)
+            sp = int(turn["speaker"])
+            timing = turn_plan(turn, wps_for(sp), max_spoken)
+            seconds = int(timing["seconds"])
+            others = [descs.get(m) or names.get(m) or f"character {m}" for m in in_frame if m != sp]
+            prompt = build_omni_turn_prompt(
+                turn, timing, first=(i == 0), speaker_desc=descs.get(sp, ""),
+                speaker_name=names.get(sp, ""), voice_sheet=sheet_for(sp), others=others,
+                has_anchor=has_anchor, style=style, n_people=max(len(in_frame), 1),
+            )
             part = mp4.with_name(f"{n}_tour{i + 1}.mp4")
             if i == 0:
-                prompt = build_omni_prompt(
-                    str(s.get("motion") or ""), str(s["text"]), sheet, seconds, has_anchor,
-                    speaker=speaker, silent=silent,
-                )
                 res = omni_generate_video(
                     cfg, str(c["image_path"]), prompt, part, seconds,
                     anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
                     model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
                 )
             else:
-                prompt = build_omni_extension_prompt(
-                    str(s.get("motion") or ""), str(s["text"]), sheet, seconds,
-                    speaker=speaker, silent=silent,
-                )
                 res = omni_extend_video(
                     cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
                     model_value=config_app.OMNI_MODEL, label=ad_name, index=i,

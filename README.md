@@ -55,8 +55,13 @@ qui génère la **voix et le lip-sync** dans la même passe.
 - **Clé** : Google AI Studio (aistudio.google.com → *Get API key*), à coller dans **Réglages →
   Clé API Google (Gemini)**. Le **tier PAYANT est obligatoire** (la vidéo Omni n'est pas dans le
   quota gratuit) : active la facturation sur le projet Google Cloud de la clé.
-- **Coût** : **0,10 $ par seconde** de vidéo en 720p (voix incluse). Un plan dure le temps de dire
-  son dialogue + 1 s de respiration, entre 3 et 10 s (≈ 22 mots max par plan au débit naturel).
+- **Coût** : **0,10 $ par seconde** de vidéo en 720p (voix incluse). Chaque **tour** Omni est
+  **chronométré** par le code : 0,5 s d'entrée + gestes avant + parole (mots ÷ débit de la fiche
+  voix du personnage qui parle) + gestes après + 0,7 s de fin, arrondi, 3 s min. Un tour PARLÉ
+  dure **8 s max** (réglable dans Réglages, 3–10 s) ; au-delà, les gestes longs partent dans un
+  **tour muet** (≤ 10 s) ou le texte est coupé en fin de phrase (jamais au milieu d'un mot). La
+  durée de chaque tour est **envoyée à Google** (`response_format.duration`, ex. « 8s ») et les
+  timecodes du prompt suivent le même calcul. 1 tour = 1 requête Google.
   L'estimation affichée avant l'animation se base sur ces vraies durées.
 - **Plafond Google (Tier 1)** : environ **10 $ par tranche de 10 min**. Au-delà, Google bloque
   temporairement (erreur « trop de requêtes ») : attends quelques minutes puis **« Reprendre »**
@@ -69,19 +74,26 @@ qui génère la **voix et le lip-sync** dans la même passe.
 - **Fiche voix** (genre, âge, accent, timbre, débit) : enregistrée dès le Plan 1 et utilisée à
   l'identique sur tous les plans. Elle est **verrouillée après le 1er clip animé** ; le bouton
   « Déverrouiller » permet de la changer, mais les clips déjà faits garderont l'ancienne voix.
-- **Trois découpages** : **Auto** (le cerveau découpe ton script), **Manuel** (un bloc = un
-  plan, séparés par une ligne vide) et **Découpage client** : colle le document du client,
-  bloc par bloc — `BLOC N · [0:00–0:08] — TITRE <dialogue>` puis une ligne `🎬 <mise en scène>`
-  (timecode et titre optionnels). **1 bloc = 1 plan = 1 image = 1 vidéo continue** : le
-  dialogue (mot pour mot) est dit en plusieurs **tours** Omni enchaînés (extension de la vidéo,
-  ≤ 22 mots par tour, 40 s max par plan) ; si un tour échoue, « Reprendre » repart du dernier
-  tour réussi. La mise en scène du client est **traduite** (jamais inventée) et prime sur les
-  règles par défaut ; une **bible visuelle** (personnages, décor, produit, positions) est
-  ajoutée à l'identique à chaque image et reste modifiable au-dessus de la galerie. Les
-  valeurs entre crochets (`[97 %]`) sont surlignées « à valider » et dites sans les crochets.
-- **Personnages** : « Personnage 1 — parle » et « Personnage 2 — muet » (optionnel), saisis en
-  français et traduits en anglais par Claude au moment du plan ; les photos « visage » peuvent
-  être rattachées au personnage 1 ou 2.
+- **Trois découpages** : **Auto** — le cerveau (« réalisateur ») écrit un **document client**
+  (blocs par idée : hook, problème, démo, preuve, offre, CTA, dialogue verbatim + 🎬 mise en
+  scène) que tu **relis et corriges** avant « Valider le découpage » (aucune image avant) ;
+  **Manuel** (un bloc = un plan, séparés par une ligne vide) ; **Découpage client** : colle le
+  document du client — `BLOC N · [0:00–0:08] — TITRE <dialogue>` puis `🎬 <mise en scène>`.
+  **1 bloc = 1 plan = 1 image = 1 vidéo continue**, dite en plusieurs **tours** enchaînés
+  (extension de la vidéo, 40 s max par plan) ; **un seul personnage parle par tour** ; chaque
+  tour affiche son locuteur, sa durée, ses « mots max » et ses gestes avant / pendant / après
+  (badge « muet » pour un tour sans dialogue). Si un tour échoue, « Reprendre » repart du
+  dernier tour réussi. Une **bible visuelle** (personnages, décor, produit, positions) est
+  ajoutée à chaque image et reste modifiable. Les valeurs `[97 %]` sont surlignées « à
+  valider » et dites sans les crochets.
+- **Style** : « Réaliste (photo UGC) » ou « 3D animée (film d'animation) » (personnages non
+  humains autorisés : objets / mascottes qui parlent). Jamais de nom de studio ; adultes au
+  visage générique dans les deux styles.
+- **Jusqu'à 4 personnages** (nom court + description FR traduite en anglais, « parle » ou
+  « muet »), photos de réf **visage1..visage4** (les anciennes « visage » = personnage 1), et
+  **une fiche voix par personnage qui parle** (verrouillée dès qu'un de ses tours est animé).
+  Nano Banana reçoit au plus 4 réfs : visages des personnages à l'image (celui qui parle en
+  premier d'abord), puis produit, puis le plan validé.
 - Conseil : commence par **« Tester ce plan »** sur un seul plan avant d'animer toute la pub.
 
 ---

@@ -40,8 +40,17 @@ Fait ✅
 À faire (test live — clé Google tier payant)
 - [ ] 1er test réel conseillé : **1 seul plan** (« Tester ce plan »), dialogue FR ~15 mots, 720p
       → ≈ 7-8 s ≈ **0,70-0,80 $**
-- [ ] Valider `OMNI_SEND_DURATION` (config_app, défaut False) : la durée suit-elle bien les
-      timecodes du prompt ? Sinon essayer `response_format.duration` = True
+- [ ] **1er test réel à faire** : bloc 3 Nuansa en **2 tours** (≈ 16 s ≈ **1,60 $**, 2 requêtes),
+      avec son geste « prendre » (17 mots prononcés, pas 21 : sans geste il tient en 1 tour).
+      Vérifier dans app.log « durée demandée = durée reçue » (ffprobe, warning si écart > 1 s)
+      et à l'écoute « phrase non coupée ».
+- [ ] Confirmer au 1er appel le format de `response_format.duration` (« 8s » envoyé ; si 400,
+      essayer « 8 ») — champ documenté (VideoResponseFormat), format non documenté
+- [ ] Points NON vérifiés dans la doc Google : défaut 6 s sans durée, lip-sync dégradé après
+      ~6-7 s, plafond 40 s par vidéo étendue, durée acceptée sur les extensions, français non
+      évalué par Google (« may work but results can vary »)
+- [x] Chronométreur des tours (OMNI_BEATS, 8 s parlé / 10 s muet, tours muets, durée envoyée),
+      mode auto = document client relu, style 3D, 4 personnages + fiches voix par personnage
 - [ ] Valider la forme RÉELLE des blocages Google (HTTP 400 / status failed + errors[] / sortie
       vide, codes exacts) et ajuster `_omni_block_message` (ex. codes avec underscore, cf. xfail)
 - [ ] Comparer le coût réel (console Google) au coût estimé/enregistré (0,10 $/s)

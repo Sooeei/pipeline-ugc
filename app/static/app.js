@@ -1635,6 +1635,7 @@ function objShotCard(s) {
     `<div class="lbl">Mise en scène (prompt image, éditable)</div>` +
     `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
     `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>` +
+    lipsyncWarnHtml(s) +
     `<div class="lbl">💬 Dialogue — ce que l'objet DIT (français, verbatim). Grok fait la voix + lip-sync.</div>` +
     `<textarea class="vo" placeholder="Laisse vide = clip sans parole">${esc(s.dialogue || "")}</textarea>` +
     `<div class="actions">` +
@@ -1862,6 +1863,14 @@ function renderObjAdPanel(r, adId) {
     });
     panel.appendChild(boxR);
   }
+}
+
+// Plan PARLÉ animé par Grok : le serveur retire du mouvement les gestes de tête qui gênent le
+// lip-sync (hochements, tête qui tourne, regards ailleurs…) → message sur la carte du plan.
+function lipsyncWarnHtml(s) {
+  return s && s.lipsync_warning
+    ? `<div class="lipsync-warn" title="Ces gestes ne sont pas envoyés à Grok : ils dégradent la synchro des lèvres.">⚠ ${esc(s.lipsync_warning)}</div>`
+    : "";
 }
 
 // Par plan : « Uploader mon image » (+ ancre), surcharge de la retouche, « Qui parle ».
@@ -4620,6 +4629,7 @@ function aoShotCard(s) {
         `<textarea class="pi">${esc(s.prompt_image)}</textarea>`) +
     `<div class="lbl">🎥 Prompt vidéo Omni (mouvement + qui parle)</div>` +
     `<div class="pi-ro">${esc(s.video_prompt || s.prompt_motion || "—")}</div>` +
+    lipsyncWarnHtml(s) +
     (isClient
       ? `<div class="lbl">Tours Omni (1 vidéo continue${s.segments.length > 1 ? `, ${s.segments.length} extensions enchaînées` : ""})</div>` +
         aoSegmentsHtml(s.segments)

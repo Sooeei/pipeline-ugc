@@ -9,7 +9,17 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageOps
 
-from app import avatar_video, config_app, cost, db, drift, media, pipeline, providers
+from app import (
+    avatar_video,
+    config_app,
+    cost,
+    db,
+    drift,
+    media,
+    pipeline,
+    prompt_profiles,
+    providers,
+)
 from app.main import app
 from app.providers import ProviderConfig
 
@@ -290,14 +300,18 @@ def test_build_video_prompt_no_decor_no_character_description():
         p = avatar_video._clip_prompt(clip, ad, model)
         words = {w.strip('.,:;"()!').lower() for w in p.split()}
         assert not (words & forbidden), (model, words & forbidden)
-        assert p.startswith(("raises an eyebrow", "<FIRST_FRAME> raises an eyebrow"))
+        if model == "grok":   # Grok : bloc « plan unique » puis caméra / cadrage, puis le geste
+            assert p.startswith(prompt_profiles.GROK_SINGLE_SHOT) and "raises an eyebrow" in p
+        else:
+            assert p.startswith(("raises an eyebrow", "<FIRST_FRAME> raises an eyebrow"))
         assert "Character 1 (Léa) talking, expressive mouth, subtle body motion." in p
         assert "Character 2 (Paul) keeps their mouth closed, does not speak." in p
         assert "Never mirror the image, keep framing and background exactly as the start frame." in p
         assert "Franchement, 97 % des femmes adorent ça !" in p and "[" not in p
         assert sheet in p
     grok = avatar_video._clip_prompt(clip, ad, "grok")
-    assert f'AUDIO: {sheet}, saying: "Franchement, 97 % des femmes adorent ça !"' in grok
+    assert (f'AUDIO: {sheet}, speaking French with a natural accent from France, '
+            'saying: "Franchement, 97 % des femmes adorent ça !"') in grok
     kling = avatar_video._clip_prompt(clip, ad, "kling")
     assert 'says: "Franchement, 97 % des femmes adorent ça !"' in kling
 

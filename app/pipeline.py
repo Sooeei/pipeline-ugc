@@ -18,15 +18,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import brain, config_app, cost, db, gen_trace, media, omni_timing
+from . import brain, config_app, cost, db, gen_trace, lipsync_rules, media, omni_timing
 from . import prompt_profiles as pp
 from .providers import (
     ContentFilterError,
     ProviderConfig,
     ProviderError,
     _log_detail,
+    build_grok_prompt,
     gradium_tts,
-    grok_dialogue_prompt,
     grok_generate_video,
     heygen_create_video,
     heygen_render_to_file,
@@ -605,13 +605,41 @@ def objet_voice_tone(speaker: dict[str, str] | None, default_tone: str) -> str:
     return default_tone
 
 
-def objet_speaker_motion(motion: str, speaker: dict[str, str] | None, n_persos: int) -> str:
-    """Plusieurs persos : précise QUI parle (les autres se taisent). 0/1 perso : inchangé."""
-    motion = str(motion or "").strip()
-    if not speaker or n_persos < 2:
-        return motion
+def objet_speaker_line(speaker: dict[str, str] | None, persos: list[dict[str, str]]) -> str:
+    """Plan PARLÉ : un seul perso parle — « Only <nom (description)> speaks and lip-syncs; the
+    others stay silent. » (plusieurs persos) ; 1 perso : version courte ; sans perso : « Only the
+    character speaks and lip-syncs. »."""
+    if not speaker:
+        return lipsync_rules.single_speaker_line("the character")
     who = speaker["nom"] + (f" ({speaker['description']})" if speaker.get("description") else "")
-    return f"{motion} SPEAKER: only {who} speaks and lip-syncs; the other characters stay silent.".strip()
+    others = [p["nom"] for p in persos if p.get("nom") and p["nom"] != speaker["nom"]]
+    return lipsync_rules.single_speaker_line(who, others)
+
+
+def objet_grok_prompt(
+    ad: dict[str, Any] | None, c: dict[str, Any], voice_tone: str, pace: str,
+) -> tuple[str, list[str]]:
+    """Prompt Grok FINAL d'un plan Objet animé + gestes de tête retirés (plan parlé).
+    Dialogue VERBATIM (clips.script) ; fiche voix du perso qui parle MOT POUR MOT (objet_voice_tone) ;
+    règles lip-sync + plan unique + langue/accent : providers.build_grok_prompt. Plan muet :
+    mouvement d'origine, ni fiche voix ni « qui parle »."""
+    dialogue = str(c.get("script") or "").strip()
+    motion = str(c.get("motion_prompt") or "")
+    if not dialogue:
+        return build_grok_prompt(motion, "")
+    speaker = clip_speaker_character(ad, c)
+    return build_grok_prompt(
+        motion, dialogue, tone=objet_voice_tone(speaker, voice_tone), pace=pace,
+        speaker_line=objet_speaker_line(speaker, ad_characters(ad)),
+    )
+
+
+def lipsync_warning(motion: str, dialogue: str) -> str:
+    """Avertissement FR de la carte d'un plan PARLÉ Grok : gestes de tête retirés du mouvement
+    ("" si plan muet ou rien retiré)."""
+    if not str(dialogue or "").strip():
+        return ""
+    return lipsync_rules.gestures_warning(lipsync_rules.strip_lipsync_gestures(str(motion or ""))[1])
 
 
 def _image_digest(path: str) -> str:
@@ -1201,17 +1229,14 @@ def animate_objet_clips(
 
     # Persos parlants (facultatif) : fiche voix du perso qui parle injectée MOT POUR MOT.
     ad_row = db.get_ad(ad_id) or {}
-    n_persos = len(ad_characters(ad_row))
 
     def _render(c: dict[str, Any], mp4: Path) -> None:
         n = int(c["scene_n"])
         # Dialogue VERBATIM du plan (ce que l'objet dit) → intégré au prompt Grok (section AUDIO).
         dialogue = str(c.get("script") or "").strip()
-        speaker = clip_speaker_character(ad_row, c) if dialogue else None   # muet : personne
-        prompt = grok_dialogue_prompt(
-            objet_speaker_motion(str(c.get("motion_prompt", "")), speaker, n_persos), dialogue,
-            objet_voice_tone(speaker, voice_tone), pace_cfg["directive"]
-        )
+        prompt, removed = objet_grok_prompt(ad_row, c, voice_tone, pace_cfg["directive"])
+        if removed:
+            _log_detail(f"Objet plan {n} : {lipsync_rules.gestures_warning(removed)}")
         # Durée calibrée sur le temps naturel pour dire le dialogue au DÉBIT choisi
         # (+ secondes ajoutées via « Régénérer (+1 s) », bornées au max Grok).
         seconds = config_app.with_extra_seconds(
@@ -1222,6 +1247,7 @@ def animate_objet_clips(
         grok_generate_video(
             cfg, str(c["image_path"]), prompt, mp4,
             model_value=vmodel["model"], seconds=seconds, label=ad_name, index=n - 1,
+            dialogue=" ".join(dialogue.split()),   # tel qu'il figure dans le prompt (assemble)
         )
         if not cfg.dry_run:
             # Grok facture la durée PRODUITE : on compte la durée mesurée si elle est connue.

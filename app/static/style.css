@@ -498,6 +498,7 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 .obj-ad-panel .box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); }
 .obj-ad-panel h3 { margin: 0 0 6px; font-size: 14px; }
 .obj-ad-panel .warn { font-size: 12px; color: var(--warn); margin-top: 6px; }
+.lipsync-warn { font-size: 12px; color: var(--warn); margin: 4px 0 6px; }
 .perso-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
 .perso-row:first-of-type { border-top: 0; }
 .perso-row textarea { grid-column: 1 / -1; min-height: 44px; font-size: 12px; }

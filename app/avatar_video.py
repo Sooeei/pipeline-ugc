@@ -41,6 +41,7 @@ from . import (
     drift,
     gen_trace,
     jobs,
+    lipsync_rules,
     media,
     pipeline,
     prompt_profiles,
@@ -176,17 +177,22 @@ def build_video_prompt(
     names: dict[int, str],
     model: str,
     scene_desc: str = "",
+    accent: str = "",
 ) -> str:
     """Prompt image→vidéo d'UN bloc. Ordre : geste/expression (video_prompt nettoyé des marques,
     ≤ 12 mots) → « Character N (nom) talking… » → chaque autre perso à l'image bouche fermée →
     « Never mirror… » → réplique VERBATIM (crochets retirés) + fiche voix VERBATIM, au format du
     modèle (Grok : section AUDIO: ; Omni : réplique + synchro ; Kling : réplique entre
     guillemets). AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
-    `scene_desc` : UNIQUEMENT en mode « texte seul » (Omni sans image), sinon rien à voir."""
+    `scene_desc` : UNIQUEMENT en mode « texte seul » (Omni sans image), sinon rien à voir.
+    Grok : blocs assemblés par providers.build_grok_prompt (plan unique, règles lip-sync des plans
+    parlés, langue + `accent` de la fiche voix) — voir `_grok_block_prompt`."""
     model = config_app.normalize_avatar_video_model(model)
     sp = max(1, int(speaker or 1))
     text = pipeline._omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
     sheet = str(voice_sheet or "").strip()
+    if model == "grok":
+        return _grok_block_prompt(video_prompt, sp, others_in_frame, text, sheet, names, accent)[0]
     parts: list[str] = []
     if model == "omni" and not scene_desc.strip():
         parts.append("<FIRST_FRAME>")
@@ -207,11 +213,7 @@ def build_video_prompt(
     else:
         parts.append("Never mirror the image, keep framing and background exactly as the start frame.")
     if text:
-        if model == "grok":
-            # Même section AUDIO que providers.grok_dialogue_prompt ; la fiche voix porte déjà
-            # le débit → pas de directive de débit ajoutée.
-            parts.append(f'AUDIO: {sheet}, saying: "{text}"' if sheet else f'AUDIO: saying: "{text}"')
-        elif model == "omni":
+        if model == "omni":
             parts.append(f'Character {sp} says: "{text}"')
             if sheet:
                 parts.append(f"Voice: {sheet}.")
@@ -222,6 +224,49 @@ def build_video_prompt(
             if sheet:
                 parts.append(f"Voice: {sheet}.")
     return " ".join(p for p in parts if p)
+
+
+_NEVER_MIRROR = "Never mirror the image, keep framing and background exactly as the start frame."
+
+
+def _grok_block_prompt(
+    video_prompt: str, sp: int, others_in_frame: list[int], text: str, sheet: str,
+    names: dict[int, str], accent: str = "",
+) -> tuple[str, list[str]]:
+    """Prompt Grok d'un bloc v2 + gestes de tête retirés. Bloc PARLÉ : gestes retirés AVANT la
+    coupe à 12 mots, « Only Character N speaks… », AUDIO = fiche voix VERBATIM + langue/accent +
+    réplique VERBATIM (la fiche porte déjà le débit). Bloc muet : mouvement d'origine."""
+    motion = brain.scrub_brand_names(" ".join(str(video_prompt or "").split()))
+    removed: list[str] = []
+    if text:
+        motion, removed = lipsync_rules.strip_lipsync_gestures(motion)
+    others: list[int] = []
+    for m in others_in_frame or []:
+        if int(m) != sp and int(m) not in others:
+            others.append(int(m))
+    perf = " ".join([f"{_who(sp, names)} talking, expressive mouth, subtle body motion."]
+                    + [f"{_who(m, names)} keeps their mouth closed, does not speak." for m in others])
+    prompt, _ = providers.build_grok_prompt(
+        _gesture(motion), text, tone=sheet, performance=perf, accent=accent,
+        speaker_line=lipsync_rules.single_speaker_line(_who(sp, names), [_who(m, names) for m in others]),
+        extra_negatives=_NEVER_MIRROR,
+    )
+    return prompt, removed
+
+
+def speaker_accent(ad: dict[str, Any] | None, speaker: int) -> str:
+    """Phrase d'accent (anglais) de la fiche voix du perso : champ libre prioritaire, sinon
+    l'accent du sélecteur (config_app.OMNI_ACCENTS) — même règle que config_app.voice_sheet."""
+    p = config_app.speaker_voice_profile(pipeline.ad_voice_profiles(ad), speaker, (ad or {}).get("voice_profile"))
+    return p["accent"] or config_app.OMNI_ACCENTS[p["accent_region"]]["phrase"]
+
+
+def lipsync_warning(c: dict[str, Any], model: str) -> str:
+    """Avertissement FR de la carte d'un bloc PARLÉ animé par Grok : gestes de tête retirés."""
+    if config_app.normalize_avatar_video_model(model) != "grok":
+        return ""
+    motion = str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt") or "")
+    return pipeline.lipsync_warning(brain.scrub_brand_names(" ".join(motion.split())), str(c.get("script") or ""))
 
 
 def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str) -> str:
@@ -236,6 +281,7 @@ def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str) -> str:
         names=pipeline.ad_character_names(ad),
         model=model,
         scene_desc=pipeline.clip_scene_desc(c) if pipeline.clip_text_only(c) else "",
+        accent=speaker_accent(ad, sp),
     )
 
 
@@ -354,9 +400,11 @@ def _generate_raw(
         return {}
     spec = config_app.AVATAR_VIDEO_MODELS[model]
     if model == "grok":
+        # Réplique attendue, telle qu'insérée dans le prompt (crochets retirés, guillemets “ ”).
+        expected = pipeline._omni_quote_dialogue(brain.strip_brackets(str(c.get("script") or "").strip()))
         providers.grok_generate_video(
             cfg, image, prompt, raw, model_value=spec["model"], seconds=seconds,
-            label=label, index=n - 1, resolution=resolution,
+            label=label, index=n - 1, resolution=resolution, dialogue=" ".join(expected.split()),
         )
         return {}
     if model == "kling":

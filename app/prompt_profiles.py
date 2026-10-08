@@ -112,9 +112,17 @@ OMNI = ModelProfile(
 )
 
 # GROK — xAI Grok Imagine Video 1.5 (image → vidéo, voix + lip-sync natifs).
+# Bloc « plan unique » collé en tête de TOUT prompt Grok (parlé ou muet).
+GROK_SINGLE_SHOT = ("Single continuous shot, the first frame is the exact provided image, no cuts, "
+                    "no new characters, no on-screen text, no music.")
 GROK = ModelProfile(
     key="grok", label="xAI Grok Imagine", model_id="grok-imagine-video-1.5",
-    limits={"clip_seconds": (4, 12), "usd_per_second_720p": 0.14, "usd_per_input_image": 0.01},
+    # [0] = bloc single_shot ; le reste = bloc negatives (providers.build_grok_prompt).
+    anti_defects=(GROK_SINGLE_SHOT, "No subtitles, no captions, no watermark."),
+    limits={"clip_seconds": (4, 12), "usd_per_second_720p": 0.14, "usd_per_input_image": 0.01,
+            "input_images": 1,                 # 1 seule image = la start frame (jamais de réf)
+            "resolutions": ("480p", "720p"),   # pas de 1080p
+            "text_to_video": False},           # image → vidéo uniquement
     verified_on="2026-10-08",
 )
 

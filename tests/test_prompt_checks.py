@@ -44,7 +44,14 @@ def test_nano_banana_block_order_is_fixed():
 
 
 def test_assemble_default_profile_still_collapses_spaces():
-    assert pp.assemble(pp.GROK, {pp.B_AUDIO: "b  c", pp.B_CAMERA: "a\n"}) == "a b c"
+    assert pp.assemble(pp.GROK, {pp.B_AUDIO: "b  c", pp.B_CAMERA: "a\n"}) == "a. b c."
+
+
+def test_assemble_one_line_blocks_end_with_a_period():
+    """Blocs collés sur une ligne : « She smiles warmly Only Blonde… » → « … warmly. Only… »."""
+    p = pp.assemble(pp.GROK, {pp.B_SUBJECT: "She smiles warmly", pp.B_PERFORMANCE: "Only Blonde speaks.",
+                              pp.B_AUDIO: 'saying: "Salut !"'})
+    assert p == 'She smiles warmly. Only Blonde speaks. saying: "Salut !"'
 
 
 def test_final_prompt_unchanged():

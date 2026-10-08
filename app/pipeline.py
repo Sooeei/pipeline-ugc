@@ -2036,7 +2036,10 @@ def build_omni_block_prompt(
     subject: list[str] = []
     if chain_turn:
         ref = prompt_profiles.omni_ref_tag(images, 0)
-        lead = f"Show the same character in the next scene{', ' + gesture if gesture else ''}."
+        # Le geste suit une virgule : minuscule initiale, sans point final doublé.
+        tail = gesture.rstrip(" .")
+        tail = tail[:1].lower() + tail[1:]
+        lead = f"Show the same character in the next scene{', ' + tail if tail else ''}."
         gesture = ""
         if ref:
             subject.append(f"Framing, set and outfit as in {ref}")

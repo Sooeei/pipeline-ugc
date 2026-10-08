@@ -98,6 +98,10 @@ def assemble(profile: ModelProfile, blocks: dict[str, str]) -> str:
     out = [_clean_block(profile, blocks[k]) for k in profile.block_order if str(blocks.get(k) or "").strip()]
     out += [_clean_block(profile, v) for k, v in blocks.items()
             if k not in profile.block_order and str(v or "").strip()]
+    if profile.block_separator == " ":
+        # Blocs collés sur une ligne : un bloc qui finit sur un mot reçoit son point final
+        # (sinon « She smiles warmly Only Blonde speaks… » se lit comme une seule phrase).
+        out = [b + "." if b[-1:].isalnum() else b for b in out]
     return profile.block_separator.join(out)
 
 

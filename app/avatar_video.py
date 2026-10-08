@@ -436,12 +436,22 @@ def _generate_raw(
             media.make_placeholder_mp4_from_image(image, raw, seconds)
         else:
             media.make_placeholder_mp4(raw, seconds=seconds, label=f"SIMULATION {label} {n}")
-        # Simulation gérée ici (les enveloppes providers ne sont pas appelées) → journal direct.
+        # Simulation gérée ici (les enveloppes providers ne sont pas appelées) → mêmes images,
+        # mêmes rôles et même contrôle avant envoi qu'en réel, puis journal direct.
+        if model == "omni":
+            sent = providers.omni_sent_images(*omni_block_images(c, ad))
+            dialogue = str(c.get("script") or "")
+        else:
+            sent = prompt_profiles.sent_images([image] if image else [], None,
+                                               prompt_profiles.ROLE_FIRST_FRAME)
+            dialogue = " ".join(pipeline._omni_quote_dialogue(
+                brain.strip_brackets(str(c.get("script") or "").strip())).split()) if model == "grok" else ""
+        issues = prompt_profiles.preflight(model, prompt, images=sent, dialogue=dialogue) \
+            if model in ("omni", "grok") else []
         gen_trace.record(
             kind="video", model=config_app.AVATAR_VIDEO_MODELS[model]["model"], prompt=prompt,
-            images=prompt_profiles.sent_images([image] if image else [], None,
-                                               prompt_profiles.ROLE_FIRST_FRAME),
-            params={"seconds": seconds, "resolution": resolution}, dry_run=True, output_path=str(raw),
+            images=sent, params={"seconds": seconds, "resolution": resolution}, dry_run=True,
+            issues=issues, output_path=str(raw),
         )
         return {}
     spec = config_app.AVATAR_VIDEO_MODELS[model]
@@ -737,16 +747,19 @@ def _animate_voice_chains(
                     pacer.acquire(seconds * spec["cost_per_second_usd"], lambda w, n=n: emit({
                         "scene": n, "phase": "attente_tier1", "status": "en_cours",
                         "message": pipeline.tier1_wait_message(w), "wait_s": round(w)}))
-                if k == 0:
-                    res = providers.omni_generate_video(
-                        cfg, image, prompt, part, seconds, anchor_path=anchor,
-                        model_value=spec["model"], label=ad_name, index=n - 1, store=True,
-                        resolution=resolution, dialogue=str(c.get("script") or ""))
-                else:
-                    res = providers.omni_extend_video(
-                        cfg, prev_id, prompt, part, seconds, model_value=spec["model"],
-                        label=ad_name, index=n - 1, resolution=resolution,
-                        dialogue=str(c.get("script") or ""), reference_paths=refs)
+                # Journal : chaque tour est rattaché au plan qu'il produit.
+                with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
+                                       step="chaine" if k == 0 else "chaine_suite"):
+                    if k == 0:
+                        res = providers.omni_generate_video(
+                            cfg, image, prompt, part, seconds, anchor_path=anchor,
+                            model_value=spec["model"], label=ad_name, index=n - 1, store=True,
+                            resolution=resolution, dialogue=str(c.get("script") or ""))
+                    else:
+                        res = providers.omni_extend_video(
+                            cfg, prev_id, prompt, part, seconds, model_value=spec["model"],
+                            label=ad_name, index=n - 1, resolution=resolution,
+                            dialogue=str(c.get("script") or ""), reference_paths=refs)
                 got = Path(str(res.get("path") or part))
                 if cfg.dry_run:
                     _sim_turn_video(c, got, seconds, f"{ci}-{k + 1}")

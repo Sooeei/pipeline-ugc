@@ -692,14 +692,110 @@ def create_app() -> FastAPI:
         confirm: bool = Form(False),
         ref_kinds: str = Form(""),
         files: list[UploadFile] = File(default=[]),
+        plan1_file: UploadFile | None = File(None),
+        plan1_anchor: bool = Form(True),
+        anchor_edit: bool = Form(False),
+        characters: str = Form(""),
     ) -> dict[str, Any]:
+        """`plan1_file` (facultatif) = MON image pour le Plan 1 : recadrée 9:16 720x1280, posée
+        comme image du plan (« image_pret », ancre si `plan1_anchor`) — AUCUNE génération Nano
+        Banana pour ce plan. `anchor_edit` = « Retouche de l'ancre » ; `characters` = persos (JSON)."""
         cfg = load_provider_config()
         shots = _parse_shots(shots_json)
+        raw1 = await plan1_file.read() if plan1_file is not None else b""
+        if plan1_file is not None and not raw1:
+            raise HTTPException(400, "Image du Plan 1 vide.")
+        if len(raw1) > _KEYFRAME_MAX_BYTES:
+            raise HTTPException(400, "Image trop lourde (max 25 Mo).")
+
+        def _on_ad(aid: int) -> None:
+            db.set_ad_fields(aid, anchor_edit=1 if anchor_edit else 0)
+            if characters.strip():
+                db.set_ad_characters(aid, characters)
+
         # script = DIALOGUE du plan (verbatim, éditable) ; motion_prompt + prompt_image.
-        return await _start_plan_images(
+        res = await _start_plan_images(
             cfg, "objet", ad_name, shots, files, ref_kinds, confirm,
             clip_script=lambda s: str(s.get("dialogue", "")),
+            on_ad=_on_ad, generate_first=not raw1,
         )
+        if raw1:
+            first = db.clips_for_ad(int(res["ad_id"]))[0]
+            _save_plan_upload(first, raw1, as_anchor=plan1_anchor)
+        return res
+
+    @app.post("/api/objet/upload-image/{clip_id}")
+    async def objet_upload_image(
+        clip_id: int, file: UploadFile = File(...), anchor: bool = Form(False),
+    ) -> dict[str, Any]:
+        """« Uploader mon image » sur un plan : recadrage CENTRÉ 9:16 720x1280 (Pillow), écrit
+        sous {n}.png (même convention que les images générées), clips.image_path mis à jour,
+        statut « image_pret » ; `anchor` = utiliser comme ancre. AUCUN appel payant."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"])) or {}
+        if ad.get("kind") != "objet":
+            raise HTTPException(400, "Ce plan n'appartient pas à une pub « Objet animé ».")
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(400, "Fichier vide.")
+        if len(raw) > _KEYFRAME_MAX_BYTES:
+            raise HTTPException(400, "Image trop lourde (max 25 Mo).")
+        return _save_plan_upload(clip, raw, as_anchor=anchor)
+
+    @app.post("/api/objet/ad/{ad_id}/settings")
+    def objet_ad_settings(ad_id: int, body: ObjetAdSettingsIn) -> dict[str, Any]:
+        """Réglages de la pub Objet animé : retouche de l'ancre (toggle) et liste des persos."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "objet":
+            raise HTTPException(404, "Pub « Objet animé » introuvable.")
+        if body.anchor_edit is not None:
+            db.set_ad_fields(ad_id, anchor_edit=1 if body.anchor_edit else 0)
+        persos = None
+        if body.characters is not None:
+            persos = db.set_ad_characters(ad_id, body.characters)
+        ad = db.get_ad(ad_id) or {}
+        return {"ok": True, "anchor_edit": pipeline.ad_anchor_edit(ad),
+                "characters": persos if persos is not None else pipeline.ad_characters(ad)}
+
+    @app.post("/api/objet/clip/{clip_id}/options")
+    def objet_clip_options(clip_id: int, body: ObjetClipOptionsIn) -> dict[str, Any]:
+        """Options d'un plan Objet animé : surcharge de la retouche de l'ancre et « Qui parle »."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"])) or {}
+        if ad.get("kind") != "objet":
+            raise HTTPException(400, "Ce plan n'appartient pas à une pub « Objet animé ».")
+        fields: dict[str, Any] = {}
+        if body.anchor_edit is not None:
+            v = body.anchor_edit.strip().lower()
+            if v not in ("pub", "oui", "non"):
+                raise HTTPException(400, "Retouche de l'ancre : « pub », « oui » ou « non ».")
+            fields["anchor_edit"] = None if v == "pub" else (1 if v == "oui" else 0)
+        if body.speaker is not None:
+            n = len(pipeline.ad_characters(ad))
+            if not 1 <= int(body.speaker) <= max(n, 1):
+                raise HTTPException(400, "« Qui parle » : perso inconnu.")
+            fields["speaker"] = int(body.speaker)
+        if fields:
+            db.update_clip(clip_id, **fields)
+        clip = db.get_clip(clip_id) or {}
+        return {"ok": True, **_objet_clip_fields(ad, clip)}
+
+    @app.post("/api/objet/ad/{ad_id}/main-ref")
+    def objet_main_ref(ad_id: int, body: MainRefIn) -> dict[str, Any]:
+        """Désigne la RÉF PRINCIPALE de la pub (envoyée en image 1, elle prime sur les planches)."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "objet":
+            raise HTTPException(404, "Pub « Objet animé » introuvable.")
+        if body.ref_id is not None and not any(
+            int(r["id"]) == int(body.ref_id) for r in db.list_ref_images_typed(ad_id)
+        ):
+            raise HTTPException(404, "Réf introuvable pour cette pub.")
+        db.set_main_ref(ad_id, body.ref_id)
+        return {"ok": True, **_objet_refs_fields(ad)}
 
     @app.post("/api/objet/regenerate-image/{clip_id}")
     def objet_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
@@ -773,8 +869,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/objet/ad/{ad_id}")
     def objet_ad(ad_id: int) -> dict[str, Any]:
-        # « dialogue » = ce que l'objet dit (verbatim, éditable).
-        return _ad_shots_response(ad_id, lambda c: {"dialogue": c.get("script") or ""})
+        # « dialogue » = ce que l'objet dit (verbatim, éditable). + options ancre / qui parle.
+        ad = db.get_ad(ad_id) or {}
+        res = _ad_shots_response(ad_id, lambda c: {
+            "dialogue": c.get("script") or "", **_objet_clip_fields(ad, c)})
+        res.update(anchor_edit=pipeline.ad_anchor_edit(ad), characters=pipeline.ad_characters(ad),
+                   **_objet_refs_fields(ad))
+        return res
 
     @app.post("/api/objet/dialogue/{clip_id}")
     def objet_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
@@ -1801,6 +1902,22 @@ class AnchorIn(BaseModel):
     is_anchor: bool = True        # marque ce plan validé comme ancre de cohérence (jalon 2c)
 
 
+class ObjetAdSettingsIn(BaseModel):
+    # Objet animé — réglages de la pub (None = inchangé)
+    anchor_edit: bool | None = None                    # « Retouche de l'ancre » pour toute la pub
+    characters: list[dict[str, Any]] | None = None     # [{nom, image_ref, description, fiche_voix}]
+
+
+class ObjetClipOptionsIn(BaseModel):
+    # Objet animé — options d'UN plan. anchor_edit : "pub" (suit la pub) | "oui" | "non".
+    anchor_edit: str | None = None
+    speaker: int | None = None    # « Qui parle » : n° du perso (1-based) dans la liste de la pub
+
+
+class MainRefIn(BaseModel):
+    ref_id: int | None = None     # réf principale de la pub (None = repli auto : 1re réf produit)
+
+
 class AvatarOmniPlanIn(BaseModel):
     script: str = ""        # texte VERBATIM que la personne dit (découpé, jamais réécrit)
     persona: str = ""       # brief / persona / cible : guide la personne et le ton (visuel)
@@ -2379,6 +2496,61 @@ def _save_keyframe_upload(raw: bytes, folder: Path, n: int) -> Path:
     return dest
 
 
+def _save_plan_upload(clip: dict[str, Any], raw: bytes, *, as_anchor: bool = False) -> dict[str, Any]:
+    """Objet animé — « Uploader mon image » : recadre 9:16 720x1280 → `{n}.png` du dossier de la
+    pub (même convention que les images générées), clips.image_path, statut « image_pret »,
+    keyframe_source « upload » ; `as_anchor` → ce plan devient L'ancre (une seule par pub)."""
+    ad = db.get_ad(int(clip["ad_id"])) or {}
+    folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"]))
+    n = int(clip["scene_n"])
+    try:
+        dest = media.crop_to_plan_png(raw, folder / f"{n}.png")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    clip_id = int(clip["id"])
+    if as_anchor:
+        for c in db.clips_for_ad(int(ad["id"])):
+            if int(c["id"]) != clip_id and c.get("is_anchor"):
+                db.update_clip(int(c["id"]), is_anchor=0)
+    fields: dict[str, Any] = {"image_path": str(dest), "status": "image_pret", "error": None,
+                              "keyframe_source": "upload"}
+    if as_anchor:
+        fields["is_anchor"] = 1
+    db.update_clip(clip_id, **fields)
+    db.log_activity("objet", f"Plan {n} : image uploadée (9:16 720x1280)"
+                             + (" — ancre." if as_anchor else "."))
+    w, h = media.PLAN_IMAGE_SIZE
+    return {"ok": True, "clip_id": clip_id, "image_url": _media_url_v(str(dest)),
+            "status": "image_pret", "is_anchor": bool(as_anchor or clip.get("is_anchor")),
+            "width": w, "height": h}
+
+
+def _objet_clip_fields(ad: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
+    """Champs Objet animé d'un plan : surcharge de retouche (« pub »/« oui »/« non »), retouche
+    effective, « Qui parle » (n° de perso, 0 = pub sans persos), image uploadée ou non."""
+    v = c.get("anchor_edit")
+    override = "pub" if v is None or v == "" else ("oui" if int(v) else "non")
+    has_persos = bool(pipeline.ad_characters(ad))
+    return {
+        "anchor_edit": override,
+        "anchor_edit_on": pipeline.clip_anchor_edit_on(ad, c),
+        "speaker": int(c.get("speaker") or 1) if has_persos else 0,
+        "uploaded": (c.get("keyframe_source") or "") == "upload",
+    }
+
+
+def _objet_refs_fields(ad: dict[str, Any]) -> dict[str, Any]:
+    """Réfs de la pub (avec la RÉF PRINCIPALE effective) + avertissements de contradiction."""
+    typed = db.list_ref_images_typed(int(ad["id"]))
+    main = pipeline.main_ref(typed)
+    refs = [{"id": int(t["id"]), "kind": t.get("kind") or "", "url": _media_url(t.get("path")),
+             "path": t.get("path") or "", "is_main": bool(main and int(main["id"]) == int(t["id"])),
+             "main_explicit": bool(int(t.get("is_main") or 0))}
+            for t in typed]
+    return {"refs": refs, "main_ref_id": int(main["id"]) if main else None,
+            "ref_warnings": pipeline.ref_conflict_warnings(typed, pipeline.ad_anchor_edit(ad))}
+
+
 def _keyframe_fields(c: dict[str, Any]) -> dict[str, Any]:
     """Champs « étape Keyframes » d'un plan Avatar IA (réponse /ad et bibliothèque)."""
     return {
@@ -2538,15 +2710,17 @@ async def _start_plan_images(
     clip_script: Callable[[dict[str, Any]], str],
     on_clip: Callable[[int, dict[str, Any]], None] | None = None,
     on_ad: Callable[[int], None] | None = None,
+    generate_first: bool = True,
 ) -> dict[str, Any]:
     """Commun Objet / Mashup / Avatar IA : contrôles (confirmation, clé OpenRouter), création de la
     pub + des clips (refs_needed conservé), sauvegarde des réfs typées, puis job image du Plan 1
     SEULEMENT (il fixe le personnage/la personne ; les suivants via /consistency après validation).
-    `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type."""
+    `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type.
+    `generate_first=False` (Objet : image du Plan 1 uploadée) → aucun job, aucun coût : job_id None."""
     # Confirmation coûts : les images Nano Banana peuvent être payantes au-delà du quota gratuit.
-    if not cfg.dry_run and not confirm:
+    if generate_first and not cfg.dry_run and not confirm:
         raise HTTPException(400, "Confirmation requise avant de générer des images.")
-    if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+    if generate_first and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
 
     ad_id = db.create_ad(ad_name, "", _json(shots), kind=kind)
@@ -2569,6 +2743,10 @@ async def _start_plan_images(
             "prompt_image": s["prompt_image"], "refs_needed": rn,
         })
 
+    if not generate_first:   # Plan 1 fourni par l'utilisateur : rien à générer maintenant
+        db.set_ad_status(ad_id, "objet_images")
+        return {"ok": True, "job_id": None, "ad_id": ad_id, "dry_run": cfg.dry_run,
+                "plans_total": len(job_shots), "generated_now": 0}
     # SÉQUENTIEL : on ne génère QUE le Plan 1. Les plans suivants restent « en_attente » et se
     # génèrent APRÈS validation du Plan 1, à partir de son image (« Générer les plans suivants »).
     first_only = job_shots[:1]
@@ -2815,11 +2993,16 @@ def _run_consistency(
     clips = db.clips_for_ad(ad_id)
     # Personnage de référence = ancre, sinon 1er plan VALIDÉ avec image (typiquement Plan 1).
     ref = _consistency_ref(clips)
+    if kind == "objet" and pipeline.ad_anchor_edit(ad):
+        # Retouche de l'ancre : l'ancre (même simplement uploadée, « image_pret ») fait foi.
+        ref = pipeline.objet_edit_anchor(clips) or ref
     if ref is None:
         raise HTTPException(400, ref_msg)
     targets = [
         c for c in clips
         if c["id"] != ref["id"] and str(c.get("prompt_image") or "").strip()
+        # Objet : une image UPLOADÉE par l'utilisateur n'est jamais écrasée par ce lot.
+        and not (kind == "objet" and (c.get("keyframe_source") or "") == "upload")
     ]
     if not targets:
         raise HTTPException(400, "Aucun autre plan à uniformiser (un seul plan ?).")

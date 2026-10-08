@@ -1369,7 +1369,9 @@ function renderObjPlan(shots, est) {
 $("objGenImagesBtn").addEventListener("click", async () => {
   if (!objShots.length) return toast("Génère d'abord le plan de tournage.");
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
+  // Mon image pour le Plan 1 : aucune génération (donc aucun coût) pour ce plan.
+  const plan1File = ($("objPlan1File").files || [])[0] || null;
+  if (!dryRun && !plan1File) {
     if (!(currentSettings && currentSettings.openrouter_api_key_set))
       return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages (Objet animé).");
     const perImg = (lastObjEstimate && lastObjEstimate.cout_par_image_usd) || 0.04;
@@ -1388,6 +1390,11 @@ $("objGenImagesBtn").addEventListener("click", async () => {
   fd.append("confirm", "true");
   fd.append("ref_kinds", JSON.stringify(objRefsKinds));
   objRefsFiles.forEach((f) => fd.append("files", f, f.name));
+  fd.append("anchor_edit", $("objAnchorEdit").checked ? "true" : "false");
+  if (plan1File) {
+    fd.append("plan1_file", plan1File, plan1File.name);
+    fd.append("plan1_anchor", $("objPlan1Anchor").checked ? "true" : "false");
+  }
 
   let res;
   try {
@@ -1396,6 +1403,10 @@ $("objGenImagesBtn").addEventListener("click", async () => {
     return toast(e.message);
   }
   objAdId = res.ad_id;
+  if (!res.job_id) {   // Plan 1 uploadé : rien à générer, on passe direct à la validation
+    toast("Plan 1 : ton image est en place (recadrée 9:16 720x1280).");
+    return loadObjGallery(objAdId);
+  }
   $("objProgress").classList.remove("hidden");
   initObjProgress(objShots.slice(0, res.generated_now || 1));  // séquentiel : Plan 1 seulement
   pollObjJob(res.job_id, () => loadObjGallery(objAdId));
@@ -1458,9 +1469,11 @@ async function pollObjJob(jobId, onDone) {
 async function loadObjGallery(adId) {
   if (!adId) return;
   const r = await api("/api/objet/ad/" + adId);
+  objAdState = r;
   $("objValidation").classList.remove("hidden");
   const g = $("objGallery");
   renderOverviewBanner(g, r, "objet", adId);
+  renderObjAdPanel(r, adId);
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(objShotCard(s)));
 }
@@ -1582,6 +1595,8 @@ function objShotCard(s) {
   card.querySelector(".body").insertBefore(
     planRefsControls(s), card.querySelector(".actions")
   );
+  // Upload de MON image + retouche de l'ancre / qui parle (Objet animé).
+  card.querySelector(".body").insertBefore(objPlanOptions(s, card), card.querySelector(".actions"));
 
   // Sauvegarde du DIALOGUE (verbatim, jamais modifié) à la perte de focus.
   const voEl = card.querySelector(".vo");
@@ -1665,6 +1680,196 @@ function waitJobDone(jobId) {
 }
 
 $("objRefreshBtn").addEventListener("click", () => loadObjGallery(objAdId));
+
+// ---- Objet animé : upload d'image + ancre, retouche de l'ancre, persos parlants, réf principale
+let objAdState = null;   // dernière réponse /api/objet/ad (persos, réfs, retouche)
+
+// Aperçu local du Plan 1 (recadrage 9:16 simulé en CSS ; le vrai recadrage est fait côté serveur).
+$("objPlan1File").addEventListener("change", () => {
+  const f = ($("objPlan1File").files || [])[0];
+  const box = $("objPlan1Preview");
+  box.classList.toggle("hidden", !f);
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => (box.querySelector("img").src = String(rd.result));
+  rd.readAsDataURL(f);
+});
+
+async function postJson(url, body) {
+  return api(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
+// Panneau de la pub : toggle « Retouche de l'ancre », persos parlants, réf principale + alertes.
+function renderObjAdPanel(r, adId) {
+  const panel = $("objAdPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  // 1) Retouche de l'ancre (niveau pub ; surcharge possible par plan)
+  const boxEdit = document.createElement("div");
+  boxEdit.className = "box";
+  boxEdit.innerHTML =
+    `<label class="check"><input type="checkbox" class="ae" ${r.anchor_edit ? "checked" : ""} />` +
+    ` <b>Retouche de l'ancre</b> — les plans suivants retouchent l'image ancre (⚓, par défaut le ` +
+    `Plan 1) : « EDIT the anchor image… keep … STRICTLY IDENTICAL… Change ONLY … ». Les chips ` +
+    `de réfs du plan ajoutent des images après l'ancre (ex. un 2e perso via « Style »).</label>`;
+  boxEdit.querySelector(".ae").addEventListener("change", async (ev) => {
+    try {
+      await postJson("/api/objet/ad/" + adId + "/settings", { anchor_edit: ev.target.checked });
+      loadObjGallery(adId);
+    } catch (e) { toast(e.message); }
+  });
+  panel.appendChild(boxEdit);
+
+  // 2) Persos parlants (nom, réf image, description, fiche voix MOT POUR MOT dans le prompt Grok)
+  const boxP = document.createElement("div");
+  boxP.className = "box";
+  boxP.innerHTML =
+    `<h3>🗣️ Persos qui parlent</h3><p class="muted small">Facultatif. La <b>fiche voix</b> (âge, ` +
+    `timbre, débit, ton) est injectée <b>mot pour mot</b> dans le prompt Grok de chacun de ses ` +
+    `plans → voix la plus constante possible. À 2 persos ou plus, choisis « Qui parle » sur ` +
+    `chaque plan.</p><div class="persos"></div>`;
+  const list = boxP.querySelector(".persos");
+  const persos = (r.characters || []).map((p) => ({ ...p }));
+  const refOpts = (r.refs || []).map((x, i) =>
+    ({ v: x.path, t: `Réf ${i + 1}${x.kind ? " (" + x.kind + ")" : ""}` }));
+  const drawPersos = () => {
+    list.innerHTML = "";
+    persos.forEach((p, idx) => {
+      const row = document.createElement("div");
+      row.className = "perso-row";
+      row.innerHTML =
+        `<input class="nom" placeholder="Nom (ex. Pot)" value="${esc(p.nom || "")}" />` +
+        `<select class="img"><option value="">Réf image : aucune</option>` +
+        refOpts.map((o) => `<option value="${esc(o.v)}" ${o.v === p.image_ref ? "selected" : ""}>${esc(o.t)}</option>`).join("") +
+        `</select>` +
+        `<input class="desc" placeholder="Description (ex. pot en céramique blanc)" value="${esc(p.description || "")}" />` +
+        `<button type="button" class="btn small rm">Retirer</button>` +
+        `<textarea class="fv" placeholder="Fiche voix — ex. Femme, 45 ans, timbre chaud et posé, débit lent, ton rassurant.">${esc(p.fiche_voix || "")}</textarea>`;
+      row.querySelector(".nom").addEventListener("input", (ev) => (p.nom = ev.target.value));
+      row.querySelector(".img").addEventListener("change", (ev) => (p.image_ref = ev.target.value));
+      row.querySelector(".desc").addEventListener("input", (ev) => (p.description = ev.target.value));
+      row.querySelector(".fv").addEventListener("input", (ev) => (p.fiche_voix = ev.target.value));
+      row.querySelector(".rm").addEventListener("click", () => { persos.splice(idx, 1); drawPersos(); });
+      list.appendChild(row);
+    });
+  };
+  drawPersos();
+  const actions = document.createElement("div");
+  actions.className = "row";
+  actions.innerHTML =
+    `<button type="button" class="btn small add">+ Ajouter un perso</button>` +
+    `<button type="button" class="btn small primary save">Enregistrer les persos</button>`;
+  actions.querySelector(".add").addEventListener("click", () => {
+    persos.push({ nom: "", image_ref: "", description: "", fiche_voix: "" });
+    drawPersos();
+  });
+  actions.querySelector(".save").addEventListener("click", async () => {
+    try {
+      const res = await postJson("/api/objet/ad/" + adId + "/settings", { characters: persos });
+      toast(`${res.characters.length} perso(s) enregistré(s).`);
+      loadObjGallery(adId);
+    } catch (e) { toast(e.message); }
+  });
+  boxP.appendChild(actions);
+  panel.appendChild(boxP);
+
+  // 3) Réf principale (image 1, elle prime sur les planches) + avertissements honnêtes
+  if ((r.refs || []).length) {
+    const boxR = document.createElement("div");
+    boxR.className = "box";
+    boxR.innerHTML =
+      `<h3>⭐ Réf principale</h3><p class="muted small">Envoyée en <b>image 1</b> avec la consigne ` +
+      `« Match reference image 1 exactly; do not add labels, text or logos that are not on it ». ` +
+      `Par défaut : la 1re photo « Produit ».</p><div class="main-refs"></div>`;
+    const wrap = boxR.querySelector(".main-refs");
+    (r.refs || []).forEach((x, i) => {
+      const lab = document.createElement("label");
+      lab.className = x.is_main ? "on" : "";
+      lab.title = x.is_main ? "Réf principale" : "Choisir comme réf principale";
+      lab.innerHTML =
+        `<img src="${esc(x.url || "")}" alt="réf ${i + 1}" />` +
+        `<span><input type="radio" name="objMainRef" ${x.is_main ? "checked" : ""} /> Réf ${i + 1}${x.kind ? " · " + esc(x.kind) : ""}</span>`;
+      lab.querySelector("input").addEventListener("change", async () => {
+        try {
+          await postJson("/api/objet/ad/" + adId + "/main-ref", { ref_id: x.id });
+          loadObjGallery(adId);
+        } catch (e) { toast(e.message); }
+      });
+      wrap.appendChild(lab);
+    });
+    (r.ref_warnings || []).forEach((w) => {
+      const d = document.createElement("div");
+      d.className = "warn";
+      d.textContent = "⚠ " + w;
+      boxR.appendChild(d);
+    });
+    panel.appendChild(boxR);
+  }
+}
+
+// Par plan : « Uploader mon image » (+ ancre), surcharge de la retouche, « Qui parle ».
+function objPlanOptions(s, card) {
+  const box = document.createElement("div");
+  box.className = "obj-plan-opts";
+  const persos = (objAdState && objAdState.characters) || [];
+  const up = document.createElement("div");
+  up.className = "obj-upload";
+  up.innerHTML =
+    `<input type="file" class="hidden up-file" accept="image/png,image/jpeg,image/webp" />` +
+    `<button type="button" class="btn small up-btn">📤 Uploader mon image</button>` +
+    `<label class="check"><input type="checkbox" class="up-anchor" ${s.n === 1 || s.is_anchor ? "checked" : ""} /> utiliser comme ancre</label>` +
+    (s.uploaded ? `<span class="muted small">image uploadée (recadrée 9:16 720x1280)</span>` : "");
+  const fileEl = up.querySelector(".up-file");
+  up.querySelector(".up-btn").addEventListener("click", () => fileEl.click());
+  fileEl.addEventListener("change", async () => {
+    const f = (fileEl.files || [])[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    fd.append("anchor", up.querySelector(".up-anchor").checked ? "true" : "false");
+    card.classList.add("busy");
+    try {
+      await api("/api/objet/upload-image/" + s.clip_id, { method: "POST", body: fd });
+      toast(`Plan ${s.n} : image en place (recadrée 9:16 720x1280).`);
+      await loadObjGallery(objAdId);   // l'ancre a pu changer sur un autre plan
+    } catch (e) {
+      toast(e.message);
+      card.classList.remove("busy");
+    }
+  });
+  box.appendChild(up);
+
+  const opts = document.createElement("div");
+  opts.className = "obj-opts";
+  opts.innerHTML =
+    `<span>Retouche de l'ancre :</span><select class="ae">` +
+    [["pub", `comme la pub (${objAdState && objAdState.anchor_edit ? "oui" : "non"})`], ["oui", "oui"], ["non", "non"]]
+      .map(([v, t]) => `<option value="${v}" ${s.anchor_edit === v ? "selected" : ""}>${t}</option>`).join("") +
+    `</select>` +
+    (persos.length >= 2
+      ? `<span>Qui parle :</span><select class="spk">` +
+        persos.map((p, i) => `<option value="${i + 1}" ${s.speaker === i + 1 ? "selected" : ""}>${esc(p.nom)}</option>`).join("") +
+        `</select>`
+      : "");
+  opts.querySelector(".ae").addEventListener("change", async (ev) => {
+    try {
+      const res = await postJson("/api/objet/clip/" + s.clip_id + "/options", { anchor_edit: ev.target.value });
+      Object.assign(s, res);
+    } catch (e) { toast(e.message); }
+  });
+  const spk = opts.querySelector(".spk");
+  if (spk) spk.addEventListener("change", async (ev) => {
+    try {
+      const res = await postJson("/api/objet/clip/" + s.clip_id + "/options", { speaker: Number(ev.target.value) });
+      Object.assign(s, res);
+    } catch (e) { toast(e.message); }
+  });
+  box.appendChild(opts);
+  return box;
+}
 
 // Uniformiser le personnage : régénère les autres plans depuis le Plan 1 validé.
 $("objConsistencyBtn").addEventListener("click", async () => {

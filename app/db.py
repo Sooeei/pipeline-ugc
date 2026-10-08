@@ -208,6 +208,7 @@ def init_db() -> None:
                 "AND c.status NOT IN ('valide', 'pret'))"
             )
         _migrate_objet_image_model(con)
+        _migrate_objet_anchor_characters(con)
         con.commit()
     finally:
         con.close()
@@ -234,6 +235,25 @@ def _migrate_objet_image_model(con: sqlite3.Connection) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (_OBJET_IMAGE_MIGRATION_FLAG,),
     )
+
+
+def _add_column_if_missing(con: sqlite3.Connection, table: str, col: str, col_def: str) -> None:
+    """ALTER TABLE … ADD COLUMN seulement si la colonne est absente (idempotent)."""
+    existing = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    if col not in existing:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+
+
+def _migrate_objet_anchor_characters(con: sqlite3.Connection) -> None:
+    """Objet animé — retouche de l'ancre, persos parlants, réf principale (idempotent) :
+    - ads.anchor_edit   : 1 = « Retouche de l'ancre » active pour toute la pub (défaut 0) ;
+    - ads.characters    : JSON liste de persos [{nom, image_ref, description, fiche_voix}] ;
+    - clips.anchor_edit : surcharge par plan (NULL = suit la pub, 0 = non, 1 = oui) ;
+    - ref_images.is_main: 1 = RÉF PRINCIPALE de la pub (envoyée en image 1, elle prime)."""
+    _add_column_if_missing(con, "ads", "anchor_edit", "INTEGER DEFAULT 0")
+    _add_column_if_missing(con, "ads", "characters", "TEXT")
+    _add_column_if_missing(con, "clips", "anchor_edit", "INTEGER")
+    _add_column_if_missing(con, "ref_images", "is_main", "INTEGER DEFAULT 0")
 
 
 # ---------------------------------------------------------------- settings
@@ -506,6 +526,7 @@ _ALLOWED_AD_COLS = {
     "keyframes_ok", "omni_resolution",
     "pipeline_version", "voice_mode", "video_model", "voices_ok",
     "final_path", "final_audio_path",
+    "anchor_edit", "characters",   # Objet animé : retouche de l'ancre + persos parlants
 }
 
 
@@ -584,16 +605,74 @@ def list_ref_images(ad_id: int) -> list[str]:
 
 
 def list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]:
-    """Réfs avec leur type (jalon 2a) : [{id, path, kind}]."""
+    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main}]."""
     con = connect()
     try:
         rows = con.execute(
-            "SELECT id, path, COALESCE(kind, '') AS kind FROM ref_images WHERE ad_id=? ORDER BY id",
+            "SELECT id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main "
+            "FROM ref_images WHERE ad_id=? ORDER BY id",
             (ad_id,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
         con.close()
+
+
+def set_main_ref(ad_id: int, ref_id: int | None) -> None:
+    """Désigne LA réf principale d'une pub (une seule) ; `None` = aucune désignée (repli auto)."""
+    con = connect()
+    try:
+        con.execute("UPDATE ref_images SET is_main=0 WHERE ad_id=?", (ad_id,))
+        if ref_id is not None:
+            con.execute("UPDATE ref_images SET is_main=1 WHERE ad_id=? AND id=?", (ad_id, ref_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- persos parlants (Objet animé)
+# CONVENTION PARTAGÉE (presets client / bibliothèque de persos) : un perso = dict JSON
+# {"nom", "image_ref" (chemin), "description", "fiche_voix"} — toutes des chaînes.
+CHARACTER_KEYS = ("nom", "image_ref", "description", "fiche_voix")
+MAX_AD_CHARACTERS = 6
+
+
+def normalize_characters(persos: Any) -> list[dict[str, str]]:
+    """Liste de persos propre : accepte une liste de dicts ou sa forme JSON (str). Garde les
+    4 clés de la convention (chaînes, espaces retirés ; la fiche voix reste MOT POUR MOT hors
+    espaces de bord), ignore les persos sans nom, plafonne à MAX_AD_CHARACTERS."""
+    import json
+
+    if isinstance(persos, str):
+        try:
+            persos = json.loads(persos) if persos.strip() else []
+        except ValueError:
+            persos = []
+    out: list[dict[str, str]] = []
+    for p in persos if isinstance(persos, list) else []:
+        if not isinstance(p, dict):
+            continue
+        perso = {k: str(p.get(k) or "").strip() for k in CHARACTER_KEYS}
+        if perso["nom"]:
+            out.append(perso)
+    return out[:MAX_AD_CHARACTERS]
+
+
+def set_ad_characters(ad_id: int, persos: Any) -> list[dict[str, str]]:
+    """Charge (remplace) la liste des persos d'une pub. Point d'entrée réutilisable (presets,
+    bibliothèque) : `persos` = [{nom, image_ref, description, fiche_voix}] (ou JSON).
+    Renvoie la liste normalisée enregistrée. Liste vide = pub sans persos (comportement d'origine)."""
+    import json
+
+    clean = normalize_characters(persos)
+    set_ad_fields(ad_id, characters=json.dumps(clean, ensure_ascii=False) if clean else "")
+    return clean
+
+
+def get_ad_characters(ad_or_id: Any) -> list[dict[str, str]]:
+    """Persos d'une pub (dict `ads` déjà chargé ou id) — [] si aucun."""
+    ad = ad_or_id if isinstance(ad_or_id, dict) else get_ad(int(ad_or_id))
+    return normalize_characters((ad or {}).get("characters") or "")
 
 
 _ALLOWED_CLIP_COLS = {
@@ -605,6 +684,7 @@ _ALLOWED_CLIP_COLS = {
     "video_prompt", "keyframe_mode", "keyframe_ok", "keyframe_source", "omni_prompt",
     "speaker", "voice_ok", "wav_seconds", "clip_seconds", "raw_mp4_path", "frame0_path",
     "drift_score", "drift_flag",
+    "anchor_edit",   # Objet animé : surcharge par plan de la retouche de l'ancre (NULL = pub)
 }
 
 

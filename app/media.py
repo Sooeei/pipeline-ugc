@@ -351,3 +351,29 @@ def make_placeholder_mp4_from_image(
         "-c:a", "aac", "-shortest", str(out),
     ])
     return out
+
+
+# Format des images de plan (Objet animé) : vertical 9:16, 720x1280 (même cadre que Grok 720p).
+PLAN_IMAGE_SIZE = (720, 1280)
+
+
+def crop_to_plan_png(raw: bytes, out_png: str | Path, size: tuple[int, int] = PLAN_IMAGE_SIZE) -> Path:
+    """Image uploadée → PNG 9:16 `size` (720x1280) : recadrage CENTRÉ au ratio cible (rien n'est
+    déformé, les bords en trop sont coupés) puis redimensionnement. Orientation EXIF appliquée.
+    Lève ValueError si `raw` n'est pas une image lisible."""
+    import io
+
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(raw)) as src:
+            src.load()
+            im = ImageOps.exif_transpose(src)
+            im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB")
+            fitted = ImageOps.fit(im, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("Image illisible (formats acceptés : png, jpg, webp).") from exc
+    out = Path(out_png)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fitted.save(out, format="PNG")
+    return out

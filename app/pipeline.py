@@ -410,6 +410,235 @@ def consistency_ref(
     return eligible[0] if eligible else None
 
 
+# ==================================================================== OBJET ANIMÉ — ancre / persos
+# Méthode validée sur le terrain : plan 1 = image du client (ancre), plans suivants = RETOUCHE de
+# l'ancre (« EDIT the anchor image… ») au lieu d'une régénération depuis les réfs.
+
+# Consigne « réf principale » : quand une planche secondaire contredit la réf principale (ex. pot
+# AVEC étiquette vs pot SANS), la réf principale (image 1) doit gagner.
+MAIN_REF_RULE = (
+    "Match reference image 1 exactly; do not add labels, text or logos that are not on it. "
+    "If another reference image shows a different label, text or logo, reference image 1 wins."
+)
+
+# Variante de la consigne de cohérence quand la réf principale occupe l'image 1 : le personnage
+# verrouillé (plan validé) passe en image 2.
+_CHARACTER_CONSISTENCY_AFTER_MAIN = _CHARACTER_CONSISTENCY.replace(
+    "the FIRST reference image is", "reference image 2 is"
+).replace("as that first image", "as reference image 2")
+
+
+def ad_anchor_edit(ad: dict[str, Any] | None) -> bool:
+    """« Retouche de l'ancre » activée au niveau de la pub."""
+    return bool(int((ad or {}).get("anchor_edit") or 0))
+
+
+def clip_anchor_edit_on(ad: dict[str, Any] | None, clip: dict[str, Any] | None) -> bool:
+    """Retouche de l'ancre effective pour UN plan : surcharge du plan (0/1) sinon réglage de la pub."""
+    v = (clip or {}).get("anchor_edit")
+    if v is None or v == "":
+        return ad_anchor_edit(ad)
+    return bool(int(v))
+
+
+def objet_edit_anchor(clips: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """ANCRE de la retouche : le plan marqué ancre (avec image, quel que soit son statut — une
+    image uploadée « image_pret » suffit), sinon le 1er plan (par numéro) ayant une image prête,
+    validée ou animée. None si aucune image."""
+    with_img = [c for c in sorted(clips, key=lambda c: int(c["scene_n"])) if c.get("image_path")]
+    for c in with_img:
+        if c.get("is_anchor"):
+            return c
+    for c in with_img:
+        if c.get("status") in ("image_pret", "valide", "pret"):
+            return c
+    return None
+
+
+def main_ref(typed_refs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """RÉF PRINCIPALE d'une pub : celle désignée (is_main), sinon la 1re réf « produit » (ordre
+    d'upload). None si ni l'une ni l'autre (pas de priorité appliquée : comportement d'origine)."""
+    for t in typed_refs:
+        if int(t.get("is_main") or 0) and t.get("path"):
+            return t
+    for t in typed_refs:
+        if (t.get("kind") or "").strip().lower() == "produit" and t.get("path"):
+            return t
+    return None
+
+
+def ref_conflict_warnings(typed_refs: list[dict[str, Any]], anchor_edit: bool = False) -> list[str]:
+    """Avertissements honnêtes (heuristique, AUCUN appel IA) : une planche peut contredire la
+    réf principale — ex. réf principale produit + une autre photo/planche produit."""
+    main = main_ref(typed_refs)
+    if not main:
+        return []
+    others = [t for t in typed_refs
+              if t is not main and (t.get("kind") or "").strip().lower() == "produit"]
+    out: list[str] = []
+    if others:
+        out.append(
+            f"{len(others)} autre(s) photo(s)/planche(s) « Produit » en plus de la réf principale : "
+            "vérifie qu'elles ne la contredisent pas (étiquette, texte, logo, couleur). En cas de "
+            "doute, la réf principale (envoyée en image 1) prime — ou retire le chip « Produit » "
+            "des plans concernés."
+        )
+    if anchor_edit and others:
+        out.append(
+            "Retouche de l'ancre active : l'ancre fait foi ; une planche produit différente (ex. "
+            "avec étiquette) risque de réintroduire ce qui n'est pas sur l'ancre."
+        )
+    return out
+
+
+def _with_main_first(refs: list[str], main_path: str, *, after: int = 0) -> list[str]:
+    """Place `main_path` juste après les `after` premières réfs (0 = en image 1) s'il est déjà
+    sélectionné pour ce plan (on ne force jamais une réf que les chips du plan excluent)."""
+    if not main_path or main_path not in refs:
+        return refs
+    rest = [p for p in refs if p != main_path]
+    return rest[:after] + [main_path] + rest[after:]
+
+
+def ad_characters(ad: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Persos parlants d'une pub Objet animé ([] = pub d'origine sans persos)."""
+    return db.normalize_characters((ad or {}).get("characters") or "")
+
+
+def clip_speaker_character(ad: dict[str, Any] | None, clip: dict[str, Any] | None) -> dict[str, str] | None:
+    """Perso qui parle dans ce plan (`clips.speaker`, 1-based) ; 1er perso si hors bornes ; None
+    si la pub n'a pas de persos."""
+    persos = ad_characters(ad)
+    if not persos:
+        return None
+    try:
+        i = int((clip or {}).get("speaker") or 1)
+    except (TypeError, ValueError):
+        i = 1
+    return persos[i - 1] if 1 <= i <= len(persos) else persos[0]
+
+
+def build_anchor_edit_prompt(
+    description: str, *, anchor_n: int = 1, keep: list[str] | None = None,
+    extra_legend: str = "",
+) -> str:
+    """Prompt EDIT (retouche de l'ancre) envoyé à Nano Banana Pro, l'ancre étant l'image 1.
+    `description` = description du plan (ce qui change) ; `keep` = éléments gardés STRICTEMENT
+    identiques (persos nommés, produit, décor) ; `extra_legend` = rôle des images suivantes.
+    Un prompt déjà au format EDIT (écrit à la main) est renvoyé tel quel."""
+    desc = str(description or "").strip()
+    if desc.lower().startswith("edit the anchor image"):
+        return desc
+    items = [k for k in (keep or []) if k] or ["the character", "the product", "the set"]
+    keep_txt = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+    parts = [
+        f"EDIT the anchor image (plan {anchor_n}) = reference image 1: keep {keep_txt} STRICTLY "
+        "IDENTICAL (same design, face, proportions, colors, materials, label, lighting and "
+        "rendering style). " + MAIN_REF_RULE,
+    ]
+    if extra_legend:
+        parts.append(extra_legend)
+    parts.append(f"Change ONLY the following: {desc}")
+    return "\n\n".join(parts)
+
+
+def _anchor_edit_keep(persos: list[dict[str, str]]) -> list[str]:
+    """Éléments à garder identiques : persos nommés (sinon « the character »), produit, décor."""
+    names = [p["nom"] for p in persos if p.get("nom")]
+    who = (f"the character {names[0]}" if len(names) == 1
+           else "the characters " + ", ".join(names) if names else "the character")
+    return [who, "the product", "the set"]
+
+
+def objet_anchor_edit_refs(
+    anchor_path: str, needed: list[str] | None, typed_refs: list[dict[str, Any]],
+    main_path: str = "", speaker_ref: str = "", cap: int = config_app.MAX_REFS_PER_IMAGE_CALL,
+) -> list[str]:
+    """Images envoyées en RETOUCHE de l'ancre, dans l'ordre : [ancre, réf principale (si le plan
+    l'utilise), réf du perso qui parle, autres réfs des chips du plan]. L'ancre est TOUJOURS en
+    image 1 (même plan neutre) ; le reste suit les chips (Visage/Produit/Décor/Style), ex. pour
+    ajouter un 2e perso via le chip « Style »."""
+    chips = _select_clip_refs(needed, typed_refs, "", cap=99)
+    rest = _with_main_first(chips, main_path)
+    if speaker_ref and Path(speaker_ref).is_file() and speaker_ref not in rest:
+        rest.insert(1 if rest and rest[0] == main_path else 0, speaker_ref)
+    out = [anchor_path] + [p for p in rest if p != anchor_path]
+    return out[: max(1, cap)]
+
+
+def _anchor_edit_legend(refs: list[str], main_path: str, speaker: dict[str, str] | None) -> str:
+    """Rôle des images envoyées APRÈS l'ancre (image 1)."""
+    if len(refs) <= 1:
+        return ""
+    lines = []
+    for i, p in enumerate(refs[1:], 2):
+        if p == main_path:
+            lines.append(f"reference image {i} = the main product reference (never contradict it)")
+        elif speaker and p == speaker.get("image_ref"):
+            lines.append(f"reference image {i} = {speaker['nom']} — keep this character identical")
+        else:
+            lines.append(f"reference image {i} = an element to ADD or match only (e.g. a second "
+                         "character); never alter what is kept from reference image 1")
+    return "OTHER REFERENCE IMAGES: " + "; ".join(lines) + "."
+
+
+def objet_voice_tone(speaker: dict[str, str] | None, default_tone: str) -> str:
+    """Timbre injecté dans la section AUDIO du prompt Grok : la FICHE VOIX du perso qui parle,
+    MOT POUR MOT (même texte sur tous ses plans → voix la plus constante possible) ; sinon le
+    timbre des Réglages (comportement d'origine)."""
+    if speaker and speaker.get("fiche_voix"):
+        return f"voice of {speaker['nom']} (same voice in every clip): {speaker['fiche_voix']}"
+    return default_tone
+
+
+def objet_speaker_motion(motion: str, speaker: dict[str, str] | None, n_persos: int) -> str:
+    """Plusieurs persos : précise QUI parle (les autres se taisent). 0/1 perso : inchangé."""
+    motion = str(motion or "").strip()
+    if not speaker or n_persos < 2:
+        return motion
+    who = speaker["nom"] + (f" ({speaker['description']})" if speaker.get("description") else "")
+    return f"{motion} SPEAKER: only {who} speaks and lip-syncs; the other characters stay silent.".strip()
+
+
+def objet_shot_inputs(
+    ad: dict[str, Any], clip: dict[str, Any], s: dict[str, Any], needed: list[str] | None,
+    typed_refs: list[dict[str, Any]], character_ref: str = "", prefix: str = "",
+) -> tuple[list[str], str, dict[str, Any]]:
+    """Entrées Nano Banana d'UN plan Objet animé → (réfs ordonnées, préfixe, shot).
+
+    - Retouche de l'ancre active (pub ou plan) ET une ancre existe (autre que ce plan) : images =
+      [ancre, réf principale, perso qui parle, chips…] et prompt EDIT construit depuis la
+      description du plan (le prompt_image du shot est remplacé, pas de préfixe).
+    - Sinon : sélection classique (cohérence via `character_ref`), MAIS la réf principale passe en
+      image 1 avec la consigne MAIN_REF_RULE (le personnage verrouillé passe alors en image 2)."""
+    main = main_ref(typed_refs)
+    main_path = str(main["path"]) if main else ""
+    persos = ad_characters(ad)
+    speaker = clip_speaker_character(ad, clip)
+    speaker_ref = str((speaker or {}).get("image_ref") or "")
+    anchor = None
+    if clip_anchor_edit_on(ad, clip) and ad.get("id") is not None:
+        anchor = objet_edit_anchor(db.clips_for_ad(int(ad["id"])))
+    if anchor and int(anchor["id"]) != int(s["clip_id"]):
+        refs = objet_anchor_edit_refs(str(anchor["image_path"]), needed, typed_refs,
+                                      main_path, speaker_ref)
+        prompt = build_anchor_edit_prompt(
+            str(s.get("prompt_image", "")), anchor_n=int(anchor["scene_n"]),
+            keep=_anchor_edit_keep(persos),
+            extra_legend=_anchor_edit_legend(refs, main_path, speaker),
+        )
+        return refs, "", {**s, "prompt_image": prompt}
+    refs = _select_clip_refs(needed, typed_refs, character_ref)
+    if speaker_ref and Path(speaker_ref).is_file() and speaker_ref not in refs \
+            and len(refs) < config_app.MAX_REFS_PER_IMAGE_CALL:
+        refs.append(speaker_ref)   # perso qui parle (2e perso) : sa réf en plus, si la place
+    if main_path and main_path in refs:
+        refs = _with_main_first(refs, main_path)
+        consistency = _CHARACTER_CONSISTENCY_AFTER_MAIN if (prefix and character_ref) else prefix
+        return refs, MAIN_REF_RULE + "\n\n" + consistency, s
+    return refs, prefix, s
+
+
 def generate_objet_images(
     cfg: ProviderConfig,
     ad_id: int,
@@ -443,6 +672,8 @@ def generate_objet_images(
         cfg = omni_keyframe_cfg(cfg)
         img_extra = {"keyframe_source": config_app.OMNI_KEYFRAME_IMAGE_MODEL, "keyframe_ok": 0}
         db.set_ad_keyframes_ok(ad_id, False)   # nouveau keyframe → à revalider
+    elif kind == "objet":
+        img_extra = {"keyframe_source": ""}   # image générée : n'est plus « uploadée »
     model_id = _objet_image_model_id(cfg)
     # Consigne de cohérence adaptée au type : Mashup = look ultra-réaliste (SANS langage Pixar) ;
     # Objet vivant = personnage-mascotte. Sinon aucune (Plan 1). Avatar IA (Omni) : le RÔLE de
@@ -471,6 +702,13 @@ def generate_objet_images(
             shot_prefix = omni_refs_legend(picked, names)
             db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
                 [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
+        elif kind == "objet":
+            # Objet animé : retouche de l'ancre (si active) ou génération classique, réf
+            # principale en image 1 dans les deux cas (elle prime sur les planches).
+            refs, shot_prefix, s = objet_shot_inputs(
+                ad_row, db.get_clip(int(s["clip_id"])) or {}, s, needed, typed_refs,
+                character_ref, prefix,
+            )
         else:
             refs = _select_clip_refs(needed, typed_refs, character_ref)
         # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
@@ -762,12 +1000,18 @@ def animate_objet_clips(
         cfg.objet_voice_pace, config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]
     )
 
+    # Persos parlants (facultatif) : fiche voix du perso qui parle injectée MOT POUR MOT.
+    ad_row = db.get_ad(ad_id) or {}
+    n_persos = len(ad_characters(ad_row))
+
     def _render(c: dict[str, Any], mp4: Path) -> None:
         n = int(c["scene_n"])
         # Dialogue VERBATIM du plan (ce que l'objet dit) → intégré au prompt Grok (section AUDIO).
         dialogue = str(c.get("script") or "").strip()
+        speaker = clip_speaker_character(ad_row, c) if dialogue else None   # muet : personne
         prompt = grok_dialogue_prompt(
-            str(c.get("motion_prompt", "")), dialogue, voice_tone, pace_cfg["directive"]
+            objet_speaker_motion(str(c.get("motion_prompt", "")), speaker, n_persos), dialogue,
+            objet_voice_tone(speaker, voice_tone), pace_cfg["directive"]
         )
         # Durée calibrée sur le temps naturel pour dire le dialogue au DÉBIT choisi.
         seconds = config_app.clip_seconds_for_dialogue(dialogue, pace_cfg["words_per_sec"])

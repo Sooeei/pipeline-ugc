@@ -167,7 +167,10 @@ def test_omni_images_name_roles_and_record_refs_sent(monkeypatch):
     assert "reference image 2 = character 2's face" in prompt
     assert "reference image 3 = the client's product" in prompt
     assert "reference image 4 = the validated previous shot" in prompt
-    assert prompt.endswith("SHOT\nFamily-friendly, tasteful.")          # + suffixe filtre Google
+    # plan parlé → cadrage serré ; puis interdits (fiche Nano Banana) + suffixe filtre Google
+    assert "Framing: close-up or tight medium shot" in prompt
+    assert prompt.endswith("SHOT\n\nNo text, labels or logos that are not on the reference images."
+                           "\nFamily-friendly, tasteful.")
     sent = json.loads(db.get_clip(cid)["refs_sent"])
     assert [(r["n"], r["kind"], r["path"]) for r in sent] == [
         (1, "visage", "v1.png"), (2, "visage2", "v2.png"), (3, "produit", "p1.png"), (4, "ancre", "anchor.png"),

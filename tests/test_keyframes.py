@@ -180,9 +180,11 @@ def test_regenerate_with_correction_uses_pro_and_resets(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text
         _wait(c, r.json()["job_id"])
     assert len(k.nano) == 1 and k.nano[0]["model"] == "nano_banana_pro"
-    # correction en fin de prompt, seul le suffixe « family-friendly » (filtre Google) la suit
+    # correction en fin du bloc sujet ; seuls les interdits (fiche Nano Banana) et le suffixe
+    # « family-friendly » (filtre Google) la suivent
     assert k.nano[0]["prompt"].endswith(
-        "CORRECTION: plus de lumière sur le visage\nFamily-friendly, tasteful.")
+        "CORRECTION: plus de lumière sur le visage\n\n"
+        "No text, labels or logos that are not on the reference images.\nFamily-friendly, tasteful.")
     clip = db.get_clip(ids[1])
     assert "CORRECTION" not in clip["prompt_image"]   # correction non mémorisée
     assert clip["keyframe_ok"] == 0 and clip["status"] == "image_pret"

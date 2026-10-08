@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 from typing import Any
 
-from . import claude_code, config_app, cost, omni_timing, providers
+from . import claude_code, config_app, cost, omni_timing, prompt_profiles, providers
 from .providers import ProviderConfig
 
 # --- System prompt (collé tel quel, ne pas reformuler) ---
@@ -2056,9 +2056,14 @@ def compose_client_prompt_image(
     « Character N » dans le plan, sinon tous. Aucun nom de studio (scrub_brand_names)."""
     shot_txt = scrub_brand_names((shot or "").strip())
     chars = characters or [int(m) for m in _SHOT_CHAR_RE.findall(shot_txt)] or None
+    # Fiche Nano Banana Pro : sujet (traits clés → bible → ce plan) puis ligne de style +
+    # interdits (« no text »), dans l'ordre fixe des blocs.
     head = traits_header(bible, chars, names)
     head = f"{head}\n\n" if head else ""
-    return f"{head}{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}\n{image_suffix(style)}"
+    return prompt_profiles.nano_banana_prompt({
+        prompt_profiles.B_SUBJECT: f"{head}{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}",
+        prompt_profiles.B_NEGATIVES: image_suffix(style),
+    })
 
 
 def _third_party_names(dialogues: list[str]) -> list[str]:

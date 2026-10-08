@@ -142,11 +142,15 @@ DEFAULT_COST_MODE = "premium"
 # Images = Nano Banana (modèles Google Gemini, via OpenRouter) ; animation = Grok Imagine (xAI).
 # Le CERVEAU (Claude) orchestre. Indépendant des pipelines Avatar/HeyGen, Voix seules, Voix off.
 OBJET_MAX_SHOTS = 40        # nb de plans max par pub (cap large ; le budget est protégé autrement)
-OBJET_MAX_REF_IMAGES = 14   # borne technique haute Nano Banana (on plafonne à ~3/appel, cf. réfs)
+OBJET_MAX_REF_IMAGES = 14   # borne technique haute Nano Banana Pro (14 images, doc Google 08/10/2026)
 # Le cerveau ne produit pas 40 plans en un JSON fiable → on génère par SOUS-LOTS puis on recolle.
 BRAIN_SHOTS_PER_BATCH = 10  # taille d'un sous-appel Claude (recollé en une seule liste numérotée)
-# Réfs images envoyées PAR APPEL à Nano Banana (qualité/coût ; l'API ne documente pas de max).
-MAX_REFS_PER_IMAGE_CALL = 3
+# Réfs images envoyées PAR APPEL à Nano Banana (Objet animé / Mashup). Vérifié le 08/10/2026 :
+# Gemini 3 Pro Image accepte jusqu'à 14 images de référence, dont 6 OBJETS reproduits en haute
+# fidélité et 5 personnages (ai.google.dev/gemini-api/docs/image-generation) ; OpenRouter
+# n'impose aucune limite par requête (GET openrouter.ai/api/v1/models). On retient 6 (= limite
+# « haute fidélité », alignée sur MAX_REFS_PER_IMAGE_CALL_OMNI) ; borne dure : OBJET_MAX_REF_IMAGES.
+MAX_REFS_PER_IMAGE_CALL = 6
 # Moteur du cerveau (Réglages) : API Anthropic (défaut) OU Claude Code (abonnement, `claude -p`).
 # Un seul actif, aucune bascule automatique de l'un vers l'autre.
 BRAIN_ENGINES = {"anthropic_api": "API Anthropic", "claude_code": "Claude Code (abonnement)"}
@@ -166,7 +170,7 @@ def normalize_claude_code_model(value: object) -> str:
     return v if v in CLAUDE_CODE_MODELS else DEFAULT_CLAUDE_CODE_MODEL
 
 
-# Avatar IA (Omni) : 6 réfs max (Nano Banana Pro accepte beaucoup d'images) — ordre de priorité :
+# Avatar IA (Omni) : 6 réfs max (Nano Banana Pro : 14 max, 6 objets haute fidélité) — ordre de priorité :
 # visage (+ sa planche personnage) de chaque personnage à l'image > produit > ancre > le reste.
 MAX_REFS_PER_IMAGE_CALL_OMNI = 6
 OMNI_REF_PRIORITY = ("visage", "visage2", "produit")

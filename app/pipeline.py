@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import brain, config_app, cost, db, gen_trace, media, omni_timing
+from . import prompt_profiles as pp
 from .providers import (
     ContentFilterError,
     ProviderConfig,
@@ -520,6 +521,29 @@ def clip_speaker_character(ad: dict[str, Any] | None, clip: dict[str, Any] | Non
     return persos[i - 1] if 1 <= i <= len(persos) else persos[0]
 
 
+def anchor_edit_blocks(
+    description: str, *, anchor_n: int = 1, keep: list[str] | None = None,
+    extra_legend: str = "",
+) -> dict[str, str]:
+    """Blocs (fiche Nano Banana Pro) du prompt EDIT : rôles des images (ancre = image 1, éléments
+    gardés identiques, réf principale, légende des images suivantes) puis sujet (« Change ONLY
+    the following: … »). Prompt déjà au format EDIT (écrit à la main) → un seul bloc sujet."""
+    desc = str(description or "").strip()
+    if desc.lower().startswith("edit the anchor image"):
+        return {pp.B_SUBJECT: desc}
+    items = [k for k in (keep or []) if k] or ["the character", "the product", "the set"]
+    keep_txt = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+    roles = [
+        f"EDIT the anchor image (plan {anchor_n}) = reference image 1: keep {keep_txt} STRICTLY "
+        "IDENTICAL (same design, face, proportions, colors, materials, label, lighting and "
+        "rendering style). " + MAIN_REF_RULE,
+    ]
+    if extra_legend:
+        roles.append(extra_legend)
+    return {pp.B_IMAGE_ROLES: pp.NANO_BANANA_PRO.block_separator.join(roles),
+            pp.B_SUBJECT: f"Change ONLY the following: {desc}"}
+
+
 def build_anchor_edit_prompt(
     description: str, *, anchor_n: int = 1, keep: list[str] | None = None,
     extra_legend: str = "",
@@ -528,20 +552,8 @@ def build_anchor_edit_prompt(
     `description` = description du plan (ce qui change) ; `keep` = éléments gardés STRICTEMENT
     identiques (persos nommés, produit, décor) ; `extra_legend` = rôle des images suivantes.
     Un prompt déjà au format EDIT (écrit à la main) est renvoyé tel quel."""
-    desc = str(description or "").strip()
-    if desc.lower().startswith("edit the anchor image"):
-        return desc
-    items = [k for k in (keep or []) if k] or ["the character", "the product", "the set"]
-    keep_txt = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
-    parts = [
-        f"EDIT the anchor image (plan {anchor_n}) = reference image 1: keep {keep_txt} STRICTLY "
-        "IDENTICAL (same design, face, proportions, colors, materials, label, lighting and "
-        "rendering style). " + MAIN_REF_RULE,
-    ]
-    if extra_legend:
-        parts.append(extra_legend)
-    parts.append(f"Change ONLY the following: {desc}")
-    return "\n\n".join(parts)
+    return pp.nano_banana_prompt(anchor_edit_blocks(description, anchor_n=anchor_n, keep=keep,
+                                                    extra_legend=extra_legend))
 
 
 def _anchor_edit_keep(persos: list[dict[str, str]]) -> list[str]:
@@ -666,14 +678,17 @@ def objet_shot_inputs(
     if clip_anchor_edit_on(ad, clip) and ad.get("id") is not None:
         anchor = objet_edit_anchor(db.clips_for_ad(int(ad["id"])))
     if anchor and int(anchor["id"]) != int(s["clip_id"]):
-        refs = dedupe_images(objet_anchor_edit_refs(str(anchor["image_path"]), needed, typed_refs,
+        anchor_path = str(anchor["image_path"])
+        refs = dedupe_images(objet_anchor_edit_refs(anchor_path, needed, typed_refs,
                                                     main_path, speaker_ref))
-        prompt = build_anchor_edit_prompt(
+        blocks = anchor_edit_blocks(
             str(s.get("prompt_image", "")), anchor_n=int(anchor["scene_n"]),
             keep=_anchor_edit_keep(persos),
             extra_legend=_anchor_edit_legend(refs, main_path, speaker),
         )
-        return refs, "", {**s, "prompt_image": prompt}
+        roles = image_roles_for(refs, anchor=anchor_path, main=main_path, characters=[speaker_ref])
+        return refs, "", {**s, "prompt_image": pp.nano_banana_prompt(blocks), "image_blocks": blocks,
+                          "image_roles": roles}
     refs = _select_clip_refs(needed, typed_refs, character_ref)
     if speaker_ref and Path(speaker_ref).is_file() and speaker_ref not in refs \
             and len(refs) < config_app.MAX_REFS_PER_IMAGE_CALL:
@@ -681,9 +696,33 @@ def objet_shot_inputs(
     refs = dedupe_images(refs)
     if main_path and main_path in refs:
         refs = _with_main_first(refs, main_path)
+    roles = image_roles_for(refs, main=main_path, characters=[character_ref, speaker_ref])
+    if main_path and main_path in refs:
         consistency = _CHARACTER_CONSISTENCY_AFTER_MAIN if (prefix and character_ref) else prefix
-        return refs, MAIN_REF_RULE + "\n\n" + consistency, s
-    return refs, prefix, s
+        # Bloc « rôles des images » : réf principale (image 1) puis cohérence personnage.
+        roles_block = pp.NANO_BANANA_PRO.block_separator.join(
+            x for x in (MAIN_REF_RULE, consistency.strip()) if x)
+        return refs, roles_block, {**s, "image_roles": roles}
+    return refs, prefix, {**s, "image_roles": roles}
+
+
+def image_roles_for(
+    refs: list[str], *, anchor: str = "", main: str = "", characters: list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    """Rôle de chaque image envoyée à Nano Banana, dans l'ordre : ancre à retoucher, réf
+    principale produit, réf d'un personnage, sinon simple référence."""
+    chars = {c for c in characters if c}
+    out = []
+    for p in refs:
+        if anchor and p == anchor:
+            out.append(pp.ROLE_ANCHOR)
+        elif main and p == main:
+            out.append(pp.ROLE_MAIN_REF)
+        elif p in chars:
+            out.append(pp.ROLE_CHARACTER)
+        else:
+            out.append(pp.ROLE_REFERENCE)
+    return out
 
 
 def generate_objet_images(
@@ -733,13 +772,17 @@ def generate_objet_images(
     # Filtre Google : style du suffixe « family-friendly » (Objet animé = 3D animé).
     safe_style = ad_style(ad_row) if kind == "avatar_omni" else ("3d" if kind == "objet" else "")
     kind_of_path = {str(t.get("path") or ""): str(t.get("kind") or "") for t in typed_refs}
+    # Avatar IA : persos qui SONT le produit personnifié (posés au sol comme un objet).
+    product_chars = (brain.product_characters(ad_row.get("personas"), ad_row.get("bible"))
+                     if kind == "avatar_omni" else set())
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
         shot_prefix = prefix
-        shot_in = s
+        clip_row = db.get_clip(int(s["clip_id"])) or {}
+        grounded = kind == "objet"
         if kind == "avatar_omni":
-            first = clip_first_speaker(db.get_clip(int(s["clip_id"])) or {})
+            first = clip_first_speaker(clip_row)
             picked = select_omni_refs(needed, typed_refs, character_ref, first_speaker=first)
             warn = omni_refs_overflow_warning(needed, typed_refs, character_ref, first_speaker=first,
                                               label=str(s.get("n") or ""))
@@ -748,26 +791,38 @@ def generate_objet_images(
                 db.log_activity("avatar_omni", warn)
             refs = [r["path"] for r in picked]
             shot_prefix = omni_refs_legend(picked, names)
+            roles = [pp.ROLE_CHARACTER if _omni_ref_character(r["kind"]) else pp.ROLE_REFERENCE
+                     for r in picked]
+            grounded = any(_omni_ref_character(r["kind"]) in product_chars for r in picked)
             db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
                 [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
         elif kind == "objet":
             # Objet animé : retouche de l'ancre (si active) ou génération classique, réf
             # principale en image 1 dans les deux cas (elle prime sur les planches).
             refs, shot_prefix, s = objet_shot_inputs(
-                ad_row, db.get_clip(int(s["clip_id"])) or {}, s, needed, typed_refs,
-                character_ref, prefix,
+                ad_row, clip_row, s, needed, typed_refs, character_ref, prefix,
             )
+            roles = list(s.get("image_roles") or [])
         else:
             refs = _select_clip_refs(needed, typed_refs, character_ref)
+            roles = [pp.ROLE_REFERENCE] * len(refs)
+        start = {}
+        if kind in ("objet", "avatar_omni"):
+            start = start_frame_blocks(
+                str((s.get("image_blocks") or {}).get(pp.B_SUBJECT) or s.get("prompt_image", "")),
+                dialogue=str(s.get("dialogue") or clip_row.get("script") or ""),
+                refs_needed=needed, n_refs=len(refs), ref1_is_truth=kind == "objet",
+                grounded=grounded, already=f"{shot_prefix}\n{s.get('prompt_image', '')}",
+            )
         # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
         sent_kinds = [kind_of_path.get(p, "") for p in refs]
         # Journal : étape = keyframe (Avatar IA) / retouche (prompt EDIT de l'ancre) / image.
-        step = "keyframe" if kind == "avatar_omni" else ("retouche" if s is not shot_in else "image")
+        step = "keyframe" if kind == "avatar_omni" else ("retouche" if s.get("image_blocks") else "image")
         with gen_trace.context(ad_id=ad_id, clip_id=int(s["clip_id"]),
                                mode=gen_trace.mode_of_ad(ad_row), step=step):
             if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix,
                                    extra=img_extra, keep_kinds=[k for k in sent_kinds if k],
-                                   safe_style=safe_style):
+                                   safe_style=safe_style, roles=roles, start_frame=start):
                 ok += 1
     ko = len(shots) - ok
     db.set_ad_status(ad_id, "objet_images")
@@ -789,7 +844,7 @@ def _select_clip_refs(
     - `needed is None`  → aucun typage sur ce plan : on envoie toutes les réfs (compat).
     - `needed == []`    → plan neutre (décor/macro) : AUCUNE réf, pas même l'ancre (anti-contamination).
     - sinon             → réfs dont le type est demandé + réfs SANS type (envoyées partout).
-    L'ancre (image du 1er plan validé) est prioritaire ; le tout est plafonné à `cap` (~3)."""
+    L'ancre (image du 1er plan validé) est prioritaire ; le tout est plafonné à `cap` (MAX_REFS_PER_IMAGE_CALL)."""
     sel: list[str] = []
     if anchor and needed != []:
         sel.append(anchor)
@@ -928,11 +983,93 @@ def _objet_image_model_id(cfg: ProviderConfig) -> str:
     )["model"]
 
 
+# ---------------------------------------------------------------- start frames Nano Banana
+# Le plan précise déjà son cadrage → on n'en ajoute pas.
+_FRAMING_WORDS_RE = re.compile(
+    r"\b(?:close-?ups?|extreme close|medium(?:[- ]close)?(?:[- ]up)?[- ]shot|medium close|"
+    r"wide[- ](?:shot|angle|view)|establishing|full[- ](?:body|shot|length)|long shot|macro|"
+    r"overhead|top[- ]down|bird'?s[- ]eye|framing|framed|two[- ]shot|over[- ]the[- ]shoulder)\b",
+    re.IGNORECASE)
+_WIDE_SHOT_RE = re.compile(
+    r"\b(?:panoramic|landscape|whole (?:room|scene|kitchen|bathroom|set|shop|store)|"
+    r"entire (?:room|scene|set)|crowd|street|aerial)\b", re.IGNORECASE)
+_PRODUCT_SHOT_RE = re.compile(
+    r"\b(?:texture|details?|packshot|pack shot|product shot|swatch|droplets?|label)\b", re.IGNORECASE)
+# Objet en l'air / tenu en main : « posé au sol » serait contradictoire.
+_AIRBORNE_RE = re.compile(
+    r"\b(?:fly|flies|flying|float|floats|floating|hover\w*|jump\w*|leap\w*|in the air|mid-?air|"
+    r"bounc\w*|thrown|falling|falls|held|holds?|holding|in (?:her|his|their|a|the) hands?)\b",
+    re.IGNORECASE)
+
+
+def shot_framing(desc: str, *, dialogue: str = "", refs_needed: list[str] | None = None) -> str:
+    """Type de plan déduit des données du plan → clé de cadrage (pp.NB_FRAMINGS) ou "" :
+    cadrage déjà écrit → "" ; dialogue → parlé ; mots de plan large → wide ; mots produit/macro
+    ou plan qui ne demande QUE la photo produit → gros plan produit ; sinon "" (rien imposé)."""
+    d = str(desc or "")
+    if _FRAMING_WORDS_RE.search(d):
+        return ""
+    if str(dialogue or "").strip():
+        return pp.NB_FRAMING_SPOKEN
+    if _WIDE_SHOT_RE.search(d):
+        return pp.NB_FRAMING_WIDE
+    if _PRODUCT_SHOT_RE.search(d) or (refs_needed and set(refs_needed) == {"produit"}):
+        return pp.NB_FRAMING_PRODUCT
+    return ""
+
+
+def start_frame_blocks(
+    desc: str, *, dialogue: str = "", refs_needed: list[str] | None = None, n_refs: int = 0,
+    ref1_is_truth: bool = True, grounded: bool = False, already: str = "",
+) -> dict[str, str]:
+    """Ajouts par défaut d'une START FRAME Nano Banana (blocs de la fiche) :
+    - camera    : cadrage selon le type de plan (shot_framing) ;
+    - grounding : objet / mascotte posé sur une vraie surface avec ombre de contact (sauf objet
+                  en l'air ou tenu en main) — ajouté à la fin du bloc sujet ;
+    - negatives : aucun texte / étiquette / logo absent de la réf 1 (Objet animé), des réfs
+                  (Avatar IA) ou aucun texte (sans réf). Omis si `already` le dit déjà."""
+    out: dict[str, str] = {}
+    framing = shot_framing(desc, dialogue=dialogue, refs_needed=refs_needed)
+    if framing:
+        out[pp.B_CAMERA] = pp.NB_FRAMINGS[framing]
+    if grounded and not _AIRBORNE_RE.search(desc or ""):
+        out["grounding"] = pp.NB_GROUNDING
+    if "logos that are not on" not in f"{already}\n{desc}".lower():
+        out[pp.B_NEGATIVES] = (pp.NB_NO_TEXT if not n_refs else
+                               pp.NB_NO_FOREIGN_TEXT_REF1 if ref1_is_truth else pp.NB_NO_FOREIGN_TEXT_REFS)
+    return out
+
+
+def _omni_ref_character(kind: str) -> int:
+    """Numéro du personnage d'une réf Avatar IA (visage / planche), 0 sinon."""
+    return config_app.omni_sheet_index(kind) or config_app.omni_face_index(kind)
+
+
+def nano_image_prompt(prefix: str, s: dict[str, Any], start_frame: dict[str, str] | None = None) -> str:
+    """Prompt image d'un plan assemblé dans l'ordre fixe de la fiche Nano Banana Pro : rôles des
+    images (`prefix` : légende, réf principale, cohérence, ou en-tête EDIT) → cadrage → sujet
+    (+ objet posé) → interdits."""
+    blocks = dict(s.get("image_blocks") or {pp.B_IMAGE_ROLES: prefix,
+                                            pp.B_SUBJECT: str(s.get("prompt_image", ""))})
+    sf = dict(start_frame or {})
+    grounding = sf.pop("grounding", "")
+    if grounding:
+        subject = str(blocks.get(pp.B_SUBJECT) or "").rstrip()
+        if subject and subject[-1] not in ".!?":
+            subject += "."
+        blocks[pp.B_SUBJECT] = f"{subject} {grounding}".strip()
+    for k, v in sf.items():
+        if v:
+            blocks[k] = v
+    return pp.nano_banana_prompt(blocks)
+
+
 def _generate_one_image(
     cfg: ProviderConfig, ad_id: int, ad_name: str, folder: Path, model_id: str,
     refs: list[str], s: dict[str, Any], emit: UpdateFn, prefix: str = "",
     extra: dict[str, Any] | None = None, *, keep_kinds: list[str] | None = None,
-    safe_style: str = "",
+    safe_style: str = "", roles: list[str] | None = None,
+    start_frame: dict[str, str] | None = None,
 ) -> bool:
     """Génère UNE image Nano Banana pour un plan (avec réfs). Renvoie True si prête. Ne lève pas.
     `prefix` = éventuelle consigne (ex. cohérence personnage pour l'objet vivant) ; `extra` =
@@ -943,7 +1080,7 @@ def _generate_one_image(
     reformulation stricte, puis échec propre (message lisible dans clips.error)."""
     n = int(s["n"])
     clip_id = int(s["clip_id"])
-    prompt_image = prefix + str(s.get("prompt_image", ""))
+    prompt_image = nano_image_prompt(prefix, s, start_frame)
     if keep_kinds is not None:
         prompt_image = strip_photo_refs(prompt_image, keep_kinds=keep_kinds)
     img = folder / f"{n}.png"
@@ -952,7 +1089,7 @@ def _generate_one_image(
         try:
             nano_banana_generate_image(
                 cfg, brain.google_safe_prompt(prompt_image, safe_style), refs, img,
-                label=ad_name, subtitle=f"plan {n}", index=n - 1,
+                label=ad_name, subtitle=f"plan {n}", index=n - 1, image_roles=roles,
             )
         except ContentFilterError:
             emit({"scene": n, "phase": "image", "status": "en_cours",
@@ -961,7 +1098,7 @@ def _generate_one_image(
             try:
                 nano_banana_generate_image(
                     cfg, brain.google_safe_prompt(prompt_image, safe_style, strict=True), refs, img,
-                    label=ad_name, subtitle=f"plan {n}", index=n - 1,
+                    label=ad_name, subtitle=f"plan {n}", index=n - 1, image_roles=roles,
                 )
             except ContentFilterError as exc2:
                 raise ContentFilterError(IMAGE_FILTER_FAILED_MSG) from exc2

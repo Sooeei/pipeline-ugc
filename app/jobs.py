@@ -110,8 +110,23 @@ class JobManager:
         job = Job(ad_id, ad_name, scenes)
         with self._lock:
             self._jobs[job.id] = job
+        # Trace persistante « job en cours » : si l'app s'arrête pendant la génération, les plans
+        # concernés sont remis « à relancer » au prochain démarrage (db.recover_interrupted_jobs).
+        try:
+            db.job_inflight_add(job.id, ad_id, output_mode, list(job.scenes), only_clip_id)
+        except Exception as exc:  # noqa: BLE001 - la trace ne doit jamais bloquer une génération
+            _log_detail(f"jobs_inflight (ajout) : {exc!r}")
 
         def _run() -> None:
+            try:
+                _run_inner()
+            finally:
+                try:
+                    db.job_inflight_done(job.id)
+                except Exception as exc:  # noqa: BLE001
+                    _log_detail(f"jobs_inflight (retrait) : {exc!r}")
+
+        def _run_inner() -> None:
             job.set_state("en_cours")
             try:
                 if output_mode == "voix_seules":
@@ -134,8 +149,9 @@ class JobManager:
                     )
                 elif output_mode == "objet_animate":
                     # « Objet animé » — phase 2 : animation Grok (voix + lip-sync natifs) → clips.
+                    # only_clip_id : « Régénérer (+1 s) » d'un seul plan (réplique coupée).
                     summary = pipeline.animate_objet_clips(
-                        cfg, ad_id, ad_name, on_update=job.on_update,
+                        cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
                     )
                 elif output_mode == "mashup_animate":
                     # « Mashup IA » — animation Kling (1080p, SANS audio) → clips.

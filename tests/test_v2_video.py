@@ -323,9 +323,12 @@ def test_clip_seconds_wav_plus_margin_rounded(elevenlabs_on):
     assert config_app.avatar_clip_seconds(9.8, "omni") == 10      # borné au max
     c = {"wav_seconds": 6.3, "clip_seconds": 99, "script": "x"}
     assert avatar_video.clip_target_seconds(c, "grok", voice_mode="elevenlabs") == 7   # recalcul
-    # Voix native (défaut) : depuis le TEXTE — 10 mots / 2,5 + 1 s = 5 s ; plafond du modèle.
+    # Voix native (défaut) : depuis le TEXTE — 10 mots / 2,2 + 1 s = 5,5 → 6 s ; plafond du modèle.
     c = {"wav_seconds": 0, "clip_seconds": 0, "script": " ".join(["mot"] * 10)}
-    assert avatar_video.clip_target_seconds(c, "grok") == 5
+    assert avatar_video.clip_target_seconds(c, "grok") == 6
+    # « Régénérer (+1 s) » : extra_seconds s'ajoute, borné au max Grok (12 s).
+    assert avatar_video.clip_target_seconds({**c, "extra_seconds": 1}, "grok") == 7
+    assert avatar_video.clip_target_seconds({**c, "extra_seconds": 30}, "grok") == 12
     assert config_app.avatar_native_clip_seconds("un deux", "grok") == 4           # min Grok
     assert config_app.avatar_native_clip_seconds(" ".join(["m"] * 60), "omni") == 10  # max Omni
 

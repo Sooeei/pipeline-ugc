@@ -73,18 +73,21 @@ def estimate_mashup(
 
 
 def estimate_objet(
-    n_shots: int, clip_seconds: int = config_app.GROK_DEFAULT_CLIP_SECONDS
+    n_shots: int, clip_seconds: int = config_app.GROK_ESTIMATE_CLIP_SECONDS
 ) -> dict[str, Any]:
     """Coût estimé « Objet animé » en DOLLARS : Nano Banana (images) + Grok (animation).
 
     Images Nano Banana : gratuites jusqu'à ~500/jour (aistudio), puis ~0,04 $/image.
-    Animation Grok : facturée à la seconde (~4,20 $/min à 720p). On sépare les deux postes :
-    images à la génération, animation seulement pour les plans validés.
+    Animation Grok : facturée à la seconde (0,14 $/s à 720p) + 0,01 $/image d'entrée, sur une
+    durée TYPE de clip parlé (GROK_ESTIMATE_CLIP_SECONDS ≈ 8 s → ~1,13 $/clip). On sépare les
+    deux postes : images à la génération, animation seulement pour les plans validés.
     """
     n = max(0, int(n_shots))
     secs = max(1, int(clip_seconds))
     usd_images = round(n * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
-    usd_video = round(n * secs * config_app.GROK_COST_PER_SECOND_USD, 2)
+    usd_video = round(
+        n * (secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE), 2
+    )
     return {
         "shots": n,
         "clip_seconds": secs,

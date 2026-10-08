@@ -129,6 +129,77 @@ def mp4_duration(path: str | Path) -> float | None:
         return None
 
 
+# --------- Contrôle « réplique coupée » (ffmpeg silencedetect) ---------
+def parse_silencedetect(stderr: str) -> dict[str, Any]:
+    """Analyse la sortie stderr de `ffmpeg -af silencedetect` :
+    {silences: [(début, fin|None)], duration: float|None, has_audio: bool}.
+    Une fin None = silence qui court jusqu'à la fin du fichier (anciens ffmpeg n'émettent pas
+    de silence_end final)."""
+    import re
+
+    silences: list[tuple[float, float | None]] = []
+    for m in re.finditer(r"silence_(start|end):\s*(-?[\d.]+)", stderr or ""):
+        kind, val = m.group(1), float(m.group(2))
+        if kind == "start":
+            silences.append((max(0.0, val), None))
+        elif silences and silences[-1][1] is None:
+            silences[-1] = (silences[-1][0], val)
+    duration: float | None = None
+    dm = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr or "")
+    if dm:
+        duration = int(dm.group(1)) * 3600 + int(dm.group(2)) * 60 + float(dm.group(3))
+    # Durée réellement lue (dernière ligne de progression « time=… ») si plus précise.
+    tms = re.findall(r"time=(\d+):(\d+):([\d.]+)", stderr or "")
+    if tms:
+        h, mi, s = tms[-1]
+        t = int(h) * 3600 + int(mi) * 60 + float(s)
+        if t > 0:
+            duration = t
+    has_audio = bool(re.search(r"Stream #\S+.*Audio:", stderr or ""))
+    return {"silences": silences, "duration": duration, "has_audio": has_audio}
+
+
+def speech_reaches_end(
+    silences: list[tuple[float, float | None]],
+    duration: float | None,
+    tail_s: float | None = None,
+) -> bool:
+    """True si de la VOIX (non-silence) se poursuit dans les `tail_s` dernières secondes → la
+    réplique est peut-être coupée. Clip entièrement silencieux (simulation) → False."""
+    tail = config_app.SPEECH_CUT_TAIL_S if tail_s is None else float(tail_s)
+    if not duration or duration <= 0:
+        return False
+    eps = 0.05
+    if silences:
+        start, end = silences[-1]
+        trailing = end is None or end >= duration - eps
+        if trailing:
+            # Un silence final qui commence au plus tard à (durée − tail) = fin de réplique propre.
+            return start > duration - tail + 1e-6
+    return True  # aucun silence final : la voix (ou le son) va jusqu'au bout
+
+
+def detect_speech_cut(mp4: str | Path) -> bool:
+    """Lance silencedetect sur la piste audio de `mp4` → True si la réplique semble coupée.
+    Jamais d'exception : ffmpeg absent, fichier illisible ou sans audio → False (non bloquant)."""
+    if not ffmpeg_available() or not Path(str(mp4)).is_file():
+        return False
+    noise = config_app.SPEECH_CUT_NOISE_DB
+    d = config_app.SPEECH_CUT_MIN_SILENCE_S
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(mp4), "-vn",
+             "-af", f"silencedetect=noise={noise}dB:d={d}", "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except Exception:  # noqa: BLE001 - contrôle indicatif : jamais bloquant
+        return False
+    info = parse_silencedetect(proc.stderr or "")
+    if not info["has_audio"]:
+        return False
+    return speech_reaches_end(info["silences"], info["duration"])
+
+
 def concat_mp4(parts: Sequence[str | Path], out_path: str | Path) -> str:
     """Concatène des mp4 (tours successifs d'une vidéo Omni étendue) en UN fichier. D'abord sans
     ré-encodage (demuxer concat, -c copy) ; si ça échoue (flux incompatibles), ré-encodage."""

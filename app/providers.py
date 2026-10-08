@@ -646,35 +646,69 @@ CONTENT_FILTER_MESSAGE = (
     "Image bloquée par le filtre de sécurité Google — reformule le prompt (évite les mots liés à "
     "la peau abîmée, au sang, aux blessures, ou les très gros plans de peau)."
 )
-_CONTENT_FILTER_MARKERS = ("content_filter", "content filter", "safety", "blocked", "prohibited",
-                           "recitation", "blocklist", "spii")
+NO_IMAGE_MESSAGE = (
+    "Pas d'image renvoyée par le modèle (après plusieurs essais) — réessaie dans un instant, ou "
+    "change de modèle d'image (Réglages). Ce n'est PAS un blocage du filtre de sécurité."
+)
+# Codes de fin STRUCTURÉS qui signifient un vrai blocage de sécurité (comparaison EXACTE, en
+# minuscules). ⚠️ Plus AUCUNE recherche de sous-chaîne dans du texte libre : l'ancienne détection
+# (« safety », « blocked »… n'importe où dans la réponse) concluait à tort à un blocage sur des
+# prompts anodins (pot de poudre, retouche d'ancre) — Google ne bloquait pas.
+_BLOCK_FINISH_REASONS = frozenset({
+    "content_filter", "safety", "prohibited_content", "image_safety", "image_prohibited_content",
+    "blocklist", "spii", "image_blocklist", "content_filtered",
+})
+NANO_NO_IMAGE_RETRIES = 2          # relances auto si la réponse n'a pas d'image SANS vrai blocage
+NANO_NO_IMAGE_BACKOFF_S = 3.0      # pause croissante entre deux relances (3 s, puis 6 s)
+
+
+def _norm_code(v: Any) -> str:
+    return str(v or "").strip().lower()
 
 
 def _content_filter_reason(data: Any) -> str:
-    """Raison de blocage d'une réponse OpenRouter (finish_reason / native_finish_reason /
-    error / promptFeedback) — "" si la réponse n'a pas été bloquée par un filtre de sécurité."""
+    """Raison de blocage STRUCTURÉE d'une réponse OpenRouter — "" sinon.
+
+    Ne regarde QUE des champs codés (jamais le texte libre d'un message) :
+      - choices[].finish_reason / native_finish_reason ∈ _BLOCK_FINISH_REASONS ;
+      - choices[].error.code / error.code ∈ _BLOCK_FINISH_REASONS ;
+      - error.metadata.reasons non vide (modération OpenRouter : entrée signalée) ;
+      - promptFeedback.blockReason renseigné (≠ BLOCK_REASON_UNSPECIFIED).
+    L'appelant ne conclut à un blocage que si, EN PLUS, la réponse ne contient aucune image."""
     if not isinstance(data, dict):
         return ""
-    found: list[str] = []
     for choice in data.get("choices") or []:
-        if isinstance(choice, dict):
-            found += [str(choice.get(k) or "") for k in ("finish_reason", "native_finish_reason")]
-            err = choice.get("error")
-            if isinstance(err, dict):
-                found.append(str(err.get("message") or err.get("code") or ""))
+        if not isinstance(choice, dict):
+            continue
+        for k in ("finish_reason", "native_finish_reason"):
+            if _norm_code(choice.get(k)) in _BLOCK_FINISH_REASONS:
+                return str(choice.get(k))
+        cerr = choice.get("error")
+        if isinstance(cerr, dict) and _norm_code(cerr.get("code")) in _BLOCK_FINISH_REASONS:
+            return str(cerr.get("code"))
     err = data.get("error")
     if isinstance(err, dict):
-        found += [str(err.get("message") or ""), str(err.get("code") or "")]
-    elif err:
-        found.append(str(err))
+        if _norm_code(err.get("code")) in _BLOCK_FINISH_REASONS:
+            return str(err.get("code"))
+        meta = err.get("metadata")
+        if isinstance(meta, dict) and meta.get("reasons"):
+            return f"modération : {', '.join(str(r) for r in meta['reasons'])[:120]}"
     fb = data.get("promptFeedback") or data.get("prompt_feedback")
     if isinstance(fb, dict):
-        found.append(str(fb.get("blockReason") or fb.get("block_reason") or ""))
-    for reason in found:
-        low = reason.lower()
-        if any(m in low for m in _CONTENT_FILTER_MARKERS):
-            return reason
+        reason = _norm_code(fb.get("blockReason") or fb.get("block_reason"))
+        if reason and reason != "block_reason_unspecified":
+            return str(fb.get("blockReason") or fb.get("block_reason"))
     return ""
+
+
+def _short_response(data: Any, limit: int = 1200) -> str:
+    """Réponse brute TRONQUÉE pour app.log (les data URI base64 sont raccourcies ; la réponse
+    d'OpenRouter ne contient jamais la clé)."""
+    import re
+
+    txt = str(data)
+    txt = re.sub(r"(data:[\w/+.-]+;base64,)[A-Za-z0-9+/=]{40,}", r"\1…", txt)
+    return txt[:limit]
 
 
 def nano_banana_generate_image(
@@ -726,37 +760,60 @@ def nano_banana_generate_image(
         "HTTP-Referer": OPENROUTER_APP_URL,
         "X-Title": OPENROUTER_APP_NAME,
     }
-    try:
-        r = requests.post(
-            f"{OPENROUTER_API_BASE}/chat/completions", headers=headers, json=body, timeout=180
-        )
-    except Exception as exc:  # noqa: BLE001 - réseau
-        _log_detail(f"Nano Banana réseau : {exc}")
-        raise ProviderError(_friendly_network("OpenRouter", exc)) from exc
-    if r.status_code >= 400:
-        _log_detail(f"OpenRouter image {r.status_code} : {r.text[:500]}")
-        try:
-            err_data = r.json()
-        except Exception:  # noqa: BLE001 - corps non JSON
-            err_data = {"error": r.text[:2000]}
-        if r.status_code in (400, 403, 422) and _content_filter_reason(err_data):
-            raise ContentFilterError(CONTENT_FILTER_MESSAGE)
-        raise ProviderError(_friendly_http("OpenRouter", r.status_code))
-
-    data = r.json()
-    img = _openrouter_first_image_bytes(data)
-    if not img and _content_filter_reason(data):
-        _log_detail(f"Nano Banana : bloquée par le filtre ({_content_filter_reason(data)[:120]})")
-        raise ContentFilterError(CONTENT_FILTER_MESSAGE)
-    if not img:
-        _log_detail(f"Nano Banana : aucune image dans la réponse ({str(data)[:300]})")
-        raise ProviderError(
-            "Le modèle n'a pas renvoyé d'image — réessaie, ou change de modèle d'image (Réglages)."
-        )
+    img = _nano_banana_post(headers, body)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
         f.write(img)
     return out_path
+
+
+def _nano_banana_post(headers: dict, body: dict) -> bytes:
+    """POST OpenRouter /chat/completions → octets de l'image.
+
+    - Vrai blocage (code structuré, cf. `_content_filter_reason`) ET pas d'image → ContentFilterError.
+    - Réponse 200 sans image et SANS vrai blocage → jusqu'à NANO_NO_IMAGE_RETRIES relances avec
+      pause croissante, puis ProviderError « pas d'image renvoyée » (jamais « filtre »).
+    - Chaque échec journalise la réponse brute tronquée dans app.log (sans clé)."""
+    import time
+
+    attempts = 1 + NANO_NO_IMAGE_RETRIES
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.post(
+                f"{OPENROUTER_API_BASE}/chat/completions", headers=headers, json=body, timeout=180
+            )
+        except Exception as exc:  # noqa: BLE001 - réseau
+            _log_detail(f"Nano Banana réseau : {exc}")
+            raise ProviderError(_friendly_network("OpenRouter", exc)) from exc
+        if r.status_code >= 400:
+            _log_detail(f"OpenRouter image {r.status_code} : {r.text[:800]}")
+            try:
+                err_data = r.json()
+            except Exception:  # noqa: BLE001 - corps non JSON
+                err_data = {}
+            reason = _content_filter_reason(err_data) if r.status_code in (400, 403, 422) else ""
+            if reason:
+                _log_detail(f"Nano Banana : vrai blocage sécurité ({reason[:120]})")
+                raise ContentFilterError(CONTENT_FILTER_MESSAGE)
+            raise ProviderError(_friendly_http("OpenRouter", r.status_code))
+
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001 - corps non JSON malgré un 200
+            data = {"_brut": (r.text or "")[:800]}
+        img = _openrouter_first_image_bytes(data) if isinstance(data, dict) else b""
+        if img:
+            return img
+        reason = _content_filter_reason(data)
+        if reason:
+            _log_detail(f"Nano Banana : vrai blocage sécurité ({reason[:120]}) — réponse : "
+                        f"{_short_response(data)}")
+            raise ContentFilterError(CONTENT_FILTER_MESSAGE)
+        _log_detail(f"Nano Banana : aucune image (essai {attempt}/{attempts}, pas de blocage "
+                    f"structuré) — réponse : {_short_response(data)}")
+        if attempt < attempts:
+            time.sleep(NANO_NO_IMAGE_BACKOFF_S * attempt)
+    raise ProviderError(NO_IMAGE_MESSAGE)
 
 
 def _openrouter_first_image_bytes(data: dict) -> bytes:

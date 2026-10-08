@@ -174,7 +174,7 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("frame0_path", "TEXT DEFAULT ''"),      # frame 0 extraite (contrôle de dérive)
         ("drift_score", "REAL"),                 # NULL = pas mesuré ; score 0..1
         ("drift_flag", "INTEGER DEFAULT 0"),     # 1 = dérive (score sous le seuil)
-        # Contrôle « réplique coupée » (silencedetect après un clip Grok) + rallonge demandée.
+        # Contrôle « réplique coupée » (niveau RMS de la fin du clip Grok) + rallonge demandée.
         ("speech_cut", "INTEGER DEFAULT 0"),     # 1 = voix jusqu'aux 0,3 dernières s (coupée ?)
         ("extra_seconds", "INTEGER DEFAULT 0"),  # secondes ajoutées via « Régénérer (+1 s) »
     ],

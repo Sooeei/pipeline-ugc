@@ -166,59 +166,36 @@ def test_with_extra_seconds_bounded():
     assert config_app.with_extra_seconds(6, None, d) == 6
 
 
-# ============================================================ silencedetect
-_STDERR_HEAD = (
-    "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'x.mp4':\n"
-    "  Duration: 00:00:06.00, start: 0.000000, bitrate: 900 kb/s\n"
-    "  Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 720x1280, 24 fps\n"
-    "  Stream #0:1[0x2](und): Audio: aac (LC), 44100 Hz, stereo, fltp, 128 kb/s\n"
-)
+# ============================================================ réplique coupée (niveau RMS)
+def _astats(levels):
+    return "\n".join(f"[Parsed_ametadata_3 @ 0x1] lavfi.astats.Overall.RMS_level={v}" for v in levels)
 
 
-def _stderr(lines, t="00:00:06.00"):
-    return _STDERR_HEAD + "\n".join(lines) + f"\nsize=N/A time={t} bitrate=N/A speed= 500x\n"
+def test_parse_rms_frames_handles_inf():
+    assert media.parse_rms_frames(_astats(["-10.5", "-inf", "-75.2"])) == [-10.5, -120.0, -75.2]
 
 
-def test_parse_silencedetect_clean_ending():
-    err = _stderr([
-        "[silencedetect @ 0x1] silence_start: 0",
-        "[silencedetect @ 0x1] silence_end: 0.42 | silence_duration: 0.42",
-        "[silencedetect @ 0x1] silence_start: 5.1",
-        "[silencedetect @ 0x1] silence_end: 6 | silence_duration: 0.9",
-    ])
-    info = media.parse_silencedetect(err)
-    assert info["has_audio"] and info["duration"] == pytest.approx(6.0)
-    assert info["silences"] == [(0.0, 0.42), (5.1, 6.0)]
-    assert media.speech_reaches_end(info["silences"], info["duration"]) is False
+def test_speech_cut_clean_grok_ending():
+    # Profil réel d'un clip Grok non coupé : voix ~-10 dB, fin en fondu (≥ 38 dB sous la voix).
+    levels = [-10.0] * 50 + [-30.0, -60.0, -49.1, -65.4]
+    assert media.speech_cut_from_levels(levels) is False
 
 
-def test_parse_silencedetect_speech_until_end():
-    err = _stderr([
-        "[silencedetect @ 0x1] silence_start: 0",
-        "[silencedetect @ 0x1] silence_end: 0.3 | silence_duration: 0.3",
-        "[silencedetect @ 0x1] silence_start: 2.0",
-        "[silencedetect @ 0x1] silence_end: 2.4 | silence_duration: 0.4",
-    ])
-    info = media.parse_silencedetect(err)
-    assert media.speech_reaches_end(info["silences"], info["duration"]) is True
+def test_speech_cut_loud_blip_before_tail_is_not_cut():
+    # Souffle / bruit fort juste AVANT les 0,2 dernières s (cas réel « 01_peau ») → pas coupé.
+    levels = [-10.0] * 50 + [-15.7, -49.1, -65.4]
+    assert media.speech_cut_from_levels(levels) is False
 
 
-def test_parse_silencedetect_short_trailing_silence_is_cut():
-    # Silence final de 0,22 s seulement (< 0,3 s) → la voix touche la fenêtre de fin.
-    err = _stderr(["[silencedetect @ 0x1] silence_start: 5.78"])   # ancien ffmpeg : pas de fin
-    info = media.parse_silencedetect(err)
-    assert info["silences"] == [(5.78, None)]
-    assert media.speech_reaches_end(info["silences"], info["duration"]) is True
+def test_speech_cut_voice_until_end():
+    levels = [-10.0] * 50 + [-11.0, -9.0]
+    assert media.speech_cut_from_levels(levels) is True
 
 
-def test_parse_silencedetect_all_silent_and_no_audio():
-    err = _stderr(["[silencedetect @ 0x1] silence_start: -0.002",
-                   "[silencedetect @ 0x1] silence_end: 6.0 | silence_duration: 6"])
-    info = media.parse_silencedetect(err)
-    assert media.speech_reaches_end(info["silences"], info["duration"]) is False
-    no_audio = media.parse_silencedetect(_STDERR_HEAD.replace("Audio:", "Data:"))
-    assert no_audio["has_audio"] is False
-    assert media.speech_reaches_end([], None) is False
+def test_speech_cut_silent_or_too_short():
+    assert media.speech_cut_from_levels([-120.0] * 40) is False   # clip muet (simulation)
+    assert media.speech_cut_from_levels([-10.0, -10.0]) is False   # trop court
+    assert media.speech_cut_from_levels([]) is False
 
 
 @pytest.mark.skipif(not media.ffmpeg_available(), reason="ffmpeg absent")

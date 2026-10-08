@@ -600,6 +600,45 @@ def objet_speaker_motion(motion: str, speaker: dict[str, str] | None, n_persos: 
     return f"{motion} SPEAKER: only {who} speaks and lip-syncs; the other characters stay silent.".strip()
 
 
+def _image_digest(path: str) -> str:
+    """Empreinte du CONTENU d'une image ('' si illisible) : deux copies du même fichier (réf de
+    la pub uploadée depuis la bibliothèque) ont la même empreinte."""
+    import hashlib
+
+    try:
+        return hashlib.sha1(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def same_image_ref(path: str, candidates: list[str]) -> str:
+    """Si une image de `candidates` a exactement le même contenu que `path`, renvoie son chemin
+    (sinon `path`)."""
+    if not path or path in candidates:
+        return path
+    digest = _image_digest(path)
+    if not digest:
+        return path
+    for c in candidates:
+        if _image_digest(c) == digest:
+            return c
+    return path
+
+
+def dedupe_images(paths: list[str]) -> list[str]:
+    """Retire les images envoyées en double (même chemin OU même contenu) ; garde la 1re
+    occurrence, donc l'ordre (ancre / réf principale en tête) est conservé."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        key = _image_digest(p) or p
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
 def objet_shot_inputs(
     ad: dict[str, Any], clip: dict[str, Any], s: dict[str, Any], needed: list[str] | None,
     typed_refs: list[dict[str, Any]], character_ref: str = "", prefix: str = "",
@@ -616,12 +655,17 @@ def objet_shot_inputs(
     persos = ad_characters(ad)
     speaker = clip_speaker_character(ad, clip)
     speaker_ref = str((speaker or {}).get("image_ref") or "")
+    if speaker and speaker_ref:
+        # Perso de la bibliothèque dont l'image est AUSSI une réf de la pub (ajoutée en « Visage »
+        # par le preset client) : on utilise cette réf → l'image n'est envoyée qu'une fois.
+        speaker_ref = same_image_ref(speaker_ref, [str(r["path"]) for r in typed_refs])
+        speaker = {**speaker, "image_ref": speaker_ref}
     anchor = None
     if clip_anchor_edit_on(ad, clip) and ad.get("id") is not None:
         anchor = objet_edit_anchor(db.clips_for_ad(int(ad["id"])))
     if anchor and int(anchor["id"]) != int(s["clip_id"]):
-        refs = objet_anchor_edit_refs(str(anchor["image_path"]), needed, typed_refs,
-                                      main_path, speaker_ref)
+        refs = dedupe_images(objet_anchor_edit_refs(str(anchor["image_path"]), needed, typed_refs,
+                                                    main_path, speaker_ref))
         prompt = build_anchor_edit_prompt(
             str(s.get("prompt_image", "")), anchor_n=int(anchor["scene_n"]),
             keep=_anchor_edit_keep(persos),
@@ -632,6 +676,7 @@ def objet_shot_inputs(
     if speaker_ref and Path(speaker_ref).is_file() and speaker_ref not in refs \
             and len(refs) < config_app.MAX_REFS_PER_IMAGE_CALL:
         refs.append(speaker_ref)   # perso qui parle (2e perso) : sa réf en plus, si la place
+    refs = dedupe_images(refs)
     if main_path and main_path in refs:
         refs = _with_main_first(refs, main_path)
         consistency = _CHARACTER_CONSISTENCY_AFTER_MAIN if (prefix and character_ref) else prefix
@@ -983,7 +1028,7 @@ def animate_objet_clips(
     Grok via une section AUDIO (voir providers.grok_dialogue_prompt). Sans dialogue → clip muet.
     Ne touche qu'aux clips « valide » ayant une image ; chaque clip animé passe « pret ».
     `only_clip_id` → n'anime QUE ce plan (« Régénérer (+1 s) » d'une réplique coupée).
-    Après chaque clip : contrôle « réplique coupée » (silencedetect) → clips.speech_cut.
+    Après chaque clip : contrôle « réplique coupée » (niveau RMS de la fin du clip) → clips.speech_cut.
     """
     vmodel = config_app.OBJET_VIDEO_MODELS.get(
         cfg.objet_video_model, config_app.OBJET_VIDEO_MODELS[config_app.DEFAULT_OBJET_VIDEO_MODEL]

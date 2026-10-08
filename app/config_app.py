@@ -224,11 +224,17 @@ GROK_WORDS_PER_SEC = 2.5                # débit « naturel » visé (~2,5 mots/
 # coupées en fin de clip) → 2,2 mots/s. Sert à la durée des clips Avatar IA (voix native) ET au
 # débit « Naturel » d'Objet animé (GROK_VOICE_PACES), pour que les deux modes restent alignés.
 NATIVE_VOICE_WORDS_PER_SEC = 2.2
-# Contrôle « réplique coupée » (ffmpeg silencedetect) après chaque clip Grok : si de la voix
-# (non-silence) continue jusqu'aux SPEECH_CUT_TAIL_S dernières secondes, le clip est signalé.
-SPEECH_CUT_NOISE_DB = -35               # seuil de silence (dB)
-SPEECH_CUT_MIN_SILENCE_S = 0.2          # durée mini d'un silence détecté (s)
-SPEECH_CUT_TAIL_S = 0.3                 # fenêtre de fin de clip contrôlée (s)
+# Contrôle « réplique coupée » après chaque clip Grok : niveau RMS par tranches de
+# SPEECH_CUT_FRAME_S ; si la FIN du clip (SPEECH_CUT_TAIL_S dernières secondes) reste à moins de
+# SPEECH_CUT_MARGIN_DB du niveau de la voix (90e centile), la réplique est peut-être coupée.
+# Calibré le 2026-10-08 sur 27 vrais clips Grok (Oh My Jelly, aucun coupé) : leur fin est toujours
+# ≥ 38 dB sous la voix (Grok termine par un fondu / silence) ; des clips tronqués en pleine
+# phrase restent à < 15 dB. L'ancien critère silencedetect (-35 dB, 0,3 s) donnait 6 faux positifs
+# sur 27 (silence final un peu court, souffle ou ambiance après la réplique).
+SPEECH_CUT_FRAME_S = 0.1                # tranche d'analyse (s)
+SPEECH_CUT_TAIL_S = 0.2                 # fenêtre de fin de clip contrôlée (s)
+SPEECH_CUT_MARGIN_DB = 20.0             # fin plus forte que (voix − marge) → signalé
+SPEECH_CUT_MIN_VOICE_DB = -50.0         # voix plus faible que ça = clip muet (simulation) → jamais signalé
 
 # DÉBIT (vitesse) de la voix — RÉGLABLE dans les Réglages (objet_voice_pace). `words_per_sec`
 # calibre la DURÉE du clip (plus rapide = clip plus court = parle plus vite) ; `directive` est la

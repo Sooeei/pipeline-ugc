@@ -360,3 +360,44 @@ def test_ref_warnings_and_main_ref_endpoint():
         assert [x["is_main"] for x in r.json()["refs"]] == [False, True]
         assert c.post(f"/api/objet/ad/{ad_id}/main-ref", json={"ref_id": 99999}).status_code == 404
     assert pipeline.ref_conflict_warnings([{"id": 1, "path": "a", "kind": "produit"}]) == []
+
+
+# ============================================================ perso de la bibliothèque : 1 seule image
+def _write_png(path, color):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color).save(path, format="PNG")
+    return str(path)
+
+
+def test_library_character_image_sent_once(tmp_path):
+    """Preset client : l'image du perso est copiée en réf « Visage » de la pub ET référencée
+    (chemin bibliothèque) comme perso qui parle → elle ne doit partir qu'UNE fois."""
+    lib = _write_png(tmp_path / "bibli" / "blonde.png", (250, 220, 120))
+    ad_ref = tmp_path / "pub" / "refs" / "ref_1.png"
+    ad_ref.parent.mkdir(parents=True)
+    ad_ref.write_bytes(open(lib, "rb").read())   # copie octet pour octet (upload du formulaire)
+    produit = _write_png(tmp_path / "pub" / "refs" / "ref_2.png", (10, 10, 10))
+    anchor = _write_png(tmp_path / "pub" / "1.png", (90, 90, 200))
+    ad_id, ids = _objet_ad(n=2)
+    db.update_clip(ids[0], image_path=anchor, is_anchor=1)
+    db.set_ad_characters(ad_id, [{"nom": "Blonde", "image_ref": lib, "description": "", "fiche_voix": ""},
+                                 {"nom": "Rousse", "image_ref": "", "description": "", "fiche_voix": ""}])
+    typed = [{"id": 1, "path": str(ad_ref), "kind": "visage", "is_main": 0},
+             {"id": 2, "path": produit, "kind": "produit", "is_main": 0}]
+    clip2 = db.get_clip(ids[1])
+    s = {"clip_id": ids[1], "n": 2, "prompt_image": "la blonde tient le pot"}
+    for edit in (1, 0):   # retouche de l'ancre, puis sélection classique
+        db.set_ad_fields(ad_id, anchor_edit=edit)
+        refs, _, shot = pipeline.objet_shot_inputs(db.get_ad(ad_id), clip2, s, None, typed)
+        assert lib not in refs and refs.count(str(ad_ref)) == 1, refs
+        if edit:
+            assert refs[0] == anchor and "Blonde" in shot["prompt_image"]
+
+
+def test_dedupe_images_keeps_order_and_first_copy(tmp_path):
+    a = _write_png(tmp_path / "a.png", (1, 2, 3))
+    b = _write_png(tmp_path / "b.png", (4, 5, 6))
+    a2 = tmp_path / "a_copie.png"
+    a2.write_bytes(open(a, "rb").read())
+    assert pipeline.dedupe_images([b, a, str(a2), b]) == [b, a]
+    assert pipeline.dedupe_images(["absent/x.png", "absent/x.png"]) == ["absent/x.png"]

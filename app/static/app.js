@@ -2283,7 +2283,7 @@ function aoLibClip(div, ad, c) {
 }
 
 // ------------------------------------------------ réplique peut-être coupée (voix native Grok)
-// Le serveur contrôle chaque clip Grok (silencedetect) : si la voix continue jusqu'à la toute
+// Le serveur contrôle chaque clip Grok (niveau sonore de la fin) : si la voix continue jusqu'à la toute
 // fin, badge + bouton « Régénérer (+1 s) » (relance la vidéo seule avec 1 s de plus).
 function speechCutBadge(c) {
   return c.speech_cut && Number(c.speech_cut)

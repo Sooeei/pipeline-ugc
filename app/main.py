@@ -1350,8 +1350,12 @@ def create_app() -> FastAPI:
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
         # Avatar IA v2 (audio-first) : champs voix / vidéo / dérive par bloc + options de la pub.
+        video_model = avatar_video.effective_video_model(ad)
         for s in resp["shots"]:
-            s.update(avatar_video.clip_v2_fields(clips_by_id.get(int(s["clip_id"])) or {}))
+            clip_row = clips_by_id.get(int(s["clip_id"])) or {}
+            s.update(avatar_video.clip_v2_fields(clip_row))
+            # Bloc parlé animé par Grok : gestes de tête retirés → avertissement sur la carte.
+            s["lipsync_warning"] = avatar_video.lipsync_warning(clip_row, video_model)
         resp.update(avatar_video.ad_v2_fields(ad))
         return resp
 
@@ -2680,6 +2684,8 @@ def _objet_clip_fields(ad: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         "anchor_edit_on": pipeline.clip_anchor_edit_on(ad, c),
         "speaker": int(c.get("speaker") or 1) if has_persos else 0,
         "uploaded": (c.get("keyframe_source") or "") == "upload",
+        # Plan parlé (Grok) : gestes de tête retirés du mouvement → avertissement sur la carte.
+        "lipsync_warning": pipeline.lipsync_warning(c.get("motion_prompt") or "", c.get("script") or ""),
     }
 
 

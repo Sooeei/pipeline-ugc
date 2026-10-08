@@ -21,7 +21,7 @@ from typing import Any
 
 import requests
 
-from . import config_app, gen_trace, media, prompt_profiles
+from . import config_app, gen_trace, lipsync_rules, media, prompt_profiles
 
 HEYGEN_API = "https://api.heygen.com"
 HEYGEN_UPLOAD = "https://upload.heygen.com/v1/asset"
@@ -930,21 +930,69 @@ def xai_balance(cfg: ProviderConfig) -> dict:
 
 
 # ============================================================ GROK (animation, xAI)
-def grok_dialogue_prompt(motion: str, dialogue: str, tone: str = "", pace: str = "") -> str:
-    """Compose le prompt Grok : mouvement du personnage + section AUDIO contenant le DIALOGUE.
+def build_grok_prompt(
+    motion: str,
+    dialogue: str,
+    *,
+    tone: str = "",
+    pace: str = "",
+    speaker_line: str = "",
+    performance: str = "",
+    accent: str = "",
+    extra_negatives: str = "",
+) -> tuple[str, list[str]]:
+    """Prompt Grok FINAL, assemblé par `prompt_profiles.assemble(GROK, …)` (ordre fixe des blocs) :
+    plan unique → caméra/cadrage → mouvement → jeu (qui parle) → AUDIO (dialogue) → interdits.
 
-    Grok Imagine génère la voix ET le lip-sync NATIVEMENT (même passe) à partir de ce prompt —
-    on ne colle AUCUNE voix externe. Le dialogue est inséré VERBATIM (jamais modifié) ; sans
-    dialogue, on renvoie le mouvement seul (clip muet). `tone` = timbre, `pace` = directive de
-    DÉBIT (réglable). Format : « [mouvement]. AUDIO: [timbre], speaking [débit], saying: "[texte]" ».
-    """
+    Tout plan : « Single continuous shot, the first frame is the exact provided image… ».
+    Plan PARLÉ (dialogue non vide) — règles lip-sync (app/lipsync_rules.py) : plan rapproché bouche
+    visible, caméra fixe (ou léger push in si le mouvement en demande un), gestes de tête retirés du
+    mouvement, un seul perso parle (`speaker_line`, défaut « Only the character speaks… »), langue
+    + accent (`accent` = phrase d'accent de la fiche voix, vide = France), pas de musique ni
+    d'ambiance au premier plan. Le dialogue est inséré VERBATIM entre guillemets.
+    Plan MUET : mouvement d'origine, aucune règle lip-sync.
+    `tone` / `pace` = timbre et directive de débit (déjà résolus par l'appelant, vides = absents).
+    Renvoie (prompt, gestes retirés) — la liste sert à l'avertissement de la carte du plan."""
     motion = (motion or "").strip()
     dialogue = (dialogue or "").strip()
+    single_shot, *negatives = prompt_profiles.GROK.anti_defects
+    blocks: dict[str, str] = {prompt_profiles.B_SINGLE_SHOT: single_shot}
     if not dialogue:
-        return motion
+        blocks[prompt_profiles.B_SUBJECT] = motion
+        blocks[prompt_profiles.B_PERFORMANCE] = performance
+        blocks[prompt_profiles.B_NEGATIVES] = " ".join([extra_negatives, *negatives])
+        return prompt_profiles.assemble(prompt_profiles.GROK, blocks), []
+    clean, removed = lipsync_rules.strip_lipsync_gestures(motion)
+    cam = lipsync_rules.spoken_camera(lipsync_rules.spoken_camera_for(motion))
+    audio = ", ".join(x for x in (tone.strip(), lipsync_rules.language_line(accent), pace.strip()) if x)
+    blocks.update({
+        prompt_profiles.B_CAMERA: f"{cam} {lipsync_rules.SPOKEN_FRAMING}",
+        prompt_profiles.B_SUBJECT: clean,
+        prompt_profiles.B_PERFORMANCE: " ".join(
+            [performance, speaker_line or lipsync_rules.single_speaker_line("the character")]),
+        prompt_profiles.B_AUDIO: f'AUDIO: {audio}, saying: "{dialogue}"',
+        prompt_profiles.B_NEGATIVES: " ".join([extra_negatives, lipsync_rules.SPOKEN_AUDIO_RULES, *negatives]),
+    })
+    return prompt_profiles.assemble(prompt_profiles.GROK, blocks), removed
+
+
+def grok_dialogue_prompt(
+    motion: str, dialogue: str, tone: str = "", pace: str = "", *,
+    speaker_line: str = "", accent: str = "",
+) -> str:
+    """Compose le prompt Grok (Objet animé) : mouvement + section AUDIO contenant le DIALOGUE.
+
+    Grok Imagine génère la voix ET le lip-sync NATIVEMENT (même passe) à partir de ce prompt —
+    on ne colle AUCUNE voix externe. Le dialogue est inséré VERBATIM (jamais modifié). `tone` =
+    timbre (vide = Réglages), `pace` = directive de DÉBIT (vide = Réglages). Format de l'AUDIO :
+    « AUDIO: [timbre], speaking French with [accent], [débit], saying: "[texte]" ».
+    Blocs, règles lip-sync et plan muet : voir `build_grok_prompt`."""
+    if not (dialogue or "").strip():
+        return build_grok_prompt(motion, "")[0]
     tone = (tone or config_app.default_grok_voice_tone()).strip()
     pace = (pace or config_app.default_grok_voice_pace()["directive"]).strip()
-    return f'{motion} AUDIO: {tone}, speaking {pace}, saying: "{dialogue}"'.strip()
+    return build_grok_prompt(motion, dialogue, tone=tone, pace=pace, speaker_line=speaker_line,
+                             accent=accent)[0]
 
 
 def grok_generate_video(

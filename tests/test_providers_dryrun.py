@@ -338,14 +338,17 @@ def test_grok_body_sends_image_as_object_not_flat(tmp_path, monkeypatch):
 def test_grok_dialogue_prompt_embeds_verbatim_audio():
     # Objet vivant : le dialogue est inséré VERBATIM dans une section AUDIO du prompt Grok
     # (Grok fait voix + lip-sync natifs). Sans dialogue → mouvement seul, pas d'AUDIO.
+    from app.prompt_profiles import GROK_SINGLE_SHOT
     from app.providers import grok_dialogue_prompt
 
     p = grok_dialogue_prompt("character speaks to camera", "Essaie Lunia dès aujourd'hui")
-    assert p.startswith("character speaks to camera")
+    assert p.startswith(GROK_SINGLE_SHOT)
+    assert "character speaks to camera" in p
     assert "AUDIO:" in p
     assert 'saying: "Essaie Lunia dès aujourd\'hui"' in p
-    assert grok_dialogue_prompt("just movement", "") == "just movement"
-    assert grok_dialogue_prompt("", "Bonjour").startswith("AUDIO:")
+    mute = grok_dialogue_prompt("just movement", "")
+    assert mute.startswith(GROK_SINGLE_SHOT) and "just movement" in mute and "AUDIO" not in mute
+    assert "AUDIO:" in grok_dialogue_prompt("", "Bonjour")
 
 
 def test_clip_seconds_scales_with_dialogue_length():
@@ -390,7 +393,8 @@ def test_grok_dialogue_prompt_includes_pace_directive():
 
     prompt = grok_dialogue_prompt("the character talks", "Bonjour", "a warm voice",
                                   "at a natural conversational pace")
-    assert "speaking at a natural conversational pace" in prompt
+    assert ("speaking French with a natural accent from France, at a natural conversational pace"
+            in prompt)
     assert "a warm voice" in prompt and 'saying: "Bonjour"' in prompt
 
 

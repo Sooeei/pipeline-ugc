@@ -278,19 +278,24 @@ def test_voice_sheet_injected_verbatim_per_speaker(monkeypatch):
         assert c.post(f"/api/objet/clip/{ids[1]}/options", json={"speaker": 5}).status_code == 400
     db.update_clip(ids[2], script="")   # plan muet : ni fiche ni « qui parle »
     pipeline.animate_objet_clips(ProviderConfig(dry_run=False, xai_api_key="x"), ad_id, "pot")
-    by_plan = {p.split()[1]: p for p in calls}   # « motion N … »
+    by_plan = {n: next(p for p in calls if f"motion {n}" in p) for n in ("1", "2", "3")}
     assert fiche_a in by_plan["1"] and fiche_b not in by_plan["1"]
-    assert fiche_b in by_plan["2"] and "only Chat (chat roux) speaks" in by_plan["2"]
+    assert fiche_b in by_plan["2"]
+    assert "Only Chat (chat roux) speaks and lip-syncs; the others stay silent." in by_plan["2"]
     assert "Réplique 2." in by_plan["2"]
     assert fiche_a not in by_plan["3"] and fiche_b not in by_plan["3"]
+    assert "speaks and lip-syncs" not in by_plan["3"]   # plan muet : pas de règles lip-sync
 
 
 def test_no_characters_keeps_original_grok_prompt(monkeypatch):
+    from app import providers
+
     calls = _capture_grok(monkeypatch)
     ad_id, ids = _objet_ad(1, status="valide")
     pipeline.animate_objet_clips(ProviderConfig(dry_run=False, xai_api_key="x"), ad_id, "pot")
-    expected = pipeline.grok_dialogue_prompt("motion 1", "Réplique 1.")
+    expected = providers.grok_dialogue_prompt("motion 1", "Réplique 1.")
     assert calls == [expected]
+    assert "Only the character speaks and lip-syncs." in expected
 
 
 def test_objet_ad_response_exposes_characters_and_speaker():

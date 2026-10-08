@@ -347,3 +347,14 @@ def test_wait_until_window_idle_returns_when_idle(monkeypatch):
     t0 = time.monotonic()
     main._wait_until_window_idle(idle_s=5, poll_s=0.01)
     assert time.monotonic() - t0 < 1
+
+
+def test_estimate_objet_uses_selected_image_model_price():
+    """Plus de « gratuit ~500/jour » : les images sont facturées au tarif du modèle choisi."""
+    db.set_setting("objet_image_model", "nano_banana_pro")
+    est = cost.estimate_objet(3)
+    assert est["cout_par_image_usd"] == pytest.approx(0.134)
+    assert est["usd_images"] == pytest.approx(0.40)
+    db.set_setting("objet_image_model", "nano_banana_2")
+    assert cost.estimate_objet(3)["cout_par_image_usd"] == pytest.approx(0.045)
+    assert "gratuit" not in cost.estimate_mashup(1)["note_images"].lower()

@@ -456,8 +456,17 @@ def preset_persos(preset_id: int) -> list[dict[str, str]]:
 def apply_preset_characters(ad_id: int, persos: list[dict[str, str]]) -> None:
     """Applique une liste de persos {nom, image_ref, description, fiche_voix} à la pub `ad_id` :
     persos parlants de la pub (`ads.characters` : « Qui parle » + fiche voix injectée dans le
-    prompt Grok) et copie dans `ads.preset_characters` (affichage du client lié)."""
-    db.set_ad_characters(int(ad_id), persos)
+    prompt Grok) et copie dans `ads.preset_characters` (affichage du client lié).
+    L'image d'un perso déjà copiée en réf de la pub (ex. « Visage » ajoutée par le formulaire)
+    est rattachée à CETTE réf : elle apparaît dans le choix « Réf image » du perso et n'est
+    envoyée qu'une fois à Nano Banana."""
+    from app import pipeline
+
+    ad_refs = [str(r["path"]) for r in db.list_ref_images_typed(int(ad_id))]
+    db.set_ad_characters(int(ad_id), [
+        {**p, "image_ref": pipeline.same_image_ref(str(p.get("image_ref") or ""), ad_refs)}
+        for p in persos
+    ])
     db.set_ad_fields(int(ad_id), preset_characters=json.dumps(persos, ensure_ascii=False))
 
 

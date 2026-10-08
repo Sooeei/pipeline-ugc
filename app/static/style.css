@@ -599,3 +599,7 @@ label.inline select { margin: 0; min-width: 160px; }
 .key-status .badge.warn { color: #1a1200; background: var(--warn); font-weight: 600; border-color: transparent; }
 .modeles-table tr.inactif td { color: var(--muted); }
 .modeles-table td code { font-size: 12px; }
+
+/* Badge « réplique peut-être coupée » : sur sa propre ligne, sous le numéro et le lien (cartes étroites). */
+.clip .meta { flex-wrap: wrap; }
+.clip .meta .badge.ko { order: 3; white-space: nowrap; }

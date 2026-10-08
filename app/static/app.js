@@ -510,7 +510,7 @@ $("objetStylePreviewBtn").addEventListener("click", async () => {
   if (!dryRun) {
     const ok = await showModal({
       title: "Générer l'aperçu du style", danger: true,
-      message: "Aucun aperçu en cache pour ce style : on en génère un (1 image Nano Banana, payante au-delà du quota gratuit). Continuer ?",
+      message: "Aucun aperçu en cache pour ce style : on en génère un (1 image Nano Banana, payante). Continuer ?",
       confirmText: "Générer", cancelText: "Annuler",
     });
     if (!ok) return;
@@ -1406,7 +1406,7 @@ function renderObjPlan(shots, est) {
   const e = est || {};
   $("objEstimate").innerHTML =
     `≈ <b>$${(e.usd_images || 0).toFixed(2)}</b> pour les ${e.shots || shots.length} images ` +
-    `<span class="muted">(Nano Banana : gratuit jusqu'à ~500/jour · animation Grok ensuite : ~$${(e.usd_video || 0).toFixed(2)} pour les plans validés)</span>` +
+    `<span class="muted">(Nano Banana ~$${(e.cout_par_image_usd || 0).toFixed(3)}/image · animation Grok ensuite : ~$${(e.usd_video || 0).toFixed(2)} pour les plans validés)</span>` +
     `<div class="card-sub">Payé seulement en mode réel. En simulation : $0.</div>`;
   if (window.renderPubEstimate) window.renderPubEstimate("objet", shots, $("objEstimate"));  // agent C
   $("objPlanArea").classList.remove("hidden");
@@ -1451,7 +1451,7 @@ $("objGenImagesBtn").addEventListener("click", async () => {
   objAdId = res.ad_id;
   // Client / persos choisis : liés à la pub (persos au format commun, dossier d'export).
   if (objClientPresetId || objPersos.length)
-    clientPresetLinkAd(objAdId, objClientPresetId, objPersos.map((p) => p.id));
+    await clientPresetLinkAd(objAdId, objClientPresetId, objPersos.map((p) => p.id));
   if (!res.job_id) {   // Plan 1 uploadé : rien à générer, on passe direct à la validation
     toast("Plan 1 : ton image est en place (recadrée 9:16 720x1280).");
     return loadObjGallery(objAdId);
@@ -1685,7 +1685,7 @@ function objShotCard(s) {
     if (!dryRun) {
       const ok = await showModal({
         title: "Régénérer l'image",
-        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
+        message: "Régénérer cette image via Nano Banana (payant, tarif du modèle choisi dans les Réglages). Continuer ?",
         confirmText: "Régénérer",
         cancelText: "Annuler",
         danger: true,
@@ -1791,11 +1791,11 @@ function renderObjAdPanel(r, adId) {
       const row = document.createElement("div");
       row.className = "perso-row";
       row.innerHTML =
-        `<input class="nom" placeholder="Nom (ex. Pot)" value="${esc(p.nom || "")}" />` +
+        `<input type="text" class="nom" placeholder="Nom (ex. Pot)" value="${esc(p.nom || "")}" />` +
         `<select class="img"><option value="">Réf image : aucune</option>` +
         refOpts.map((o) => `<option value="${esc(o.v)}" ${o.v === p.image_ref ? "selected" : ""}>${esc(o.t)}</option>`).join("") +
         `</select>` +
-        `<input class="desc" placeholder="Description (ex. pot en céramique blanc)" value="${esc(p.description || "")}" />` +
+        `<input type="text" class="desc" placeholder="Description (ex. pot en céramique blanc)" value="${esc(p.description || "")}" />` +
         `<button type="button" class="btn small rm">Retirer</button>` +
         `<textarea class="fv" placeholder="Fiche voix — ex. Femme, 45 ans, timbre chaud et posé, débit lent, ton rassurant.">${esc(p.fiche_voix || "")}</textarea>`;
       row.querySelector(".nom").addEventListener("input", (ev) => (p.nom = ev.target.value));
@@ -3208,7 +3208,7 @@ function mashShotCard(s) {
     if (!dryRun) {
       const ok = await showModal({
         title: "Régénérer l'image",
-        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
+        message: "Régénérer cette image via Nano Banana (payant, tarif du modèle choisi dans les Réglages). Continuer ?",
         confirmText: "Régénérer", cancelText: "Annuler", danger: true,
       });
       if (!ok) return;
@@ -5673,11 +5673,12 @@ function fillPresetSelect(sel, presets, emptyLabel, keep) {
 }
 
 // Lie une pub à son client (persos + dossier d'export) — non bloquant.
+// Renvoie une promesse : l'attendre AVANT d'afficher la pub (sinon les persos n'y sont pas encore).
 function clientPresetLinkAd(adId, presetId, characterIds) {
-  if (!adId) return;
+  if (!adId) return Promise.resolve();
   const body = { preset_id: presetId || null };
   if (Array.isArray(characterIds)) body.character_ids = characterIds;
-  api("/api/ads/" + adId + "/client-preset", {
+  return api("/api/ads/" + adId + "/client-preset", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   }).catch((e) => toast("Client non lié à la pub : " + e.message));
 }
@@ -5774,6 +5775,10 @@ async function clientEditLoad(id) {
     const c = cur[n];
     if (c) $("clientChar" + n).value = String(c.character_id);
     $("clientCharSpeaks" + n).checked = c ? c.speaks !== false : n === 1;
+    // Choisir un perso le fait parler par défaut (décochable) ; le retirer décoche.
+    $("clientChar" + n).addEventListener("change", (ev) => {
+      $("clientCharSpeaks" + n).checked = !!ev.target.value;
+    });
   }
   $("clientDelBtn").disabled = !clientLoaded;
 }

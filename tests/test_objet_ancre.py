@@ -401,3 +401,24 @@ def test_dedupe_images_keeps_order_and_first_copy(tmp_path):
     a2.write_bytes(open(a, "rb").read())
     assert pipeline.dedupe_images([b, a, str(a2), b]) == [b, a]
     assert pipeline.dedupe_images(["absent/x.png", "absent/x.png"]) == ["absent/x.png"]
+
+
+def test_preset_character_image_points_to_ad_ref(tmp_path):
+    """Client appliqué à une pub : l'image du perso (bibliothèque) est rattachée à la réf
+    identique de la pub → visible dans « Réf image » et jamais perdue à l'enregistrement."""
+    from app import presets
+
+    lib = _write_png(tmp_path / "bibli" / "rousse.png", (200, 80, 40))
+    ad_id, _ = _objet_ad(n=1)
+    ad_ref = tmp_path / "pub" / "refs" / "ref_2.png"
+    ad_ref.parent.mkdir(parents=True)
+    ad_ref.write_bytes(open(lib, "rb").read())
+    db.add_ref_image(ad_id, str(ad_ref), "visage")
+    autre = _write_png(tmp_path / "bibli" / "sans_copie.png", (1, 1, 1))
+    presets.apply_preset_characters(ad_id, [
+        {"nom": "Rousse", "image_ref": lib, "description": "", "fiche_voix": "voix grave"},
+        {"nom": "Seule", "image_ref": autre, "description": "", "fiche_voix": ""},
+    ])
+    chars = db.get_ad_characters(ad_id)
+    assert chars[0]["image_ref"] == str(ad_ref) and chars[0]["fiche_voix"] == "voix grave"
+    assert chars[1]["image_ref"] == autre   # pas de copie dans la pub : chemin d'origine gardé

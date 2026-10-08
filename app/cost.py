@@ -43,6 +43,11 @@ def estimate(scenes: list[dict[str, Any]], mode: str = config_app.DEFAULT_COST_M
     }
 
 
+def active_image_usd() -> float:
+    """Tarif ($/image) du modèle d'image Objet animé / Mashup choisi dans les Réglages."""
+    return image_model_usd(db.get_setting("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL))
+
+
 def estimate_mashup(
     n_shots: int,
     avg_seconds: int = config_app.KLING_DEFAULT_CLIP_SECONDS,
@@ -56,7 +61,8 @@ def estimate_mashup(
     n = max(0, int(n_shots))
     secs = config_app.snap_mashup_duration(avg_seconds, model)
     resolution = config_app.mashup_resolution_for(model, resolution)
-    usd_images = round(n * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
+    per_image = active_image_usd()
+    usd_images = round(n * per_image, 2)
     rate = config_app.mashup_cost_per_second(model)
     usd_video = round(n * secs * rate, 2)
     return {
@@ -66,9 +72,9 @@ def estimate_mashup(
         "usd_images": usd_images,
         "usd_video": usd_video,
         "usd_total": round(usd_images + usd_video, 2),
-        "cout_par_image_usd": config_app.NANO_BANANA_COST_PER_IMAGE_USD,
+        "cout_par_image_usd": per_image,
         "cout_kling_par_seconde_usd": rate,
-        "note_images": "Gratuit jusqu'à ~500 images/jour, puis ~0,04 $/image.",
+        "note_images": f"Nano Banana via OpenRouter : ~{per_image:.3f} $/image.",
     }
 
 
@@ -77,26 +83,27 @@ def estimate_objet(
 ) -> dict[str, Any]:
     """Coût estimé « Objet animé » en DOLLARS : Nano Banana (images) + Grok (animation).
 
-    Images Nano Banana : gratuites jusqu'à ~500/jour (aistudio), puis ~0,04 $/image.
+    Images Nano Banana (OpenRouter, payantes dès la 1re) : tarif du modèle choisi (Réglages).
     Animation Grok : facturée à la seconde (0,14 $/s à 720p) + 0,01 $/image d'entrée, sur une
     durée TYPE de clip parlé (GROK_ESTIMATE_CLIP_SECONDS ≈ 8 s → ~1,13 $/clip). On sépare les
     deux postes : images à la génération, animation seulement pour les plans validés.
     """
     n = max(0, int(n_shots))
     secs = max(1, int(clip_seconds))
-    usd_images = round(n * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
+    per_image = active_image_usd()
+    usd_images = round(n * per_image, 2)
     usd_video = round(
         n * (secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE), 2
     )
     return {
         "shots": n,
         "clip_seconds": secs,
-        "usd_images": usd_images,                # N images (0 sous le quota gratuit ~500/j)
+        "usd_images": usd_images,                # N images au tarif du modèle choisi
         "usd_video": usd_video,                  # animation des N plans validés
         "usd_total": round(usd_images + usd_video, 2),
-        "cout_par_image_usd": config_app.NANO_BANANA_COST_PER_IMAGE_USD,
+        "cout_par_image_usd": per_image,
         "cout_grok_par_seconde_usd": config_app.GROK_COST_PER_SECOND_USD,
-        "note_images": "Gratuit jusqu'à ~500 images/jour, puis ~0,04 $/image.",
+        "note_images": f"Nano Banana via OpenRouter : ~{per_image:.3f} $/image.",
     }
 
 

@@ -2860,7 +2860,7 @@ async def _start_plan_images(
     SEULEMENT (il fixe le personnage/la personne ; les suivants via /consistency après validation).
     `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type.
     `generate_first=False` (Objet : image du Plan 1 uploadée) → aucun job, aucun coût : job_id None."""
-    # Confirmation coûts : les images Nano Banana peuvent être payantes au-delà du quota gratuit.
+    # Confirmation coûts : les images Nano Banana sont payantes (OpenRouter).
     if generate_first and not cfg.dry_run and not confirm:
         raise HTTPException(400, "Confirmation requise avant de générer des images.")
     if generate_first and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():

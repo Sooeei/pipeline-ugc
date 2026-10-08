@@ -974,6 +974,7 @@ def animate_objet_clips(
     ad_id: int,
     ad_name: str,
     on_update: UpdateFn | None = None,
+    only_clip_id: int | None = None,
 ) -> dict[str, Any]:
     """Anime les plans VALIDÉS (image→vidéo Grok) → clips .mp4 numérotés en Bibliothèque.
 
@@ -981,6 +982,8 @@ def animate_objet_clips(
     externe. Le DIALOGUE du plan (stocké VERBATIM dans clip.script) est inséré dans le prompt
     Grok via une section AUDIO (voir providers.grok_dialogue_prompt). Sans dialogue → clip muet.
     Ne touche qu'aux clips « valide » ayant une image ; chaque clip animé passe « pret ».
+    `only_clip_id` → n'anime QUE ce plan (« Régénérer (+1 s) » d'une réplique coupée).
+    Après chaque clip : contrôle « réplique coupée » (silencedetect) → clips.speech_cut.
     """
     vmodel = config_app.OBJET_VIDEO_MODELS.get(
         cfg.objet_video_model, config_app.OBJET_VIDEO_MODELS[config_app.DEFAULT_OBJET_VIDEO_MODEL]
@@ -989,7 +992,11 @@ def animate_objet_clips(
     # → relancer « Générer les vidéos » réessaie automatiquement les plans qui avaient planté.
     clips = [
         c for c in db.clips_for_ad(ad_id)
-        if c.get("image_path") and c.get("status") in ("valide", "echec")
+        if c.get("image_path") and (
+            c.get("status") in ("valide", "echec") if only_clip_id is None
+            # Relance d'UN plan : aussi un clip déjà « pret » (réplique coupée → +1 s).
+            else int(c["id"]) == int(only_clip_id) and c.get("status") in ("valide", "echec", "pret")
+        )
     ]
     # Timbre + DÉBIT de voix choisis dans les Réglages → directives autour du dialogue.
     style = config_app.GROK_VOICE_STYLES.get(
@@ -1013,21 +1020,43 @@ def animate_objet_clips(
             objet_speaker_motion(str(c.get("motion_prompt", "")), speaker, n_persos), dialogue,
             objet_voice_tone(speaker, voice_tone), pace_cfg["directive"]
         )
-        # Durée calibrée sur le temps naturel pour dire le dialogue au DÉBIT choisi.
-        seconds = config_app.clip_seconds_for_dialogue(dialogue, pace_cfg["words_per_sec"])
+        # Durée calibrée sur le temps naturel pour dire le dialogue au DÉBIT choisi
+        # (+ secondes ajoutées via « Régénérer (+1 s) », bornées au max Grok).
+        seconds = config_app.with_extra_seconds(
+            config_app.clip_seconds_for_dialogue(
+                dialogue, config_app.grok_clip_words_per_sec(cfg.objet_voice_pace)),
+            c.get("extra_seconds"), config_app.AVATAR_VIDEO_MODELS["grok"]["durations"],
+        )
         grok_generate_video(
             cfg, str(c["image_path"]), prompt, mp4,
             model_value=vmodel["model"], seconds=seconds, label=ad_name, index=n - 1,
         )
         if not cfg.dry_run:
-            cost.record_grok_clip(ad_id, seconds)  # 1 clip Grok (voix + lip-sync)
+            # Grok facture la durée PRODUITE : on compte la durée mesurée si elle est connue.
+            billed = media.mp4_duration(mp4) or seconds
+            cost.record_grok_clip(ad_id, max(float(seconds), float(billed)))  # voix + lip-sync
+        db.update_clip(int(c["id"]), clip_seconds=seconds,
+                       speech_cut=1 if dialogue and _speech_cut_safe(mp4, n) else 0)
 
     return _animate_clips(
         ad_id, ad_name, clips, _render,
         parallel_cap=config_app.GROK_MAX_PARALLEL,
         log_kind="objet", log_prefix=f"Animation « {ad_name} »",
+        set_status=only_clip_id is None,
         on_update=on_update,
     )
+
+
+def _speech_cut_safe(mp4: str | Path, n: int) -> bool:
+    """Contrôle « réplique coupée » d'un clip (jamais bloquant : erreur → False + app.log)."""
+    try:
+        cut = media.detect_speech_cut(mp4)
+    except Exception as exc:  # noqa: BLE001 - contrôle indicatif
+        _log_detail(f"Contrôle réplique coupée (plan {n}) impossible : {exc!r}")
+        return False
+    if cut:
+        _log_detail(f"Plan {n} : voix jusqu'à la fin du clip → réplique peut-être coupée.")
+    return cut
 
 
 def animate_mashup_clips(

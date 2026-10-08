@@ -21,6 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (
@@ -54,11 +55,84 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     db.init_db()
     bootstrap.seed_from_config_if_empty()
     bootstrap.migrate_voice_to_list()
+    # Reprise après plantage : plans restés « en cours » → « échec — à relancer » (jamais de
+    # relance automatique d'un appel payant).
+    try:
+        for r in db.recover_interrupted_jobs():
+            prov._log_detail(f"[REPRISE] job {r['job_id']} interrompu (pub {r['ad_id']}, "
+                             f"{r['mode']}) : plans {r['reset']} remis « à relancer ».")
+    except Exception as exc:  # noqa: BLE001 - la reprise ne doit jamais empêcher le démarrage
+        prov._log_detail(f"[REPRISE] impossible : {exc!r}")
+    _quiet_connection_resets()
     yield
+
+
+# Erreur de connexion fermée par la fenêtre (Windows, boucle Proactor) : sans gravité, mais elle
+# inondait app.log de tracebacks « WinError 10054 » (400+ occurrences) et masquait les vrais soucis.
+def _quiet_connection_resets() -> None:
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    previous = loop.get_exception_handler()
+
+    def _handler(lp: Any, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError | ConnectionAbortedError | BrokenPipeError):
+            return
+        if previous is not None:
+            previous(lp, context)
+        else:
+            lp.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
+# Heure (time.monotonic) de la dernière requête reçue : sert à ne PAS arrêter le serveur tant que
+# la fenêtre de l'app l'interroge encore (cf. run() — le process navigateur peut se terminer
+# alors que la fenêtre reste ouverte).
+_LAST_REQUEST = [0.0]
+SERVER_INTERNAL_ERROR_MSG = (
+    "Erreur interne du serveur — réessaie ; si ça persiste, relance l'app (LANCER.bat). "
+    "Le détail technique est dans app.log."
+)
+
+
+def _install_robustness(app: FastAPI) -> None:
+    """Handler global d'exceptions (réponse JSON FR propre + traceback dans app.log) et suivi de
+    la dernière requête (heartbeat de la fenêtre)."""
+    import time as _time
+    import traceback
+
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    class _TrackLastRequest:
+        """Middleware ASGI pur (n'enveloppe pas les réponses en streaming)."""
+
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope.get("type") == "http":
+                _LAST_REQUEST[0] = _time.monotonic()
+            await self.inner(scope, receive, send)
+
+    app.add_middleware(_TrackLastRequest)
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        prov._log_detail(f"[ERREUR SERVEUR] {request.method} {request.url.path} : {exc!r}\n{tb[-4000:]}")
+        msg = str(exc) if isinstance(exc, prov.ProviderError) else SERVER_INTERNAL_ERROR_MSG
+        return JSONResponse(status_code=500, content={"detail": msg})
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Pipeline UGC", lifespan=lifespan)
+    _install_robustness(app)
 
     # App strictement locale : on n'accepte que localhost (défense anti DNS-rebinding).
     # "testserver" est l'hôte utilisé par le client de test.
@@ -666,7 +740,11 @@ def create_app() -> FastAPI:
     def job_status(job_id: str) -> dict[str, Any]:
         job = jobs.manager.get(job_id)
         if job is None:
-            raise HTTPException(404, "Job inconnu.")
+            # Les jobs vivent en mémoire : après une relance de l'app, ils n'existent plus (leurs
+            # plans ont été remis « à relancer » au démarrage, cf. db.recover_interrupted_jobs).
+            raise HTTPException(404, "Suivi perdu : l'app a redémarré pendant la génération. "
+                                     "Les plans interrompus sont marqués « à relancer » — "
+                                     "rafraîchis la page.")
         return job.snapshot()
 
     # -------------------------------------------------- OBJET ANIMÉ (Nano Banana + Grok)
@@ -868,6 +946,55 @@ def create_app() -> FastAPI:
             "n_plans": len(candidates), "usd_video": est["usd_video"],
         }
 
+    @app.post("/api/clips/{clip_id}/regenerate-longer")
+    def clip_regenerate_longer(clip_id: int, body: AnimateIn) -> dict[str, Any]:
+        """« Régénérer (+1 s) » : relance la vidéo Grok d'UN plan dont la réplique semble coupée,
+        avec 1 s de plus (clips.extra_seconds += 1), bornée au max Grok. Image/keyframe inchangés.
+        Objet animé et Avatar IA v2 (modèle Grok). Coût réel → confirmation requise."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"]))
+        if ad is None:
+            raise HTTPException(404, "Pub introuvable.")
+        kind = ad.get("kind")
+        is_v2 = kind == "avatar_omni" and int(ad.get("pipeline_version") or 1) == 2
+        if kind != "objet" and not is_v2:
+            raise HTTPException(400, "« Régénérer (+1 s) » n'existe que pour Objet animé et Avatar IA.")
+        if is_v2 and avatar_video.effective_video_model(ad) != "grok":
+            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok.")
+        durations = config_app.AVATAR_VIDEO_MODELS["grok"]["durations"]
+        current = int(clip.get("clip_seconds") or 0)
+        if current >= max(durations):
+            raise HTTPException(400, f"Durée déjà au maximum Grok ({max(durations)} s) — raccourcis "
+                                     "plutôt la réplique.")
+        old_extra = int(clip.get("extra_seconds") or 0)
+        db.update_clip(clip_id, extra_seconds=old_extra + 1)
+        try:
+            if is_v2:
+                res = avatar_video.video_animate(int(ad["id"]), avatar_video.VideoAnimateIn(
+                    confirm=body.confirm, confirm_over_cap=body.confirm_over_cap, clip_id=clip_id))
+                return {**res, "extra_seconds": old_extra + 1}
+            cfg = load_provider_config()
+            if not clip.get("image_path"):
+                raise HTTPException(409, "Ce plan n'a pas d'image : impossible de relancer la vidéo.")
+            if not cfg.dry_run and not body.confirm:
+                raise HTTPException(400, "Confirmation requise avant de relancer (coût Grok).")
+            if not cfg.dry_run and not (cfg.xai_api_key or "").strip():
+                raise HTTPException(400, "Clé API xAI (Grok) manquante (Réglages).")
+            secs = config_app.with_extra_seconds(max(current, min(durations)), 1, durations)
+            usd = secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE
+            _check_spend_cap(cfg, usd, body.confirm_over_cap)
+            job = jobs.manager.start(
+                cfg, int(ad["id"]), str(ad["name"]), [{"n": int(clip["scene_n"])}], "",
+                output_mode="objet_animate", only_clip_id=clip_id,
+            )
+            return {"ok": True, "job_id": job.id, "ad_id": int(ad["id"]), "dry_run": cfg.dry_run,
+                    "extra_seconds": old_extra + 1, "usd_video": round(usd, 2)}
+        except Exception:
+            db.update_clip(clip_id, extra_seconds=old_extra)   # rien lancé → rallonge annulée
+            raise
+
     @app.post("/api/objet/resume/{ad_id}")
     def objet_resume(ad_id: int, body: AnimateIn) -> dict[str, Any]:
         """Reprend une pub « Objet animé » : relance uniquement les plans en échec (jalon 3)."""
@@ -963,7 +1090,10 @@ def create_app() -> FastAPI:
         profiles = config_app.normalize_voice_profiles(voice_profiles, legacy=voice_profile or None)
         profile_json = _json(profiles.get("1") or config_app.normalize_voice_profile(voice_profile))
         profiles_json = _json(profiles)
-        personas_json = _json(_resolve_personas(cfg, personas))
+        # ⚠️ Endpoint ASYNC : _resolve_personas peut appeler le cerveau (Claude, 10-25 s). Appelé
+        # directement, il BLOQUAIT la boucle événementielle → plus aucune requête servie (l'app
+        # semblait plantée). → exécuté dans un thread.
+        personas_json = _json(await run_in_threadpool(_resolve_personas, cfg, personas))
         bible_json = _json(brain.normalize_bible(bible)) if bible.strip() else ""
         style_v = config_app.normalize_omni_style(style)
 
@@ -1037,8 +1167,10 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Fichier vide.")
         if len(raw) > _KEYFRAME_MAX_BYTES:
             raise HTTPException(400, "Image trop lourde (max 25 Mo).")
-        dest = _save_keyframe_upload(raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
-                                     int(clip["scene_n"]))
+        # Décodage/écriture PIL (jusqu'à 25 Mo) hors boucle événementielle.
+        dest = await run_in_threadpool(
+            _save_keyframe_upload, raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
+            int(clip["scene_n"]))
         db.update_clip(clip_id, image_path=str(dest), keyframe_source="upload",
                        status="image_pret", error=None)
         _reset_keyframe(clip_id)
@@ -2593,11 +2725,10 @@ def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any]:
     """Coût vidéo Grok des plans à animer, sur les VRAIES durées (débit choisi dans Réglages)."""
-    pace = config_app.GROK_VOICE_PACES.get(
-        cfg.objet_voice_pace, config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]
-    )
+    # Même débit que l'animation (voix native réelle, ~2,2 mots/s au débit par défaut).
     return cost.estimate_grok_video(
-        [str(c.get("script") or "") for c in clips], pace["words_per_sec"]
+        [str(c.get("script") or "") for c in clips],
+        config_app.grok_clip_words_per_sec(cfg.objet_voice_pace),
     )
 
 
@@ -3167,6 +3298,13 @@ def run() -> None:
             return
 
         _open_window(url)          # BLOQUE jusqu'à la fermeture de la fenêtre
+        # ⚠️ Cause probable du « port qui ne répond plus » : le process navigateur (Chrome/Edge
+        # --app) peut se terminer alors que la fenêtre reste ouverte (relais vers un process
+        # déjà lancé, redémarrage après mise à jour…) → on coupait le serveur sous les pieds de
+        # l'utilisateur. Désormais on ne l'arrête que lorsque la fenêtre ne l'interroge plus
+        # (heartbeat /api/health toutes les 10 s côté front).
+        _wait_until_window_idle()
+        prov._log_detail("[APP] fenêtre fermée (plus aucune requête) → arrêt du serveur.")
         server.should_exit = True  # fenêtre fermée -> on arrête le serveur en fond
         time.sleep(0.5)
         try:
@@ -3176,6 +3314,17 @@ def run() -> None:
     except Exception as exc:  # noqa: BLE001 - lancé sans console : on journalise
         _log_launch_error(exc)
         raise
+
+
+WINDOW_IDLE_SHUTDOWN_S = 45.0   # sans requête depuis 45 s (heartbeat 10 s) = fenêtre fermée
+
+
+def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: float = 2.0) -> None:
+    """Bloque tant que la fenêtre interroge le serveur (dernière requête < idle_s)."""
+    import time
+
+    while time.monotonic() - _LAST_REQUEST[0] < idle_s:
+        time.sleep(poll_s)
 
 
 def _open_window(url: str) -> None:

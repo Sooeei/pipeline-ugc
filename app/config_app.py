@@ -177,16 +177,34 @@ SPEND_CAP_USD_DEFAULT = 25.0
 
 # ---------- TARIFS estimés (CONFIGURABLES ; ils changent — vérifie sur chaque plateforme) ----------
 # Images Nano Banana via OpenRouter, par modèle ($/image).
+# Nano Banana Pro (vérifié le 08/10/2026 sur l'endpoint public GET openrouter.ai/api/v1/models) :
+# google/gemini-3-pro-image-preview (et l'alias GA google/gemini-3-pro-image) = 120 $ / M tokens
+# d'image en SORTIE (image_output 0.00012 $/token). Une image 1K ou 2K = 1120 tokens → 0,134 $
+# (4K = 2000 tokens → 0,24 $). L'app demande du 1K → 0,134 $/image (+ ~0,002 $ d'entrée).
+NANO_BANANA_PRO_USD_PER_OUTPUT_TOKEN = 0.00012
+NANO_BANANA_PRO_TOKENS_1K_2K = 1120
+NANO_BANANA_PRO_COST_1K_USD = round(NANO_BANANA_PRO_USD_PER_OUTPUT_TOKEN * NANO_BANANA_PRO_TOKENS_1K_2K, 3)
 COST_USD_PER_IMAGE: dict[str, float] = {
     "google/gemini-2.5-flash-image": 0.04,
     "google/gemini-3.1-flash-image": 0.045,
-    "google/gemini-3-pro-image-preview": 0.134,   # Nano Banana Pro (keyframes Avatar IA)
+    "google/gemini-3-pro-image-preview": NANO_BANANA_PRO_COST_1K_USD,   # Nano Banana Pro (1K)
+    "google/gemini-3-pro-image": NANO_BANANA_PRO_COST_1K_USD,           # alias GA, même tarif
 }
 COST_USD_PER_IMAGE_DEFAULT = 0.04
 NANO_BANANA_COST_PER_IMAGE_USD = 0.04   # repli / estimation d'avance (voir COST_USD_PER_IMAGE)
-# Grok Imagine Video 1.5 : ~0,14 $/s (720p) + ~0,01 $/image d'entrée.
-GROK_COST_PER_SECOND_USD = 0.14
+# Grok Imagine Video 1.5 (xAI) — tarif PAR SECONDE de vidéo produite, selon la résolution
+# (sources : docs.x.ai/docs/models « $0.080 / sec » = 480p ; grille xAI Console relayée par
+# llmreference.com / aipricing.guru, 08/2026 : 480p 0,08 $/s · 720p 0,14 $/s · 1080p 0,25 $/s
+# + 0,01 $ par image d'entrée). L'app anime en 720p → 0,14 $/s.
+# ⚠️ Sous-estimation constatée (~0,70 $ affiché vs ~1,10 $ réel) : le TAUX était bon, c'est la
+# DURÉE qui était trop courte (estimation à 5 s, alors qu'un clip parlé réel dure ~7-8 s).
+# Clip type 8 s × 0,14 + 0,01 = 1,13 $ ≈ 1,10 $ réel. Voir GROK_ESTIMATE_CLIP_SECONDS.
+GROK_COST_PER_SECOND_BY_RESOLUTION: dict[str, float] = {"480p": 0.08, "720p": 0.14, "1080p": 0.25}
+GROK_COST_PER_SECOND_USD = GROK_COST_PER_SECOND_BY_RESOLUTION["720p"]
 GROK_COST_USD_PER_INPUT_IMAGE = 0.01
+# Durée d'un clip Grok TYPE pour les estimations faites AVANT de connaître les dialogues
+# (ex. plan de tournage Objet animé) : ~8 s (réplique de 12-15 mots à 2,2 mots/s + marge).
+GROK_ESTIMATE_CLIP_SECONDS = 8
 
 # ---------- Devise & conversion (affichage $/€ ; stockage TOUJOURS en USD en base) ----------
 # Taux FIXE approximatif USD→EUR (modifiable). Sert à convertir HeyGen (natif €) → USD à
@@ -202,6 +220,15 @@ GROK_DEFAULT_CLIP_SECONDS = 5           # durée par défaut d'un clip animé (s
 GROK_MIN_CLIP_SECONDS = 4               # bornes de durée d'un clip parlé (adaptée au dialogue)
 GROK_MAX_CLIP_SECONDS = 12
 GROK_WORDS_PER_SEC = 2.5                # débit « naturel » visé (~2,5 mots/s) → durée = mots / débit
+# Débit RÉEL de la voix NATIVE (Grok / modèle vidéo) : mesuré plus lent que 2,5 mots/s (répliques
+# coupées en fin de clip) → 2,2 mots/s. Sert à la durée des clips Avatar IA (voix native) ET au
+# débit « Naturel » d'Objet animé (GROK_VOICE_PACES), pour que les deux modes restent alignés.
+NATIVE_VOICE_WORDS_PER_SEC = 2.2
+# Contrôle « réplique coupée » (ffmpeg silencedetect) après chaque clip Grok : si de la voix
+# (non-silence) continue jusqu'aux SPEECH_CUT_TAIL_S dernières secondes, le clip est signalé.
+SPEECH_CUT_NOISE_DB = -35               # seuil de silence (dB)
+SPEECH_CUT_MIN_SILENCE_S = 0.2          # durée mini d'un silence détecté (s)
+SPEECH_CUT_TAIL_S = 0.3                 # fenêtre de fin de clip contrôlée (s)
 
 # DÉBIT (vitesse) de la voix — RÉGLABLE dans les Réglages (objet_voice_pace). `words_per_sec`
 # calibre la DURÉE du clip (plus rapide = clip plus court = parle plus vite) ; `directive` est la
@@ -220,6 +247,8 @@ GROK_VOICE_PACES: dict[str, VoicePaceCfg] = {
     },
     "naturel": {
         "label": "Naturel (défaut)",
+        # 2,5 = débit visé (fiche voix Omni, mots max par plan). La DURÉE des clips Grok d'Objet
+        # animé utilise le débit RÉEL de la voix native (grok_clip_words_per_sec → 2,2).
         "words_per_sec": 2.5,
         "directive": (
             "at a natural conversational pace, clear but not slow, like a normal human speaker, "
@@ -237,6 +266,17 @@ DEFAULT_GROK_VOICE_PACE = "naturel"
 
 def default_grok_voice_pace() -> VoicePaceCfg:
     return GROK_VOICE_PACES[DEFAULT_GROK_VOICE_PACE]
+
+
+def grok_clip_words_per_sec(pace_key: str) -> float:
+    """Débit servant à calculer la DURÉE d'un clip Grok en voix native (Objet animé) : au débit
+    par défaut (« naturel »), la voix native réelle parle à ~2,2 mots/s (NATIVE_VOICE_WORDS_PER_SEC,
+    même valeur qu'Avatar IA) ; les autres débits gardent leur valeur, plafonnée par ce réel
+    seulement pour « naturel » (« lent » = 2,0 est déjà plus lent)."""
+    pace = GROK_VOICE_PACES.get(pace_key) or default_grok_voice_pace()
+    if pace_key not in GROK_VOICE_PACES or pace_key == DEFAULT_GROK_VOICE_PACE:
+        return min(pace["words_per_sec"], NATIVE_VOICE_WORDS_PER_SEC)
+    return pace["words_per_sec"]
 
 
 def clip_seconds_for_dialogue(dialogue: str, words_per_sec: float | None = None) -> int:
@@ -576,7 +616,7 @@ VOICE_MODES = ("elevenlabs", "native")
 ACTIVE_VOICE_MODES = ("native",)
 DEFAULT_VOICE_MODE = "native"
 # Mode « native » : durée du clip estimée depuis le TEXTE de la réplique (pas d'audio mesuré).
-AVATAR_NATIVE_WORDS_PER_SEC = 2.5      # débit moyen FR
+AVATAR_NATIVE_WORDS_PER_SEC = NATIVE_VOICE_WORDS_PER_SEC   # débit moyen FR (2,2 mots/s)
 AVATAR_NATIVE_MARGIN_S = 1.0           # marge après la réplique (s)
 
 
@@ -622,8 +662,9 @@ def avatar_clip_seconds(wav_seconds: float, model: str) -> int:
 
 
 def avatar_native_clip_seconds(text: str, model: str) -> int:
-    """Durée du clip en mode voix « native » (aucun audio mesuré) : mots / 2,5 mots/s + 1 s de
-    marge, arrondie à la plus petite durée ACCEPTÉE par le modèle, plafonnée à son max."""
+    """Durée du clip en mode voix « native » (aucun audio mesuré) : mots / AVATAR_NATIVE_WORDS_PER_SEC
+    (2,2 mots/s) + 1 s de marge, arrondie à la plus petite durée ACCEPTÉE par le modèle, plafonnée
+    à son max."""
     import math
 
     durations = sorted(AVATAR_VIDEO_MODELS[normalize_avatar_video_model(model)]["durations"])
@@ -633,6 +674,21 @@ def avatar_native_clip_seconds(text: str, model: str) -> int:
         if d >= target:
             return d
     return durations[-1]
+
+
+def with_extra_seconds(seconds: int, extra: object, durations: tuple[int, ...] | list[int]) -> int:
+    """Durée + secondes SUPPLÉMENTAIRES demandées (bouton « Régénérer (+1 s) », clips.extra_seconds)
+    → plus petite durée ACCEPTÉE ≥ cible, bornée au max du modèle."""
+    try:
+        add = max(0, int(extra or 0))
+    except (TypeError, ValueError):
+        add = 0
+    target = int(seconds) + add
+    allowed = sorted(int(d) for d in durations) or [target]
+    for d in allowed:
+        if d >= target:
+            return d
+    return allowed[-1]
 
 
 def avatar_block_clip_seconds(text: str, wav_seconds: float, model: str, voice_mode: str) -> int:

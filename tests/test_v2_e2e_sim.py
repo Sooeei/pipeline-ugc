@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app import brain, config_app, db, media, pipeline, providers
+from app import brain, config_app, db, media, providers
 from app.main import app
 
 SCRIPT = (

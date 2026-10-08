@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS presets (
     created_at TEXT,
     updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS jobs_inflight (
+    job_id      TEXT PRIMARY KEY,
+    ad_id       INTEGER NOT NULL,
+    output_mode TEXT NOT NULL DEFAULT '',
+    scene_ns    TEXT NOT NULL DEFAULT '[]',
+    clip_id     INTEGER,
+    started_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS voice_meta (
     uid        TEXT PRIMARY KEY,
     label      TEXT DEFAULT '',
@@ -166,6 +174,9 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("frame0_path", "TEXT DEFAULT ''"),      # frame 0 extraite (contrôle de dérive)
         ("drift_score", "REAL"),                 # NULL = pas mesuré ; score 0..1
         ("drift_flag", "INTEGER DEFAULT 0"),     # 1 = dérive (score sous le seuil)
+        # Contrôle « réplique coupée » (silencedetect après un clip Grok) + rallonge demandée.
+        ("speech_cut", "INTEGER DEFAULT 0"),     # 1 = voix jusqu'aux 0,3 dernières s (coupée ?)
+        ("extra_seconds", "INTEGER DEFAULT 0"),  # secondes ajoutées via « Régénérer (+1 s) »
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
@@ -705,6 +716,7 @@ _ALLOWED_CLIP_COLS = {
     "speaker", "voice_ok", "wav_seconds", "clip_seconds", "raw_mp4_path", "frame0_path",
     "drift_score", "drift_flag",
     "anchor_edit",   # Objet animé : surcharge par plan de la retouche de l'ancre (NULL = pub)
+    "speech_cut", "extra_seconds",
 }
 
 
@@ -1111,3 +1123,96 @@ def cost_by_service_for_ad(ad_id: int) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------- jobs en cours (reprise après plantage)
+# Chaque job de fond est inscrit dans `jobs_inflight` au démarrage et retiré à la fin. Une ligne
+# restante au lancement de l'app = job INTERROMPU (plantage, fermeture brutale) → ses plans sont
+# remis dans un état cohérent « échec — à relancer ». On ne relance JAMAIS automatiquement :
+# l'appel fournisseur a peut-être déjà été facturé (pas de double facturation).
+INTERRUPTED_MSG = (
+    "Génération interrompue (l'app s'est arrêtée en cours de route) — relance ce plan. "
+    "Rien n'a été relancé automatiquement."
+)
+# Statuts « déjà terminés » selon le type de job (un plan déjà fini n'est pas touché).
+_DONE_STATUSES_IMAGES = ("image_pret", "valide", "pret")
+_DONE_STATUSES_VIDEO = ("pret",)
+_IMAGE_MODES = ("objet_images",)
+# Jobs « voix » : l'état des plans est porté par d'autres champs (voice_ok…) → on ne touche pas
+# aux statuts des plans, seulement au statut de la pub.
+_VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off")
+
+
+def job_inflight_add(
+    job_id: str, ad_id: int, output_mode: str, scene_ns: list[int], clip_id: int | None = None
+) -> None:
+    import json
+
+    con = connect()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO jobs_inflight(job_id, ad_id, output_mode, scene_ns, clip_id, "
+            "started_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (job_id, int(ad_id), output_mode, json.dumps([int(n) for n in scene_ns]),
+             int(clip_id) if clip_id is not None else None, time.time()),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def job_inflight_done(job_id: str) -> None:
+    con = connect()
+    try:
+        con.execute("DELETE FROM jobs_inflight WHERE job_id=?", (job_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def recover_interrupted_jobs() -> list[dict[str, Any]]:
+    """Au DÉMARRAGE : remet en état cohérent les plans des jobs restés « en cours » (process
+    arrêté pendant une génération). Plans non terminés → status « echec » + INTERRUPTED_MSG ;
+    pub « en_cours » → « echec ». Idempotent (la table est vidée). Renvoie le récapitulatif."""
+    import json
+
+    con = connect()
+    out: list[dict[str, Any]] = []
+    try:
+        rows = [dict(r) for r in con.execute("SELECT * FROM jobs_inflight").fetchall()]
+        for job in rows:
+            mode = str(job.get("output_mode") or "")
+            ad_id = int(job["ad_id"])
+            try:
+                scene_ns = [int(n) for n in json.loads(job.get("scene_ns") or "[]")]
+            except (TypeError, ValueError):
+                scene_ns = []
+            reset: list[int] = []
+            if mode not in _VOICE_MODES:
+                done = _DONE_STATUSES_IMAGES if mode in _IMAGE_MODES else _DONE_STATUSES_VIDEO
+                clips = con.execute(
+                    "SELECT id, scene_n, status FROM clips WHERE ad_id=?", (ad_id,)
+                ).fetchall()
+                for c in clips:
+                    if job.get("clip_id"):
+                        targeted = int(c["id"]) == int(job["clip_id"])
+                    else:
+                        targeted = int(c["scene_n"]) in scene_ns
+                    if targeted and str(c["status"] or "") not in done:
+                        con.execute("UPDATE clips SET status='echec', error=? WHERE id=?",
+                                    (INTERRUPTED_MSG, int(c["id"])))
+                        reset.append(int(c["scene_n"]))
+            con.execute("UPDATE ads SET status='echec' WHERE id=? AND status='en_cours'", (ad_id,))
+            detail = (f"plan(s) {', '.join(str(n) for n in sorted(reset))} à relancer."
+                      if reset else "rien à relancer.")
+            con.execute(
+                "INSERT INTO activity(ts, kind, message) VALUES(?, ?, ?)",
+                (time.time(), "reprise",
+                 f"Pub #{ad_id} : génération interrompue ({mode or 'job'}) — {detail}"),
+            )
+            out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": sorted(reset)})
+        con.execute("DELETE FROM jobs_inflight")
+        con.commit()
+    finally:
+        con.close()
+    return out

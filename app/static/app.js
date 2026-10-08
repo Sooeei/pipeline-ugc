@@ -11,8 +11,49 @@ function detailToMessage(detail) {
   if (typeof detail === "object" && typeof detail.msg === "string") return detail.msg;
   return "";
 }
+// ------------------------------------------------ serveur déconnecté (bandeau)
+// Un fetch qui ÉCHOUE (réseau, pas une réponse HTTP d'erreur) = serveur injoignable. Après
+// SRV_FAIL_LIMIT échecs consécutifs → bandeau « Serveur déconnecté — relance l'app » au lieu
+// d'erreurs en cascade. Le heartbeat /api/health (10 s) détecte la panne même sans action et
+// signale au serveur que la fenêtre est toujours ouverte.
+const SRV_FAIL_LIMIT = 2;
+let srvFails = 0;
+function srvBanner(show) {
+  let b = $("srvDownBanner");
+  if (!b && show) {
+    b = document.createElement("div");
+    b.id = "srvDownBanner";
+    b.setAttribute("role", "alert");
+    b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:10000;padding:10px 16px;" +
+      "background:#b42318;color:#fff;font-weight:600;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25)";
+    b.textContent = "⚠ Serveur déconnecté — relance l'app (LANCER.bat). Tes plans déjà générés sont conservés.";
+    document.body.appendChild(b);
+  }
+  if (b) b.style.display = show ? "block" : "none";
+}
+function srvOk() {
+  if (srvFails) { srvFails = 0; srvBanner(false); }
+}
+function srvFail() {
+  srvFails += 1;
+  if (srvFails >= SRV_FAIL_LIMIT) srvBanner(true);
+}
+async function srvFetch(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    srvOk();
+    return r;
+  } catch (e) {
+    srvFail();
+    throw new Error(srvFails >= SRV_FAIL_LIMIT
+      ? "Serveur déconnecté — relance l'app (LANCER.bat)."
+      : "Le serveur ne répond pas — réessaie dans un instant.");
+  }
+}
+setInterval(() => { srvFetch("/api/health", { cache: "no-store" }).catch(() => {}); }, 10000);
+
 const api = async (url, opts) => {
-  const r = await fetch(url, opts);
+  const r = await srvFetch(url, opts);
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     throw new Error(detailToMessage(data.detail) || "Le serveur n'a pas pu traiter la demande — réessaie.");
@@ -2168,8 +2209,10 @@ function renderClipAds(root, ads, emptyMsg) {
       } else if (c.media_url && c.status === "pret") {
         div.innerHTML =
           `<video src="${esc(c.media_url)}" controls preload="metadata"></video>` +
-          `<div class="meta"><span class="scene-n">#${c.scene_n}</span>` +
-          `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a></div>`;
+          `<div class="meta"><span class="scene-n">#${c.scene_n}</span>${speechCutBadge(c)}` +
+          `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a></div>` +
+          (ad.kind === "objet" ? speechCutActions(c) : "");
+        if (ad.kind === "objet") bindSpeechCut(div, c);
       } else {
         div.innerHTML =
           `<div class="meta"><span class="scene-n">#${c.scene_n}</span></div>` +
@@ -2224,8 +2267,9 @@ function aoLibClip(div, ad, c) {
     `</details>`;
   div.innerHTML =
     `<div class="ao-lib-media${v2 ? " v2" : ""}">${kf}${frame0}${vid}</div>` +
-    `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}` +
+    `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}${v2 && ok ? speechCutBadge(c) : ""}` +
     (ok ? `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a>` : "") + `</div>` +
+    (v2 && ok ? speechCutActions(c) : "") +
     prompts +
     `<div class="ao-lib-actions"><button class="btn small btn-relaunch" type="button" ` +
     (v2
@@ -2235,6 +2279,64 @@ function aoLibClip(div, ad, c) {
   const btn = div.querySelector(".btn-relaunch");
   const state = div.querySelector(".ao-lib-state");
   btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
+  if (v2 && ok) bindSpeechCut(div, c);
+}
+
+// ------------------------------------------------ réplique peut-être coupée (voix native Grok)
+// Le serveur contrôle chaque clip Grok (silencedetect) : si la voix continue jusqu'à la toute
+// fin, badge + bouton « Régénérer (+1 s) » (relance la vidéo seule avec 1 s de plus).
+function speechCutBadge(c) {
+  return c.speech_cut && Number(c.speech_cut)
+    ? `<span class="badge ko" title="La voix continue jusqu'à la toute fin du clip : la réplique est peut-être coupée.">Réplique peut-être coupée</span>`
+    : "";
+}
+function speechCutActions(c) {
+  if (!(c.speech_cut && Number(c.speech_cut))) return "";
+  return `<div class="ao-lib-actions"><button class="btn small btn-speech-longer" type="button" ` +
+    `title="Refait uniquement la vidéo de ce plan avec 1 s de plus (même image, même réplique)">⏱ Régénérer (+1 s)</button>` +
+    `<span class="speech-state muted small"></span></div>`;
+}
+function bindSpeechCut(div, c) {
+  const btn = div.querySelector(".btn-speech-longer");
+  if (!btn) return;
+  const state = div.querySelector(".speech-state");
+  btn.addEventListener("click", async () => {
+    const dryRun = currentSettings && currentSettings.dry_run;
+    if (!dryRun) {
+      const ok = await showModal({
+        title: "Régénérer (+1 s) — coût Grok (réel)",
+        message: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $). Continuer ?",
+        confirmText: "Régénérer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+    }
+    btn.disabled = true;
+    try {
+      const post = (over) => api("/api/clips/" + c.id + "/regenerate-longer", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true, confirm_over_cap: !!over }),
+      });
+      let res;
+      try {
+        res = await post(false);
+      } catch (e) {
+        if (!/plafond/i.test(e.message)) throw e;
+        const over = await showModal({ title: "Plafond de dépense", message: e.message, confirmText: "Confirmer", cancelText: "Annuler", danger: true });
+        if (!over) return;
+        res = await post(true);
+      }
+      if (state) state.textContent = "⏳ Vidéo en cours (+1 s)…";
+      const j = await waitJobDone(res.job_id);
+      if (!j) toast("Suivi interrompu — rafraîchis la Bibliothèque.");
+      else if (j.state === "echec" || Number((j.summary || {}).echec || 0) > 0) toast(prettyError((j.summary && j.summary.message) || "La relance a échoué."));
+      else toast("Vidéo refaite avec 1 s de plus ✓");
+      loadLibraryVideos().catch(() => {});
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // Relance la vidéo d'UN clip Avatar IA depuis la Bibliothèque (même keyframe, pas de Nano Banana).

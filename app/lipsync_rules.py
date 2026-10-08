@@ -26,7 +26,8 @@ SPOKEN_CAMERAS: dict[str, str] = {
 DEFAULT_SPOKEN_CAMERA = CAMERA_LOCKED
 
 SPOKEN_FRAMING = "Close-up or tight medium shot, the speaker's mouth clearly visible the whole time."
-SPOKEN_AUDIO_RULES = "No music. No loud background ambience in the foreground."
+SPOKEN_AMBIENCE_RULE = "No loud background ambience in the foreground."
+SPOKEN_AUDIO_RULES = f"No music. {SPOKEN_AMBIENCE_RULE}"
 LANGUAGE_FRANCE = "speaking French with a natural accent from France"
 # Accent par défaut des fiches voix (config_app.OMNI_DEFAULT_ACCENT) : même sens que LANGUAGE_FRANCE.
 _DEFAULT_ACCENT_PHRASES = {"natural french accent from france", "a natural french accent from france"}

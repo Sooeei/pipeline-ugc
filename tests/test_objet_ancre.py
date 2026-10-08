@@ -267,11 +267,12 @@ def _capture_grok(monkeypatch):
 def test_voice_sheet_injected_verbatim_per_speaker(monkeypatch):
     calls = _capture_grok(monkeypatch)
     ad_id, ids = _objet_ad(3, status="valide")
-    fiche_a = "Femme, 45 ans, timbre chaud et posé, débit lent, ton rassurant."
-    fiche_b = "Homme, 30 ans, voix aiguë et rapide, ton enjoué."
+    # Fiches insérées SANS ponctuation finale (voice_i18n.clean_sheet).
+    fiche_a = "Femme, 45 ans, timbre chaud et posé, débit lent, ton rassurant"
+    fiche_b = "Homme, 30 ans, voix aiguë et rapide, ton enjoué"
     db.set_ad_characters(ad_id, [
-        {"nom": "Pot", "image_ref": "", "description": "pot en céramique", "fiche_voix": fiche_a},
-        {"nom": "Chat", "image_ref": "", "description": "chat roux", "fiche_voix": fiche_b},
+        {"nom": "Pot", "image_ref": "", "description": "pot en céramique", "fiche_voix": fiche_a + "."},
+        {"nom": "Chat", "image_ref": "", "description": "chat roux", "fiche_voix": fiche_b + "."},
     ])
     with _client() as c:
         assert c.post(f"/api/objet/clip/{ids[1]}/options", json={"speaker": 2}).status_code == 200

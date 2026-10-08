@@ -194,6 +194,10 @@ _MIGRATIONS.setdefault("characters", []).extend([
     # Fiche voix TEXTE libre du perso (« femme 30 ans, voix posée, accent du Sud… ») : format
     # perso commun {nom, image_ref, description, fiche_voix}. voice_profile (JSON) reste à côté.
     ("fiche_voix", "TEXT DEFAULT ''"),
+    # Traduction ANGLAISE figée de la fiche voix (c'est elle qui part dans les prompts) + texte
+    # français dont elle est issue (retraduite seulement si la fiche française change).
+    ("fiche_voix_en", "TEXT DEFAULT ''"),
+    ("fiche_voix_src", "TEXT DEFAULT ''"),
 ])
 _MIGRATIONS["ads"].extend([
     ("client_preset_id", "INTEGER"),      # preset client appliqué à la pub (export_dir, persos…)
@@ -703,6 +707,9 @@ def set_main_ref(ad_id: int, ref_id: int | None) -> None:
 # CONVENTION PARTAGÉE (presets client / bibliothèque de persos) : un perso = dict JSON
 # {"nom", "image_ref" (chemin), "description", "fiche_voix"} — toutes des chaînes.
 CHARACTER_KEYS = ("nom", "image_ref", "description", "fiche_voix")
+# Clés optionnelles conservées : traduction anglaise figée de la fiche voix + texte source
+# (app/voice_i18n.py). Absentes des anciennes pubs → la fiche française sert de repli.
+CHARACTER_OPTIONAL_KEYS = ("fiche_voix_en", "fiche_voix_src")
 MAX_AD_CHARACTERS = 6
 
 
@@ -722,6 +729,7 @@ def normalize_characters(persos: Any) -> list[dict[str, str]]:
         if not isinstance(p, dict):
             continue
         perso = {k: str(p.get(k) or "").strip() for k in CHARACTER_KEYS}
+        perso.update({k: str(p[k]).strip() for k in CHARACTER_OPTIONAL_KEYS if p.get(k)})
         if perso["nom"]:
             out.append(perso)
     return out[:MAX_AD_CHARACTERS]
@@ -1010,7 +1018,7 @@ def count_clips(status: str | None = None) -> int:
 
 # ---------------------------------------------------------------- personnages (bibliothèque)
 _CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible",
-                   "fiche_voix"}
+                   "fiche_voix", "fiche_voix_en", "fiche_voix_src"}
 
 
 def _now_iso() -> str:

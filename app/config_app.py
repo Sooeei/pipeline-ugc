@@ -260,10 +260,7 @@ GROK_VOICE_PACES: dict[str, VoicePaceCfg] = {
         # 2,5 = débit visé (fiche voix Omni, mots max par plan). La DURÉE des clips Grok d'Objet
         # animé utilise le débit RÉEL de la voix native (grok_clip_words_per_sec → 2,2).
         "words_per_sec": 2.5,
-        "directive": (
-            "at a natural conversational pace, clear but not slow, like a normal human speaker, "
-            "neither rushed nor dragging"
-        ),
+        "directive": "at a natural conversational pace",
     },
     "dynamique": {
         "label": "Dynamique",

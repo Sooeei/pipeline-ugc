@@ -271,12 +271,13 @@ def test_build_omni_prompt_structure_and_order():
     assert "spoken in French" in p and "in a warm voice" in p
     assert '"Il dit “wow” et “ok”."' in p     # verbatim, guillemets internes “ ”
     assert "[1-7s]" in p and "[0-1s]" in p
-    assert "No other speakers. Never mirror the image. No music. No subtitles. No on-screen text." in p
+    assert "Never mirror the image. No music. No subtitles. No on-screen text." in p
+    assert p.count("No subtitles") == 1 and p.lower().count("no music") == 1
     assert "nods" not in p.lower() and "Smiles warmly" in p        # geste de tête retiré (lip-sync)
     assert p.endswith("Use Image1 as the starting frame. Use Image2 as a reference for the video "
                       "generation. The images should not be used as literal initial frames.")
     idx = [p.index(x) for x in ("[# Sources", "In a single continuous shot", "Locked off",
-                                "Smiles warmly", "Lips and expression", "[0-1s]", "No other speakers.",
+                                "Smiles warmly", "Only the person speaks", "[0-1s]", "Never mirror the image.",
                                 "Use Image1")]
     assert idx == sorted(idx)
 

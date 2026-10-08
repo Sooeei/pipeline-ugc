@@ -46,6 +46,7 @@ from . import (
     pipeline,
     prompt_profiles,
     providers,
+    voice_i18n,
 )
 from .providers import ProviderConfig, _log_detail
 
@@ -227,7 +228,6 @@ def build_video_prompt(
     return " ".join(p for p in parts if p)
 
 
-_NEVER_MIRROR = "Never mirror the image, keep framing and background exactly as the start frame."
 
 
 def _grok_block_prompt(
@@ -248,9 +248,8 @@ def _grok_block_prompt(
     perf = " ".join([f"{_who(sp, names)} talking, expressive mouth, subtle body motion."]
                     + [f"{_who(m, names)} keeps their mouth closed, does not speak." for m in others])
     prompt, _ = providers.build_grok_prompt(
-        _gesture(motion), text, tone=sheet, performance=perf, accent=accent,
+        _gesture(motion), text, tone=voice_i18n.clean_sheet(sheet), performance=perf, accent=accent,
         speaker_line=lipsync_rules.single_speaker_line(_who(sp, names), [_who(m, names) for m in others]),
-        extra_negatives=_NEVER_MIRROR,
     )
     return prompt, removed
 

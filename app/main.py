@@ -40,6 +40,7 @@ from . import (
     pipeline,
     presets,
     prompt_profiles,
+    voice_i18n,
 )
 from . import providers as prov
 from .settings_service import load_provider_config
@@ -801,10 +802,14 @@ def create_app() -> FastAPI:
         if len(raw1) > _KEYFRAME_MAX_BYTES:
             raise HTTPException(400, "Image trop lourde (max 25 Mo).")
 
+        # Fiches voix : traduction anglaise figée (Claude, hors boucle événementielle).
+        persos = (await run_in_threadpool(voice_i18n.ensure_all, cfg, db.normalize_characters(characters))
+                  if characters.strip() else [])
+
         def _on_ad(aid: int) -> None:
             db.set_ad_fields(aid, anchor_edit=1 if anchor_edit else 0)
-            if characters.strip():
-                db.set_ad_characters(aid, characters)
+            if persos:
+                db.set_ad_characters(aid, persos)
 
         # script = DIALOGUE du plan (verbatim, éditable) ; motion_prompt + prompt_image.
         res = await _start_plan_images(
@@ -847,7 +852,10 @@ def create_app() -> FastAPI:
             db.set_ad_fields(ad_id, anchor_edit=1 if body.anchor_edit else 0)
         persos = None
         if body.characters is not None:
-            persos = db.set_ad_characters(ad_id, body.characters)
+            # Fiches voix : traduction anglaise figée, refaite seulement si la fiche FR change.
+            persos = db.set_ad_characters(ad_id, voice_i18n.ensure_all(
+                load_provider_config(), db.normalize_characters(body.characters),
+                previous=db.get_ad_characters(ad)))
         ad = db.get_ad(ad_id) or {}
         return {"ok": True, "anchor_edit": pipeline.ad_anchor_edit(ad),
                 "characters": persos if persos is not None else pipeline.ad_characters(ad)}

@@ -147,6 +147,8 @@ def character_to_perso(row: dict[str, Any]) -> dict[str, str]:
         "image_ref": planche if planche and Path(planche).is_file() else "",
         "description": str(row.get("description") or ""),
         "fiche_voix": _character_fiche_voix(row),
+        "fiche_voix_en": str(row.get("fiche_voix_en") or ""),
+        "fiche_voix_src": str(row.get("fiche_voix_src") or ""),
     }
 
 
@@ -187,6 +189,22 @@ def get_character(character_id: int) -> dict[str, Any]:
     return _character_out(_get_character_or_404(character_id))
 
 
+async def _freeze_fiche_voix(character_id: int) -> None:
+    """Traduction anglaise FIGÉE de la fiche voix du perso (Claude, hors boucle événementielle),
+    refaite seulement si la fiche française a changé (app/voice_i18n.py)."""
+    from starlette.concurrency import run_in_threadpool
+
+    from app import voice_i18n
+    from app.settings_service import load_provider_config
+
+    row = db.get_character(character_id) or {}
+    perso = await run_in_threadpool(voice_i18n.ensure_english, load_provider_config(), {
+        "fiche_voix": row.get("fiche_voix") or "", "fiche_voix_en": row.get("fiche_voix_en") or "",
+        "fiche_voix_src": row.get("fiche_voix_src") or ""})
+    db.update_character(character_id, fiche_voix_en=perso["fiche_voix_en"],
+                        fiche_voix_src=perso["fiche_voix_src"])
+
+
 @router.post("/api/characters")
 async def create_character(
     name: str = Form(...),
@@ -209,6 +227,7 @@ async def create_character(
         clean_name, _clean_text(description), "", vid, profile, _clean_text(bible),
         _clean_text(fiche_voix),
     )
+    await _freeze_fiche_voix(character_id)
     if raw:
         try:
             dest = _save_image(raw, _characters_dir(character_id), "planche")
@@ -235,6 +254,8 @@ async def update_character(
     fields: dict[str, Any] = {}
     if fiche_voix is not None:
         fields["fiche_voix"] = _clean_text(fiche_voix)
+        db.update_character(character_id, fiche_voix=fields["fiche_voix"])
+        await _freeze_fiche_voix(character_id)
     if name is not None:
         clean_name = _clean_text(name, _NAME_MAX)
         if not clean_name:
@@ -460,13 +481,14 @@ def apply_preset_characters(ad_id: int, persos: list[dict[str, str]]) -> None:
     L'image d'un perso déjà copiée en réf de la pub (ex. « Visage » ajoutée par le formulaire)
     est rattachée à CETTE réf : elle apparaît dans le choix « Réf image » du perso et n'est
     envoyée qu'une fois à Nano Banana."""
-    from app import pipeline
+    from app import pipeline, voice_i18n
+    from app.settings_service import load_provider_config
 
     ad_refs = [str(r["path"]) for r in db.list_ref_images_typed(int(ad_id))]
-    db.set_ad_characters(int(ad_id), [
+    db.set_ad_characters(int(ad_id), voice_i18n.ensure_all(load_provider_config(), [
         {**p, "image_ref": pipeline.same_image_ref(str(p.get("image_ref") or ""), ad_refs)}
         for p in persos
-    ])
+    ], previous=db.get_ad_characters(int(ad_id))))
     db.set_ad_fields(int(ad_id), preset_characters=json.dumps(persos, ensure_ascii=False))
 
 

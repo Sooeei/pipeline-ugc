@@ -28,6 +28,7 @@ from . import (
     media,
     omni_timing,
     prompt_profiles,
+    voice_i18n,
 )
 from . import prompt_profiles as pp
 from .providers import (
@@ -608,11 +609,15 @@ def _anchor_edit_legend(refs: list[str], main_path: str, speaker: dict[str, str]
 
 
 def objet_voice_tone(speaker: dict[str, str] | None, default_tone: str) -> str:
-    """Timbre injecté dans la section AUDIO du prompt Grok : la FICHE VOIX du perso qui parle,
-    MOT POUR MOT (même texte sur tous ses plans → voix la plus constante possible) ; sinon le
-    timbre des Réglages (comportement d'origine)."""
-    if speaker and speaker.get("fiche_voix"):
-        return f"voice of {speaker['nom']} (same voice in every clip): {speaker['fiche_voix']}"
+    """Timbre injecté dans la section AUDIO du prompt Grok : la FICHE VOIX du perso qui parle —
+    sa traduction anglaise FIGÉE (voice_i18n), à l'identique sur tous ses plans → voix la plus
+    constante possible ; repli fiche française ; sans ponctuation finale. Sinon le timbre des
+    Réglages (comportement d'origine)."""
+    from . import voice_i18n
+
+    sheet = voice_i18n.prompt_sheet(speaker) if speaker else ""
+    if sheet:
+        return f"voice of {speaker['nom']} (same voice in every clip): {sheet}"
     return default_tone
 
 
@@ -1460,10 +1465,9 @@ def omni_camera_sentence(
     return cam
 
 
-def _omni_audio_rules() -> str:
-    """Règles audio des plans parlés sans le « No music. » (déjà dans les interdits Omni)."""
-    rules = re.split(r"(?<=\.)\s+", lipsync_rules.SPOKEN_AUDIO_RULES.strip())
-    return " ".join(r for r in rules if r and r.lower() != "no music.")
+# Audio d'un plan PARLÉ Omni, en UNE phrase : voix au premier plan sur un room tone calme (couvre
+# « pas d'ambiance au premier plan » ; « No music » est dans les interdits, une seule fois).
+_OMNI_SPOKEN_AUDIO = "Audio: their clear voice up front over a quiet room tone, no background ambience"
 
 
 def omni_motion(motion: str, spoken: bool) -> tuple[str, list[str]]:
@@ -1514,9 +1518,7 @@ def assemble_omni(
     interdits → phrases de rôle. Les rôles déclarés sont ceux de `images` (= images envoyées)."""
     P = prompt_profiles
     header = " ".join(x for x in (P.omni_role_header(images), lead) if x)
-    negatives = []
-    if spoken:
-        negatives.append(P.OMNI_NO_OTHER_SPEAKERS)
+    negatives = []   # « No other speakers » : porté par « Only X speaks… » (bloc jeu)
     if P.omni_has_first_frame(images):
         negatives.append(P.OMNI_NO_MIRROR)
     negatives.append(P.OMNI_NEGATIVES)
@@ -1577,16 +1579,14 @@ def build_omni_prompt(
     performance: list[str] = []
     audio: list[str] = []
     if spoken:
-        performance.append("Lips and expression stay in sync with every word")
         performance.append(lipsync_rules.single_speaker_line(
-            "the speaking character" if speaker else "the person", [silent] if silent else None))
+            "the speaking character" if speaker else "the person"))
         if silent:
             performance.append(f"The other character ({silent}) remains silent the whole time: no "
                                "speech and no lip movement, only natural listening reactions")
         audio.append(f"[0-1s] {intro}, silent. [1-{seconds}s] {who} says, spoken in French, in "
-                     f"{voice_sheet}: \"{_omni_quote_dialogue(text)}\"")
-        audio.append("The audio is their clear spoken voice up front over a quiet room tone")
-        audio.append(_omni_audio_rules())
+                     f"{voice_i18n.clean_sheet(voice_sheet)}: \"{_omni_quote_dialogue(text)}\"")
+        audio.append(_OMNI_SPOKEN_AUDIO)
     else:
         audio.append("No dialogue. The audio is a quiet natural room tone")
     return assemble_omni(images, camera=cam, subject=subject, performance=performance,
@@ -1678,13 +1678,13 @@ def build_omni_extension_prompt(
     motion, _removed = omni_motion(prompt_motion, spoken)
     performance: list[str] = []
     if spoken:
-        performance.append("Lips and expression stay in sync with every word")
+        performance.append(lipsync_rules.single_speaker_line(
+            "the speaking character" if speaker else "the person"))
         if silent:
             performance.append(f"The other character ({silent}) remains silent: no speech, no lip movement")
-        audio = [f"[0-{seconds}s] {who} says, spoken in French, in {voice_sheet}: "
+        audio = [f"[0-{seconds}s] {who} says, spoken in French, in {voice_i18n.clean_sheet(voice_sheet)}: "
                  f"\"{_omni_quote_dialogue(text)}\"",
-                 "The audio is their clear spoken voice up front over a quiet room tone",
-                 _omni_audio_rules()]
+                 _OMNI_SPOKEN_AUDIO]
     else:
         audio = [f"[0-{seconds}s] No dialogue. The audio is a quiet natural room tone"]
     return assemble_omni(
@@ -1961,7 +1961,8 @@ def build_omni_turn_prompt(
         who = f"The speaking character ({speaker_desc})"
     else:
         who = f"{speaker_name}, the speaking character," if speaker_name else "The person"
-    timed = omni_timing.build_turn_timecode_prompt(t, timing, speaker_desc=who, voice_sheet=voice_sheet)
+    timed = omni_timing.build_turn_timecode_prompt(t, timing, speaker_desc=who,
+                                                   voice_sheet=voice_i18n.clean_sheet(voice_sheet))
     subject: list[str] = []
     if first:
         text_only = bool(scene_desc.strip())
@@ -1985,15 +1986,13 @@ def build_omni_turn_prompt(
         performance.append("Nobody speaks: no lip movement")
         audio = [timed, "The audio is a quiet natural room tone"]
     else:
-        performance.append("Lips and expression stay in sync with every word; only the speaking "
-                           "character's lips move")
+        performance.append(lipsync_rules.single_speaker_line("the speaking character"))
         if others:
             s = "s" if len(others) > 1 else ""
             performance.append(f"The other character{s} ({'; '.join(others)}) remain{'' if s else 's'} "
                                "silent the whole time: no speech and no lip movement, only natural "
                                "listening reactions")
-        audio = [timed, "The audio is their clear spoken voice up front over a quiet room tone",
-                 _omni_audio_rules()]
+        audio = [timed, _OMNI_SPOKEN_AUDIO]
     return assemble_omni(images, lead=lead, camera=cam, subject=subject,
                          performance=performance, audio=audio, spoken=spoken)
 
@@ -2058,14 +2057,12 @@ def build_omni_block_prompt(
     performance: list[str] = []
     audio: list[str] = []
     if spoken:
-        performance.append(f"{who} talking, expressive mouth, subtle body motion")
-        performance.append(f"Lips and expression stay in sync with every word; only {who}'s lips move")
+        performance.append(f"Only {who} speaks, expressive mouth in sync with every word, subtle body motion")
         performance.extend(f"{o} keeps their mouth closed, does not speak" for o in others)
         audio.append(f'{who} says, spoken in French: "{text}"')
         if voice_sheet.strip():
-            audio.append(f"Voice: {voice_sheet.strip()}")
-        audio.append("The audio is their clear spoken voice up front over a quiet room tone")
-        audio.append(_omni_audio_rules())
+            audio.append(f"Voice: {voice_i18n.clean_sheet(voice_sheet)}")
+        audio.append(_OMNI_SPOKEN_AUDIO)
     else:
         performance.extend(f"{o} keeps their mouth closed, does not speak" for o in [who, *others])
         audio.append("No dialogue. The audio is a quiet natural room tone")

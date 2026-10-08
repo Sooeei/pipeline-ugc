@@ -114,7 +114,7 @@ def test_every_builder_declares_exactly_the_sent_images(has_anchor, text_only, e
         assert "No music. No subtitles. No on-screen text." in p
         assert ("Use Image1 as the starting frame." in p) == (not text_only)
         assert ("Use Image2 as a reference" in p) == has_anchor
-        assert "The audio is" in p                            # audio toujours décrit
+        assert ("Audio: " in p or "The audio is" in p)                            # audio toujours décrit
     if text_only:
         assert "first frame" not in p1 and "The scene: A woman in a kitchen" in p1
 

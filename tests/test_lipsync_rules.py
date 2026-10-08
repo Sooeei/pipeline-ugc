@@ -107,15 +107,15 @@ def test_grok_final_prompt_spoken_exact_and_block_order():
     assert prompt == (
         f"{SINGLE} "
         "Locked off static camera, framing identical to the first frame. "
-        "Close-up or tight medium shot, the speaker's mouth clearly visible the whole time. "
         "She smiles warmly. "
         "Only Léa speaks and lip-syncs. "
         "AUDIO: a warm natural voice, speaking French with a natural accent from France, "
         'at a natural conversational pace, saying: "Franchement, je l\'adore !" '
-        "No music. No loud background ambience in the foreground. "
-        "No subtitles, no captions, no watermark."
+        "No loud background ambience in the foreground. Never mirror the image. No subtitles, no captions, no watermark."
     )
-    order = [prompt.index(x) for x in (SINGLE, "Locked off", "She smiles", "Only Léa", "AUDIO:", "No music.")]
+    # Cadrage serré : décidé à l'étape IMAGE, jamais dans le prompt vidéo ; « no music » une seule fois.
+    assert lipsync_rules.SPOKEN_FRAMING not in prompt and prompt.lower().count("no music") == 1
+    order = [prompt.index(x) for x in (SINGLE, "Locked off", "She smiles", "Only Léa", "AUDIO:", "No loud")]
     assert order == sorted(order)
 
 
@@ -188,15 +188,15 @@ def test_objet_two_characters_final_prompts_and_dialogue_param(monkeypatch):
     mute = next(c for c in calls if "look around the shop" in c["prompt"])
     assert blonde["prompt"] == (
         f"{SINGLE} Locked off static camera, framing identical to the first frame. "
-        f"{lipsync_rules.SPOKEN_FRAMING} The blonde woman smiles and holds the jar. "
+        "The blonde woman smiles and holds the jar. "
         "Only Blonde (blonde woman in a white shirt) speaks and lip-syncs; the others stay silent. "
-        f"AUDIO: voice of Blonde (same voice in every clip): {FICHE_BLONDE}, "
+        f"AUDIO: voice of Blonde (same voice in every clip): {FICHE_BLONDE.rstrip('.')}, "
         "speaking French with a natural accent from France, "
         f"{config_app.default_grok_voice_pace()['directive']}, "
         "saying: \"Salut, moi c'est la Blonde !\" "
-        "No music. No loud background ambience in the foreground. No subtitles, no captions, no watermark."
+        "No loud background ambience in the foreground. Never mirror the image. No subtitles, no captions, no watermark."
     )
-    assert FICHE_ROUSSE in rousse["prompt"] and FICHE_BLONDE not in rousse["prompt"]
+    assert FICHE_ROUSSE.rstrip(".") in rousse["prompt"] and FICHE_BLONDE.rstrip(".") not in rousse["prompt"]
     assert "Only Rousse (redhead woman in a green dress) speaks and lip-syncs; the others stay silent." in rousse["prompt"]
     assert "turns her head" not in rousse["prompt"] and "The redhead raises her eyebrows." in rousse["prompt"]
     # Plan muet : mouvement d'origine, aucune règle lip-sync ni fiche voix.
@@ -245,7 +245,8 @@ def test_v2_grok_prompt_rules_accent_and_warning():
     assert "nods" not in p and "Smiles and points at the jar." in p
     assert "Only Character 1 (Léa) speaks and lip-syncs; the others stay silent." in p
     assert "Character 2 (Paul) keeps their mouth closed, does not speak." in p
-    assert lipsync_rules.SPOKEN_FRAMING in p and lipsync_rules.SPOKEN_AUDIO_RULES in p
+    assert lipsync_rules.SPOKEN_FRAMING not in p and lipsync_rules.SPOKEN_AMBIENCE_RULE in p
+    assert p.lower().count("no music") == 1 and p.count("Never mirror the image") == 1
     assert avatar_video.lipsync_warning(clip, "grok") == (
         "Gestes de tête retirés pour un lip-sync fiable : « nods gently ».")
     assert avatar_video.lipsync_warning(clip, "omni") == ""
@@ -294,7 +295,7 @@ def test_objet_voice_sheet_identical_in_every_grok_prompt(monkeypatch):
     db.set_ad_characters(ad_id, [{"nom": "Pot", "description": "", "fiche_voix": fiche}])
     pipeline.animate_objet_clips(ProviderConfig(dry_run=False, xai_api_key="x"), ad_id, "pot")
     assert len(calls) == 3
-    locked = f"voice of Pot (same voice in every clip): {fiche}"
+    locked = f"voice of Pot (same voice in every clip): {fiche.rstrip('.')}"   # sans « . » final
     for c in calls:
         assert c["prompt"].count(locked) == 1
         assert "Only Pot speaks and lip-syncs." in c["prompt"]   # 1 seul perso : version courte

@@ -999,12 +999,14 @@ def build_grok_prompt(
     cam = lipsync_rules.spoken_camera(lipsync_rules.spoken_camera_for(motion))
     audio = ", ".join(x for x in (tone.strip(), lipsync_rules.language_line(accent), pace.strip()) if x)
     blocks.update({
-        prompt_profiles.B_CAMERA: f"{cam} {lipsync_rules.SPOKEN_FRAMING}",
+        # Cadrage serré décidé à l'étape IMAGE (keyframe) : en vidéo, seulement « framing
+        # identical to the first frame » (porté par la phrase caméra).
+        prompt_profiles.B_CAMERA: cam,
         prompt_profiles.B_SUBJECT: clean,
         prompt_profiles.B_PERFORMANCE: " ".join(
             [performance, speaker_line or lipsync_rules.single_speaker_line("the character")]),
         prompt_profiles.B_AUDIO: f'AUDIO: {audio}, saying: "{dialogue}"',
-        prompt_profiles.B_NEGATIVES: " ".join([extra_negatives, lipsync_rules.SPOKEN_AUDIO_RULES, *negatives]),
+        prompt_profiles.B_NEGATIVES: " ".join([extra_negatives, lipsync_rules.SPOKEN_AMBIENCE_RULE, *negatives]),
     })
     return prompt_profiles.assemble(prompt_profiles.GROK, blocks), removed
 
@@ -1022,7 +1024,7 @@ def grok_dialogue_prompt(
     Blocs, règles lip-sync et plan muet : voir `build_grok_prompt`."""
     if not (dialogue or "").strip():
         return build_grok_prompt(motion, "")[0]
-    tone = (tone or config_app.default_grok_voice_tone()).strip()
+    tone = (tone or config_app.default_grok_voice_tone()).strip().rstrip(" .;,:!…")
     pace = (pace or config_app.default_grok_voice_pace()["directive"]).strip()
     return build_grok_prompt(motion, dialogue, tone=tone, pace=pace, speaker_line=speaker_line,
                              accent=accent)[0]

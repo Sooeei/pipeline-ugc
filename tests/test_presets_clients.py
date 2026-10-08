@@ -64,7 +64,8 @@ def test_character_to_perso_format():
     with TestClient(app) as c:
         ch = _char(c)
     perso = presets.character_to_perso(db.get_character(ch["id"]))
-    assert set(perso) == {"nom", "image_ref", "description", "fiche_voix"}
+    assert set(perso) == {"nom", "image_ref", "description", "fiche_voix",
+                          "fiche_voix_en", "fiche_voix_src"}   # + traduction anglaise figée
     assert perso["nom"] == "Julie" and Path(perso["image_ref"]).is_file()
     assert perso["fiche_voix"] == "voix féminine posée, chaleureuse"
 

@@ -302,14 +302,15 @@ def test_build_video_prompt_no_decor_no_character_description():
         assert not (words & forbidden), (model, words & forbidden)
         if model == "grok":   # Grok : bloc « plan unique » puis caméra / cadrage, puis le geste
             assert p.startswith(prompt_profiles.GROK_SINGLE_SHOT) and "raises an eyebrow" in p
-        assert "Character 1 (Léa) talking, expressive mouth, subtle body motion." in p
+        assert ("Character 1 (Léa) talking, expressive mouth, subtle body motion." in p if model != "omni"
+                else "Only Character 1 (Léa) speaks, expressive mouth in sync with every word, subtle body motion." in p)
         assert "Character 2 (Paul) keeps their mouth closed, does not speak." in p
         assert "Franchement, 97 % des femmes adorent ça !" in p
         assert sheet in p
         if model == "omni":
             continue
         assert (model == "grok" or p.startswith("raises an eyebrow")) and "[" not in p
-        assert "Never mirror the image, keep framing and background exactly as the start frame." in p
+        assert "Never mirror the image" in p
     omni = avatar_video._clip_prompt(clip, ad, "omni")
     # Omni : start frame seule déclarée (rôle explicite), plan unique, caméra fixe, phrase de rôle.
     assert omni.startswith("[# Sources <FIRST_FRAME>@Image1] In a single continuous shot. No scene "

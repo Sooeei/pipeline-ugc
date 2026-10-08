@@ -20,6 +20,7 @@ from app import db  # noqa: E402
 _TABLES = (
     "cost_events", "cost_archives", "clips", "ref_images", "ads",
     "settings", "avatars", "voices", "activity", "characters", "presets", "jobs_inflight",
+    "generations", "plan_feedback",
 )
 
 

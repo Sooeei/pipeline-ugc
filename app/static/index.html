@@ -23,6 +23,7 @@
         <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
         <button class="nav-item" data-section="clients">👥 Clients &amp; persos</button>
         <button class="nav-item" data-section="costs">💰 Coûts</button>
+        <button class="nav-item" data-section="stats">📈 Stats</button>
         <button class="nav-item" data-section="modeles">🧩 Modèles</button>
         <button class="nav-item" data-section="settings">⚙️ Réglages</button>
       </nav>
@@ -865,6 +866,19 @@
         </div>
       </section>
 
+      <!-- ---- STATS (traçabilité : plans gardés / rejetés, raisons, coût par plan gardé) ---- -->
+      <section id="stats" class="panel">
+        <header class="panel-head">
+          <h1>Stats <span class="muted" style="font-size:14px;font-weight:400">— quels modèles donnent des plans gardés, et à quel prix</span></h1>
+          <div class="head-actions">
+            <button class="btn" id="refreshStats">↻ Rafraîchir</button>
+          </div>
+        </header>
+        <p class="muted small">Chaque validation, régénération ou rejet d'un plan est noté automatiquement ;
+          la raison (puces proposées après coup) est facultative.</p>
+        <div id="statsContent"></div>
+      </section>
+
       <!-- ---- MODÈLES (agent C : tableau généré depuis config_app.py + statut des clés) ---- -->
       <section id="modeles" class="panel">
         <header class="panel-head">
@@ -1097,5 +1111,6 @@
   <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>
   <script src="/static/outils_c.js"></script>
+  <script src="/static/tracabilite.js"></script>
 </body>
 </html>

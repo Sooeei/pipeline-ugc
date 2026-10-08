@@ -33,7 +33,19 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import brain, config_app, cost, db, drift, jobs, media, pipeline, providers
+from . import (
+    brain,
+    config_app,
+    cost,
+    db,
+    drift,
+    gen_trace,
+    jobs,
+    media,
+    pipeline,
+    prompt_profiles,
+    providers,
+)
 from .providers import ProviderConfig, _log_detail
 
 router = APIRouter()
@@ -332,6 +344,13 @@ def _generate_raw(
             media.make_placeholder_mp4_from_image(image, raw, seconds)
         else:
             media.make_placeholder_mp4(raw, seconds=seconds, label=f"SIMULATION {label} {n}")
+        # Simulation gérée ici (les enveloppes providers ne sont pas appelées) → journal direct.
+        gen_trace.record(
+            kind="video", model=config_app.AVATAR_VIDEO_MODELS[model]["model"], prompt=prompt,
+            images=prompt_profiles.sent_images([image] if image else [], None,
+                                               prompt_profiles.ROLE_FIRST_FRAME),
+            params={"seconds": seconds, "resolution": resolution}, dry_run=True, output_path=str(raw),
+        )
         return {}
     spec = config_app.AVATAR_VIDEO_MODELS[model]
     if model == "grok":
@@ -453,7 +472,9 @@ def animate_blocks(
                 emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
             raw = folder / f"{n}_brut.mp4"
             final = folder / f"{n}.mp4"
-            info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name)
+            with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
+                                   step="video"):
+                info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name)
             _record_cost(cfg, ad_id, model, seconds, info)
             if voice_mode == "elevenlabs" and wav and (media.ffmpeg_available() or not cfg.dry_run):
                 media.replace_audio(raw, wav, final)

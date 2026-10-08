@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import brain, config_app, cost, db, media, omni_timing
+from . import brain, config_app, cost, db, gen_trace, media, omni_timing
 from .providers import (
     ContentFilterError,
     ProviderConfig,
@@ -165,7 +165,9 @@ def _render_one_video(
         emit({"scene": n, "phase": "upload", "status": "en_cours", "voice_ok": True})
         asset = heygen_upload_audio(cfg, wav)
         emit({"scene": n, "phase": "rendu", "status": "en_cours", "voice_ok": True})
-        vid = heygen_create_video(cfg, avatar_id, asset, motion, f"{ad_name}_{n:02d}")
+        with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR, step="video"):
+            vid = heygen_create_video(cfg, avatar_id, asset, motion, f"{ad_name}_{n:02d}",
+                                      seconds=len(script.split()) / cost.WORDS_PER_SEC)
         heygen_render_to_file(cfg, vid, mp4, scene_label=f"scene {n}")
         if not cfg.dry_run:
             cost.record_heygen_clip(ad_id, len(script.split()) / cost.WORDS_PER_SEC, cfg.cost_mode)
@@ -735,6 +737,7 @@ def generate_objet_images(
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
         shot_prefix = prefix
+        shot_in = s
         if kind == "avatar_omni":
             first = clip_first_speaker(db.get_clip(int(s["clip_id"])) or {})
             picked = select_omni_refs(needed, typed_refs, character_ref, first_speaker=first)
@@ -758,10 +761,14 @@ def generate_objet_images(
             refs = _select_clip_refs(needed, typed_refs, character_ref)
         # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
         sent_kinds = [kind_of_path.get(p, "") for p in refs]
-        if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix,
-                               extra=img_extra, keep_kinds=[k for k in sent_kinds if k],
-                               safe_style=safe_style):
-            ok += 1
+        # Journal : étape = keyframe (Avatar IA) / retouche (prompt EDIT de l'ancre) / image.
+        step = "keyframe" if kind == "avatar_omni" else ("retouche" if s is not shot_in else "image")
+        with gen_trace.context(ad_id=ad_id, clip_id=int(s["clip_id"]),
+                               mode=gen_trace.mode_of_ad(ad_row), step=step):
+            if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix,
+                                   extra=img_extra, keep_kinds=[k for k in sent_kinds if k],
+                                   safe_style=safe_style):
+                ok += 1
     ko = len(shots) - ok
     db.set_ad_status(ad_id, "objet_images")
     db.log_activity("objet", f"Images « {ad_name} » : {ok} ok, {ko} en échec.")
@@ -992,6 +999,7 @@ def _animate_clips(
     folder = objet_dir(ad_id, ad_name)
     if not clips:
         raise RuntimeError("Aucun plan validé à animer (valide les images d'abord).")
+    trace_mode = gen_trace.mode_of_ad(db.get_ad(ad_id))
 
     def _animate_one(c: dict[str, Any]) -> bool:
         n = int(c["scene_n"])
@@ -999,7 +1007,9 @@ def _animate_clips(
         mp4 = folder / f"{n}.mp4"
         try:
             emit({"scene": n, "phase": "animation", "status": "en_cours"})
-            render_clip(c, mp4)
+            # Journal des générations : contexte posé DANS le worker (thread du pool).
+            with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=trace_mode, step="video"):
+                render_clip(c, mp4)
             db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
             emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(mp4)})
             return True
@@ -1803,11 +1813,12 @@ def animate_avatar_omni_clips(
                     resolution=resolution,
                 )
             else:
-                res = omni_extend_video(
-                    cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
-                    model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
-                    resolution=resolution,
-                )
+                with gen_trace.context(step="extension"):
+                    res = omni_extend_video(
+                        cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
+                        model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
+                        resolution=resolution,
+                    )
             segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
                        "mp4_path": str(res.get("path") or part), "done": True}
             if not cfg.dry_run:

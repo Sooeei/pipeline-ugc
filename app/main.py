@@ -34,6 +34,7 @@ from . import (
     config_app,
     cost,
     db,
+    gen_trace,
     jobs,
     media,
     pipeline,
@@ -150,6 +151,9 @@ def create_app() -> FastAPI:
     app.include_router(export_pub.router)
     app.include_router(cout_pub.router)
     app.include_router(modeles.router)
+    # Traçabilité : journal des générations, feedback gardé / rejeté, page Stats.
+    from . import trace_api
+    app.include_router(trace_api.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -537,10 +541,11 @@ def create_app() -> FastAPI:
             f"vertical 9:16. No text, letters or watermark on the image."
         )
         try:
-            path = prov.nano_banana_generate_image(
-                cfg, prompt, [], out, label="Aperçu style",
-                subtitle=config_app.OBJET_STYLES[key]["label"],
-            )
+            with gen_trace.context(mode=gen_trace.MODE_OBJET, step="apercu_style"):
+                path = prov.nano_banana_generate_image(
+                    cfg, prompt, [], out, label="Aperçu style",
+                    subtitle=config_app.OBJET_STYLES[key]["label"],
+                )
         except prov.ProviderError as exc:
             raise HTTPException(502, str(exc)) from exc  # message fournisseur déjà clair
         except Exception as exc:  # noqa: BLE001 - imprévu : message générique, détail en log

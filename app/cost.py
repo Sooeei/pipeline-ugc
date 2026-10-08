@@ -191,6 +191,36 @@ def tier1_wait_minutes(usd_video: float) -> int:
     return (math.ceil(usd_video / budget) - 1) * round(config_app.OMNI_TIER1_WINDOW_SECONDS / 60)
 
 
+def generation_usd_estimate(
+    kind: str, model: str, params: dict[str, Any] | None = None, n_images: int = 0,
+) -> float:
+    """Coût ESTIMÉ ($) d'UNE génération du journal (app/gen_trace.py), d'après les tarifs de
+    config_app — mêmes formules que les record_* : image = tarif du modèle ; vidéo = durée ×
+    tarif/s du modèle (+ image d'entrée Grok) ; HeyGen = crédits du mode × durée. 0 si inconnu."""
+    p = params or {}
+    model = str(model or "")
+    if kind == "image":
+        return round(config_app.COST_USD_PER_IMAGE.get(model, config_app.COST_USD_PER_IMAGE_DEFAULT), 4)
+    try:
+        secs = max(0.0, float(p.get("seconds") or 0))
+    except (TypeError, ValueError):
+        secs = 0.0
+    if model.startswith("grok"):
+        rate = config_app.GROK_COST_PER_SECOND_BY_RESOLUTION.get(
+            str(p.get("resolution") or ""), config_app.GROK_COST_PER_SECOND_USD)
+        return round(secs * rate + (config_app.GROK_COST_USD_PER_INPUT_IMAGE if n_images else 0.0), 4)
+    if model == config_app.OMNI_MODEL or "omni" in model:
+        return round(secs * config_app.OMNI_COST_PER_SECOND_USD, 4)
+    if model.startswith("heygen"):
+        m = config_app.COST_MODES.get(str(p.get("cost_mode") or ""),
+                                      config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
+        return round(secs * m["credits_per_sec"] * config_app.HEYGEN_USD_PER_CREDIT, 4)
+    for spec in config_app.MASHUP_VIDEO_MODELS.values():
+        if spec["model"] == model:
+            return round(secs * spec["cost_per_second_usd"], 4)
+    return 0.0
+
+
 # ============================================================ COMPTABILISATION (générations RÉELLES)
 # Chaque fonction record_* enregistre UN événement de coût réel en base (jamais en simulation).
 def record_image(ad_id: int | None, model: str) -> None:

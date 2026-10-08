@@ -238,6 +238,7 @@ def init_db() -> None:
             )
         _migrate_objet_image_model(con)
         _migrate_objet_anchor_characters(con)
+        _migrate_traceability(con)
         con.commit()
     finally:
         con.close()
@@ -283,6 +284,32 @@ def _migrate_objet_anchor_characters(con: sqlite3.Connection) -> None:
     _add_column_if_missing(con, "ads", "characters", "TEXT")
     _add_column_if_missing(con, "clips", "anchor_edit", "INTEGER")
     _add_column_if_missing(con, "ref_images", "is_main", "INTEGER DEFAULT 0")
+
+
+def _migrate_traceability(con: sqlite3.Connection) -> None:
+    """Traçabilité (idempotent) :
+    - generations   : journal de CHAQUE image / vidéo générée (simulation comprise) — prompt final
+                      exact, images envoyées ordonnées avec rôle, paramètres, coût (app/gen_trace.py) ;
+    - plan_feedback : journal « gardé / régénéré / rejeté » d'un plan, raison facultative en 1 clic.
+    Pas de clé étrangère : le journal survit à la suppression d'une pub (historique des stats)."""
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS generations ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, ad_id INTEGER, clip_id INTEGER,"
+        " mode TEXT DEFAULT '', step TEXT DEFAULT '', kind TEXT NOT NULL DEFAULT '',"
+        " model TEXT DEFAULT '', prompt TEXT DEFAULT '', images TEXT DEFAULT '[]',"
+        " params TEXT DEFAULT '{}', interaction_id TEXT DEFAULT '', usd REAL DEFAULT 0,"
+        " usd_estimate REAL DEFAULT 0, dry_run INTEGER DEFAULT 0, issues TEXT DEFAULT '[]',"
+        " output_path TEXT DEFAULT '')"
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_generations_clip ON generations(clip_id, kind, id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_generations_ad ON generations(ad_id, id)")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS plan_feedback ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, ad_id INTEGER, clip_id INTEGER,"
+        " generation_id INTEGER, action TEXT NOT NULL, reason TEXT DEFAULT '',"
+        " mode TEXT DEFAULT '', model TEXT DEFAULT '', kind TEXT DEFAULT '')"
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_plan_feedback_clip ON plan_feedback(clip_id, id)")
 
 
 # ---------------------------------------------------------------- settings
@@ -1216,3 +1243,101 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
     finally:
         con.close()
     return out
+
+
+# ---------------------------------------------------------------- traçabilité (journal + feedback)
+_GEN_COLS = ("ts", "ad_id", "clip_id", "mode", "step", "kind", "model", "prompt", "images", "params",
+             "interaction_id", "usd", "usd_estimate", "dry_run", "issues", "output_path")
+
+
+def add_generation(**fields: Any) -> int:
+    """Insère UNE génération (image / vidéo) dans le journal ; renvoie son id."""
+    row = {k: fields.get(k) for k in _GEN_COLS}
+    row["ts"] = float(row["ts"] or time.time())
+    con = connect()
+    try:
+        cur = con.execute(
+            f"INSERT INTO generations({', '.join(_GEN_COLS)}) VALUES({', '.join('?' * len(_GEN_COLS))})",
+            tuple(row[k] for k in _GEN_COLS),
+        )
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def list_generations(
+    *, clip_id: int | None = None, ad_id: int | None = None, kind: str | None = None, limit: int = 200,
+    before: float | None = None,
+) -> list[dict[str, Any]]:
+    """Générations (plus récentes d'abord), filtrées par plan / pub / type (/ antérieures à `before`)."""
+    where: list[str] = []
+    params: list[Any] = []
+    if before is not None:
+        where.append("ts<?")
+        params.append(float(before))
+    if clip_id is not None:
+        where.append("clip_id=?")
+        params.append(int(clip_id))
+    if ad_id is not None:
+        where.append("ad_id=?")
+        params.append(int(ad_id))
+    if kind:
+        where.append("kind=?")
+        params.append(kind)
+    sql = "SELECT * FROM generations" + (" WHERE " + " AND ".join(where) if where else "")
+    con = connect()
+    try:
+        rows = con.execute(sql + " ORDER BY id DESC LIMIT ?", (*params, max(1, int(limit)))).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows]
+
+
+def get_generation(gen_id: int) -> dict[str, Any] | None:
+    con = connect()
+    try:
+        r = con.execute("SELECT * FROM generations WHERE id=?", (int(gen_id),)).fetchone()
+    finally:
+        con.close()
+    return dict(r) if r else None
+
+
+def add_plan_feedback(
+    *, ad_id: int | None, clip_id: int | None, generation_id: int | None, action: str,
+    reason: str = "", mode: str = "", model: str = "", kind: str = "",
+) -> int:
+    con = connect()
+    try:
+        cur = con.execute(
+            "INSERT INTO plan_feedback(ts, ad_id, clip_id, generation_id, action, reason, mode, model,"
+            " kind) VALUES(?,?,?,?,?,?,?,?,?)",
+            (time.time(), ad_id, clip_id, generation_id, action, reason, mode, model, kind),
+        )
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def set_plan_feedback_reason(feedback_id: int, reason: str) -> bool:
+    con = connect()
+    try:
+        cur = con.execute("UPDATE plan_feedback SET reason=? WHERE id=?", (reason, int(feedback_id)))
+        con.commit()
+        return cur.rowcount > 0
+    finally:
+        con.close()
+
+
+def list_plan_feedback(*, clip_id: int | None = None, limit: int = 5000) -> list[dict[str, Any]]:
+    con = connect()
+    try:
+        if clip_id is None:
+            rows = con.execute("SELECT * FROM plan_feedback ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM plan_feedback WHERE clip_id=? ORDER BY id DESC LIMIT ?",
+                               (int(clip_id), int(limit))).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows]

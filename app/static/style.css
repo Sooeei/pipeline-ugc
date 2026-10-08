@@ -603,3 +603,44 @@ label.inline select { margin: 0; min-width: 160px; }
 /* Badge « réplique peut-être coupée » : sur sa propre ligne, sous le numéro et le lien (cartes étroites). */
 .clip .meta { flex-wrap: wrap; }
 .clip .meta .badge.ko { order: 3; white-space: nowrap; }
+
+/* ---- Traçabilité : « Détails de la génération » (tracabilite.js) ---- */
+.gen-trace { border-top: 1px dashed var(--line); padding-top: 6px; font-size: 12px; }
+.clip .gen-trace { margin: 0 10px 8px; }
+.gen-trace > summary { cursor: pointer; color: var(--muted); }
+.gen-trace > summary:hover { color: var(--text); }
+.gt-gen { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.02); }
+.gt-title { margin-bottom: 4px; }
+.gt-meta { border-collapse: collapse; width: 100%; margin-bottom: 4px; }
+.gt-meta th { text-align: left; color: var(--muted); font-weight: 500; padding: 2px 6px 2px 0; white-space: nowrap; vertical-align: top; width: 1%; }
+.gt-meta td { padding: 2px 0; word-break: break-all; }
+.gt-prompt { white-space: pre-wrap; word-break: break-word; font-family: Consolas, "Courier New", monospace; font-size: 11.5px;
+  background: #0b0e12; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-height: 220px; overflow: auto; margin: 4px 0; user-select: text; }
+.gt-imgs { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.gt-imgs li { display: flex; gap: 8px; align-items: center; }
+.gt-imgs img, .gt-noimg { width: 36px; height: 64px; object-fit: cover; border-radius: 4px; background: #000; flex: none;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+.gt-issues { margin: 4px 0; padding-left: 0; list-style: none; }
+.gt-issues li.warn { color: var(--warn); }
+.gt-issues li.ko { color: var(--err); }
+.gt-history { margin-top: 8px; }
+.gt-history > summary { cursor: pointer; color: var(--muted); }
+.gt-verdict { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.gt-fb { margin-top: 6px; }
+
+/* Raison en 1 clic après régénération / rejet : barre flottante, jamais bloquante. */
+.fb-bar { position: fixed; right: 18px; bottom: 18px; z-index: 900; max-width: 380px; background: var(--panel);
+  border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.45); font-size: 13px; }
+.fb-bar.hidden { display: none; }
+.fb-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 6px; }
+.fb-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; }
+.fb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fb-chip { background: transparent; border: 1px solid var(--line); color: var(--text); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.fb-chip:hover, .fb-chip.sugg { border-color: var(--accent); color: var(--accent); }
+
+/* Page Stats */
+.st-reasons { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.st-reasons li { display: grid; grid-template-columns: 200px 1fr 40px; gap: 10px; align-items: center; }
+.st-bar { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; }
+.st-bar i { display: block; height: 100%; background: var(--accent); }
+.st-reasons .num { text-align: right; font-variant-numeric: tabular-nums; }

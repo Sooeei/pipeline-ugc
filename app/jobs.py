@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Any
 
-from . import brain, db, media, pipeline
+from . import brain, db, gen_trace, media, pipeline
 from .providers import ProviderConfig, ProviderError, _log_detail
 
 
@@ -119,7 +119,10 @@ class JobManager:
 
         def _run() -> None:
             try:
-                _run_inner()
+                # Journal des générations : pub rattachée à tout ce que fait ce job (le plan et
+                # l'étape sont précisés par le pipeline, dans le worker de chaque plan).
+                with gen_trace.context(ad_id=ad_id):
+                    _run_inner()
             finally:
                 try:
                     db.job_inflight_done(job.id)

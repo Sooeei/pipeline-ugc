@@ -1647,6 +1647,7 @@ function objShotCard(s) {
   );
   // Upload de MON image + retouche de l'ancre / qui parle (Objet animé).
   card.querySelector(".body").insertBefore(objPlanOptions(s, card), card.querySelector(".actions"));
+  traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
 
   // Sauvegarde du DIALOGUE (verbatim, jamais modifié) à la perte de focus.
   const voEl = card.querySelector(".vo");
@@ -1672,6 +1673,7 @@ function objShotCard(s) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ valide: !valid }),
       });
+      traceFeedback(s.clip_id, valid ? "rejeté" : "gardé", "image");
       s.status = res.status;
       card.replaceWith(objShotCard(s));
     } catch (e) {
@@ -1694,11 +1696,13 @@ function objShotCard(s) {
     }
     card.classList.add("busy");
     try {
+      const t0 = traceNow();
       const res = await api("/api/objet/regenerate-image/" + s.clip_id, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt_image, confirm: true }),
       });
+      traceFeedback(s.clip_id, "régénéré", "image", { before: t0 });
       await waitJobDone(res.job_id);
       // Ne recharge QUE cette carte (préserve les prompts édités non régénérés des autres).
       const ad = await api("/api/objet/ad/" + objAdId);
@@ -2218,6 +2222,7 @@ function renderClipAds(root, ads, emptyMsg) {
           `<div class="meta"><span class="scene-n">#${c.scene_n}</span></div>` +
           `<div class="err">${esc(c.error || "non généré")}</div>`;
       }
+      if (ad.kind !== "avatar_omni") traceDetails(div, c.id);   // tracabilite.js (aoLibClip : idem)
       grid.appendChild(div);
     });
     block.appendChild(grid);
@@ -2280,6 +2285,7 @@ function aoLibClip(div, ad, c) {
   const state = div.querySelector(".ao-lib-state");
   btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
   if (v2 && ok) bindSpeechCut(div, c);
+  traceDetails(div, c.id);   // tracabilite.js
 }
 
 // ------------------------------------------------ réplique peut-être coupée (voix native Grok)
@@ -2317,6 +2323,7 @@ function bindSpeechCut(div, c) {
         body: JSON.stringify({ confirm: true, confirm_over_cap: !!over }),
       });
       let res;
+      const t0 = traceNow();
       try {
         res = await post(false);
       } catch (e) {
@@ -2325,6 +2332,7 @@ function bindSpeechCut(div, c) {
         if (!over) return;
         res = await post(true);
       }
+      traceFeedback(c.id, "régénéré", "video", { before: t0, suggest: "replique_coupee" });
       if (state) state.textContent = "⏳ Vidéo en cours (+1 s)…";
       const j = await waitJobDone(res.job_id);
       if (!j) toast("Suivi interrompu — rafraîchis la Bibliothèque.");
@@ -2360,8 +2368,10 @@ async function aoLibRelaunch(ad, c, btn, state) {
       return;
     }
     const shots = [Object.assign({ status: "pret", duration_s: 0, segments: [] }, shot || {}, { status: "pret" })];
+    const t0 = traceNow();
     const res = await aoPostAnimate(ad.id, shots, c.id, { relaunch: true, v2 });
     if (!res) return;
+    traceFeedback(c.id, "régénéré", "video", { before: t0 });
     state.textContent = "⏳ Vidéo en cours…";
     toast("Relance de la vidéo lancée…");
     const j = await waitJobDone(res.job_id);
@@ -3177,6 +3187,7 @@ function mashShotCard(s) {
   card.querySelector(".body").insertBefore(
     planRefsControls(s), card.querySelector(".actions")
   );
+  traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
 
   // Durée éditable -> POST /api/mashup/duration
   const durEl = card.querySelector(".mash-dur");
@@ -3198,6 +3209,7 @@ function mashShotCard(s) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ valide: !valid }),
       });
+      traceFeedback(s.clip_id, valid ? "rejeté" : "gardé", "image");
       s.status = res.status;
       card.replaceWith(mashShotCard(s));
     } catch (e) { toast(e.message); }
@@ -3215,10 +3227,12 @@ function mashShotCard(s) {
     }
     card.classList.add("busy");
     try {
+      const t0 = traceNow();
       const res = await api("/api/mashup/regenerate-image/" + s.clip_id, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: true }),
       });
+      traceFeedback(s.clip_id, "régénéré", "image", { before: t0 });
       await waitJobDone(res.job_id);
       const ad = await api("/api/mashup/ad/" + mashAdId);
       const updated = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
@@ -3243,10 +3257,13 @@ function mashShotCard(s) {
       if (!ok) return;
     }
     try {
+      const t0 = traceNow();
       const res = await api("/api/mashup/animate/" + mashAdId, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clip_id: s.clip_id, confirm: true }),
       });
+      // Re-test d'un plan déjà animé = vidéo régénérée (1er test : ignoré côté serveur).
+      traceFeedback(s.clip_id, "régénéré", "video", { before: t0 });
       toast("Animation du plan lancée…");
       await waitJobDone(res.job_id);
       loadMashGallery(mashAdId);
@@ -4627,6 +4644,7 @@ function aoShotCard(s) {
   // Anciennes pubs : « visage » = visage1 (même puce) ; le serveur accepte les deux.
   if (Array.isArray(s.refs_needed)) s.refs_needed = s.refs_needed.map((k) => (k === "visage" ? "visage1" : k));
   card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".kf-mode-lbl"));
+  traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");
@@ -4654,6 +4672,7 @@ function aoShotCard(s) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ valide: !kfOk }),
       });
+      traceFeedback(s.clip_id, kfOk ? "rejeté" : "gardé", "image");
       await aoRefreshCard(card, s.clip_id);
     } catch (e) {
       card.classList.remove("busy");
@@ -4677,10 +4696,12 @@ function aoShotCard(s) {
     }
     card.classList.add("busy");
     try {
+      const t0 = traceNow();
       const res = await api(AO_API + "/regenerate-image/" + s.clip_id, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt_image, confirm: true, correction }),
       });
+      traceFeedback(s.clip_id, "régénéré", "image", { before: t0 });
       const j = await waitJobDone(res.job_id);
       if (j && j.state === "echec") toast(prettyError((j.summary && j.summary.message) || "Régénération en échec."));
       // Ne recharge QUE cette carte (préserve les prompts édités des autres).
@@ -4886,8 +4907,11 @@ async function aoLaunchAnimation(shots, clipId) {
     return toast(v2 ? (clipId ? "Valide d'abord le keyframe et la voix de ce bloc." : "Aucun bloc à générer (tous déjà prêts ?).")
       : clipId ? "Valide d'abord ce keyframe." : "Aucun keyframe validé à animer.");
   }
+  const t0 = traceNow();
   const res = await aoPostAnimate(aoAdId, shots, clipId, { resolution: aoResolutionValue(), v2 });
   if (!res) return;
+  // « Tester ce plan » sur un plan déjà animé = vidéo régénérée (1er test : ignoré côté serveur).
+  if (clipId) traceFeedback(clipId, "régénéré", "video", { before: t0 });
   if (v2 && res.estimate) {
     $("aoAnimEstimate").innerHTML = "Lancé : " + aoV2EstimateHtml(res.estimate);
   }

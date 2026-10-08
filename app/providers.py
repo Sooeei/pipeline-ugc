@@ -465,6 +465,24 @@ def _create_video_payload(
 
 
 def heygen_create_video(
+    cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str,
+    seconds: float = 0.0,
+) -> str:
+    """Crée la vidéo HeyGen + journal de la génération (gen_trace), simulation comprise.
+    `seconds` (optionnel) = durée parlée estimée, pour l'estimation de coût du journal."""
+    vid = _heygen_create_video(cfg, avatar_id, audio_asset_id, motion_prompt, title)
+    payload = _create_video_payload(cfg, avatar_id, audio_asset_id, motion_prompt, title)
+    gen_trace.record(
+        kind="video", model=f"heygen-{payload['engine']['type']}",
+        prompt=str(payload.get(HEYGEN_FIELDS["motion_field"]) or ""), images=[],
+        params={"seconds": round(float(seconds or 0), 1), "resolution": payload.get("resolution"),
+                "avatar_id": avatar_id, "cost_mode": cfg.cost_mode, "video_id": vid},
+        dry_run=cfg.dry_run,
+    )
+    return vid
+
+
+def _heygen_create_video(
     cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str
 ) -> str:
     """Crée la vidéo (avatar + audio + motion). Simulation : video_id factice."""
@@ -1109,6 +1127,34 @@ KLING_POLL_TIMEOUT = 900       # s max d'attente
 
 
 def kling_generate_video(
+    cfg: ProviderConfig,
+    image_path: str | Path,
+    prompt_motion: str,
+    out_mp4: str | Path,
+    model_value: str = "kwaivgi/kling-v3.0-pro",
+    seconds: int = config_app.KLING_DEFAULT_CLIP_SECONDS,
+    resolution: str = config_app.MASHUP_RESOLUTION,
+    label: str = "",
+    index: int = 0,
+    usage_out: dict[str, Any] | None = None,
+    generate_audio: bool = False,
+) -> str:
+    """Génère un clip Kling / Veo / Seedance (OpenRouter) + journal (gen_trace), simulation
+    comprise. L'image envoyée est la start frame. Coût du journal = usage.cost si renvoyé."""
+    usage: dict[str, Any] = usage_out if usage_out is not None else {}
+    path = _kling_generate_video(cfg, image_path, prompt_motion, out_mp4, model_value, seconds,
+                                 resolution, label, index, usage, generate_audio)
+    imgs = [str(image_path)] if str(image_path or "").strip() else []
+    gen_trace.record(kind="video", model=model_value, prompt=prompt_motion,
+                     images=prompt_profiles.sent_images(imgs, None, prompt_profiles.ROLE_FIRST_FRAME),
+                     params={"seconds": seconds, "resolution": resolution,
+                             "generate_audio": bool(generate_audio)},
+                     usd=float(usage.get("cost") or 0) or None, dry_run=cfg.dry_run,
+                     output_path=str(path))
+    return path
+
+
+def _kling_generate_video(
     cfg: ProviderConfig,
     image_path: str | Path,
     prompt_motion: str,

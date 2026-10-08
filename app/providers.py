@@ -21,7 +21,7 @@ from typing import Any
 
 import requests
 
-from . import config_app, media
+from . import config_app, gen_trace, media, prompt_profiles
 
 HEYGEN_API = "https://api.heygen.com"
 HEYGEN_UPLOAD = "https://upload.heygen.com/v1/asset"
@@ -711,7 +711,43 @@ def _short_response(data: Any, limit: int = 1200) -> str:
     return txt[:limit]
 
 
+def nano_banana_final_prompt(prompt_image: str) -> str:
+    """Texte EXACT envoyé à Nano Banana (prompt du plan + consigne de format)."""
+    return f"{prompt_image}\n\nOutput a vertical 9:16 (1K) image."
+
+
+def nano_banana_model_id(cfg: ProviderConfig) -> str:
+    return config_app.OBJET_IMAGE_MODELS.get(
+        cfg.objet_image_model,
+        config_app.OBJET_IMAGE_MODELS[config_app.DEFAULT_OBJET_IMAGE_MODEL],
+    )["model"]
+
+
 def nano_banana_generate_image(
+    cfg: ProviderConfig,
+    prompt_image: str,
+    ref_paths: list[str],
+    out_path: str | Path,
+    label: str = "",
+    subtitle: str = "",
+    index: int = 0,
+    image_roles: list[str] | None = None,
+) -> str:
+    """Génère une image Nano Banana : contrôle avant envoi (prompt_profiles.preflight) puis
+    journal de la génération (gen_trace), simulation comprise. `image_roles` = rôle de chaque
+    réf envoyée, dans l'ordre (défaut : « reference »)."""
+    refs = [str(r) for r in ref_paths][: config_app.OBJET_MAX_REF_IMAGES]
+    sent = prompt_profiles.sent_images(refs, image_roles, prompt_profiles.ROLE_REFERENCE)
+    final = nano_banana_final_prompt(prompt_image)
+    issues = prompt_profiles.preflight("nano_banana_pro", final, images=sent)
+    path = _nano_banana_generate_image(cfg, prompt_image, refs, out_path, label, subtitle, index)
+    gen_trace.record(kind="image", model=nano_banana_model_id(cfg), prompt=final, images=sent,
+                     params={"aspect": "9:16", "size": "1K"}, dry_run=cfg.dry_run,
+                     issues=issues, output_path=str(path))
+    return path
+
+
+def _nano_banana_generate_image(
     cfg: ProviderConfig,
     prompt_image: str,
     ref_paths: list[str],
@@ -738,13 +774,10 @@ def nano_banana_generate_image(
     if not key:
         raise ProviderError("Clé API OpenRouter (Nano Banana) manquante — ajoute-la dans Réglages.")
 
-    model = config_app.OBJET_IMAGE_MODELS.get(
-        cfg.objet_image_model,
-        config_app.OBJET_IMAGE_MODELS[config_app.DEFAULT_OBJET_IMAGE_MODEL],
-    )["model"]
+    model = nano_banana_model_id(cfg)
 
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"{prompt_image}\n\nOutput a vertical 9:16 (1K) image."}
+        {"type": "text", "text": nano_banana_final_prompt(prompt_image)}
     ]
     for ref in ref_paths[: config_app.OBJET_MAX_REF_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": _data_uri(ref)}})
@@ -915,6 +948,30 @@ def grok_dialogue_prompt(motion: str, dialogue: str, tone: str = "", pace: str =
 
 
 def grok_generate_video(
+    cfg: ProviderConfig,
+    image_path: str | Path,
+    prompt_motion: str,
+    out_mp4: str | Path,
+    model_value: str = "grok-imagine-video-1.5",
+    seconds: int = config_app.GROK_DEFAULT_CLIP_SECONDS,
+    label: str = "",
+    index: int = 0,
+    resolution: str = "",
+    dialogue: str = "",
+) -> str:
+    """Génère un clip Grok : contrôle avant envoi + journal (simulation comprise). L'image
+    envoyée est TOUJOURS la start frame. `dialogue` = réplique attendue (contrôle d'intégrité)."""
+    sent = prompt_profiles.sent_images([str(image_path)], None, prompt_profiles.ROLE_FIRST_FRAME)
+    issues = prompt_profiles.preflight("grok", prompt_motion, images=sent, dialogue=dialogue)
+    path = _grok_generate_video(cfg, image_path, prompt_motion, out_mp4, model_value, seconds,
+                                label, index, resolution)
+    gen_trace.record(kind="video", model=model_value, prompt=prompt_motion, images=sent,
+                     params={"seconds": seconds, "resolution": resolution or config_app.GROK_RESOLUTION},
+                     dry_run=cfg.dry_run, issues=issues, output_path=str(path))
+    return path
+
+
+def _grok_generate_video(
     cfg: ProviderConfig,
     image_path: str | Path,
     prompt_motion: str,
@@ -1440,7 +1497,46 @@ def _omni_download_file(uri: str, key: str, out_mp4: str) -> None:
         raise ProviderError(_friendly_network("Google", exc)) from exc
 
 
+def omni_sent_images(image_path: str | Path, anchor_path: str | Path = "") -> list[prompt_profiles.SentImage]:
+    """Images RÉELLEMENT envoyées à Omni, dans l'ordre, avec leur rôle : start frame (image du
+    plan) puis ancre en référence (si différente et présente) ; texte_seul → aucune."""
+    paths: list[str] = []
+    if str(image_path or "").strip():
+        paths.append(str(image_path))
+        if anchor_path and str(anchor_path) != str(image_path) and Path(anchor_path).is_file():
+            paths.append(str(anchor_path))
+    roles = [prompt_profiles.ROLE_FIRST_FRAME] + [prompt_profiles.ROLE_REFERENCE] * (len(paths) - 1)
+    return prompt_profiles.sent_images(paths, roles, prompt_profiles.ROLE_REFERENCE)
+
+
 def omni_generate_video(
+    cfg: ProviderConfig,
+    image_path: str | Path,
+    prompt: str,
+    out_mp4: str | Path,
+    seconds: int,
+    anchor_path: str | Path = "",
+    model_value: str = config_app.OMNI_MODEL,
+    label: str = "",
+    index: int = 0,
+    store: bool = False,
+    resolution: str = "",
+    dialogue: str = "",
+) -> dict[str, Any]:
+    """Génère une vidéo Omni : contrôle avant envoi + journal (simulation comprise)."""
+    sent = omni_sent_images(image_path, anchor_path)
+    issues = prompt_profiles.preflight("omni", prompt, images=sent, dialogue=dialogue)
+    res = _omni_generate_video(cfg, image_path, prompt, out_mp4, seconds, anchor_path, model_value,
+                               label, index, store, resolution)
+    gen_trace.record(kind="video", model=model_value, prompt=prompt, images=sent,
+                     params={"seconds": seconds, "resolution": resolution or config_app.OMNI_RESOLUTION,
+                             "store": store},
+                     interaction_id=str(res.get("interaction_id") or ""), dry_run=cfg.dry_run,
+                     issues=issues, output_path=str(res.get("path") or ""))
+    return res
+
+
+def _omni_generate_video(
     cfg: ProviderConfig,
     image_path: str | Path,
     prompt: str,
@@ -1491,6 +1587,30 @@ def omni_generate_video(
 
 
 def omni_extend_video(
+    cfg: ProviderConfig,
+    previous_interaction_id: str,
+    prompt: str,
+    out_mp4: str | Path,
+    seconds: int,
+    model_value: str = config_app.OMNI_MODEL,
+    label: str = "",
+    index: int = 0,
+    resolution: str = "",
+    dialogue: str = "",
+) -> dict[str, Any]:
+    """Tour d'extension Omni : contrôle avant envoi + journal (simulation comprise)."""
+    issues = prompt_profiles.preflight("omni", prompt, images=[], dialogue=dialogue)
+    res = _omni_extend_video(cfg, previous_interaction_id, prompt, out_mp4, seconds, model_value,
+                             label, index, resolution)
+    gen_trace.record(kind="video", model=model_value, prompt=prompt, images=[],
+                     params={"seconds": seconds, "resolution": resolution or config_app.OMNI_RESOLUTION,
+                             "previous_interaction_id": previous_interaction_id, "extension": True},
+                     interaction_id=str(res.get("interaction_id") or ""), dry_run=cfg.dry_run,
+                     issues=issues, output_path=str(res.get("path") or ""))
+    return res
+
+
+def _omni_extend_video(
     cfg: ProviderConfig,
     previous_interaction_id: str,
     prompt: str,

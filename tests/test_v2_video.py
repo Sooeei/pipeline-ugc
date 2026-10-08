@@ -302,13 +302,22 @@ def test_build_video_prompt_no_decor_no_character_description():
         assert not (words & forbidden), (model, words & forbidden)
         if model == "grok":   # Grok : bloc « plan unique » puis caméra / cadrage, puis le geste
             assert p.startswith(prompt_profiles.GROK_SINGLE_SHOT) and "raises an eyebrow" in p
-        else:
-            assert p.startswith(("raises an eyebrow", "<FIRST_FRAME> raises an eyebrow"))
         assert "Character 1 (Léa) talking, expressive mouth, subtle body motion." in p
         assert "Character 2 (Paul) keeps their mouth closed, does not speak." in p
-        assert "Never mirror the image, keep framing and background exactly as the start frame." in p
-        assert "Franchement, 97 % des femmes adorent ça !" in p and "[" not in p
+        assert "Franchement, 97 % des femmes adorent ça !" in p
         assert sheet in p
+        if model == "omni":
+            continue
+        assert (model == "grok" or p.startswith("raises an eyebrow")) and "[" not in p
+        assert "Never mirror the image, keep framing and background exactly as the start frame." in p
+    omni = avatar_video._clip_prompt(clip, ad, "omni")
+    # Omni : start frame seule déclarée (rôle explicite), plan unique, caméra fixe, phrase de rôle.
+    assert omni.startswith("[# Sources <FIRST_FRAME>@Image1] In a single continuous shot. No scene "
+                           "cuts. Locked off static camera, framing identical to the first frame. "
+                           "Raises an eyebrow, smiles warmly.")
+    assert "Never mirror the image. No music. No subtitles. No on-screen text." in omni
+    assert omni.endswith("Use Image1 as the starting frame.") and "IMAGE_REF" not in omni
+    assert "[97 %]" not in omni
     grok = avatar_video._clip_prompt(clip, ad, "grok")
     assert (f'AUDIO: {sheet}, speaking French with a natural accent from France, '
             'saying: "Franchement, 97 % des femmes adorent ça !"') in grok

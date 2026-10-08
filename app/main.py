@@ -1366,6 +1366,8 @@ def create_app() -> FastAPI:
             # Bloc parlé animé par Grok : gestes de tête retirés → avertissement sur la carte.
             s["lipsync_warning"] = avatar_video.lipsync_warning(clip_row, video_model)
         resp.update(avatar_video.ad_v2_fields(ad))
+        # Omni : réplique > ~7 s (lip-sync peu fiable) / gestes de tête retirés → alertes FR.
+        resp["alerts"].extend(a for a in resp.get("omni_alerts") or [] if a not in resp["alerts"])
         return resp
 
     @app.patch("/api/avatar-omni/bible/{ad_id}")

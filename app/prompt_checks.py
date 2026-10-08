@@ -8,8 +8,9 @@ Contrôles (heuristiques déterministes, aucun appel réseau) :
 - dialogue_altered (error)     : le dialogue fourni n'apparaît pas MOT POUR MOT dans le prompt ;
 - too_many_images (error)      : plus d'images que la limite du modèle ;
 - image_role_missing (error)   : une image envoyée sans rôle, ou avec un rôle inconnu du modèle ;
-- omni_roles_undeclared (warning, cf. UNDECLARED_LEVEL) : Omni — images envoyées sans la
-                                 déclaration [# Sources] / [# References] correspondante ;
+- omni_roles_undeclared (error) : Omni — le prompt ne commence pas par la déclaration
+                                 [# Sources]/[# References] EXACTE des images envoyées, ou il
+                                 manque leurs phrases de rôle (prompt_profiles.omni_role_*) ;
 - omni_roles_extra (error)     : Omni — déclaration d'images qui ne sont pas envoyées ;
 - brand_name (error)           : nom de marque / studio hors dialogue (brain._BRAND_REPLACEMENTS) ;
 - not_english (warning)        : texte hors dialogue qui semble français ;
@@ -156,11 +157,12 @@ def _contradictions(profile: ModelProfile, text: str) -> list[PreflightIssue]:
 
 
 # ---------------------------------------------------------------- rôles d'images
-# Omni : images envoyées SANS déclaration [# Sources]/[# References] dans le prompt. Avertissement
-# tant que les builders Omni n'écrivent pas tous cette déclaration ; passer à "error" pour bloquer.
-UNDECLARED_LEVEL = "warning"
-_SOURCES_RE = re.compile(r"\[#\s*sources?\s*\]", re.IGNORECASE)
-_REFERENCES_RE = re.compile(r"\[#\s*references?\s*\]", re.IGNORECASE)
+# Omni : le prompt doit COMMENCER par la déclaration exacte des images envoyées
+# (prompt_profiles.omni_role_header) et contenir leurs phrases de rôle (omni_role_sentences).
+UNDECLARED_LEVEL = "error"
+# Toute déclaration [# Sources …] / [# References …] (avec ou sans balises) présente dans le prompt.
+_SOURCES_RE = re.compile(r"\[#\s*sources?\b", re.IGNORECASE)
+_REFERENCES_RE = re.compile(r"\[#\s*references?\b", re.IGNORECASE)
 
 
 def _role_issues(profile: ModelProfile, prompt: str, images: list[SentImage]) -> list[PreflightIssue]:
@@ -177,13 +179,16 @@ def _role_issues(profile: ModelProfile, prompt: str, images: list[SentImage]) ->
         return out
     has_first = any(im.get("role") == pp.ROLE_FIRST_FRAME for im in images)
     has_ref = any(im.get("role") == pp.ROLE_REFERENCE for im in images)
-    if has_first and not _SOURCES_RE.search(prompt):
+    header = pp.omni_role_header(images)
+    if header and not " ".join(prompt.split()).startswith(header):
         out.append(_issue(UNDECLARED_LEVEL, "omni_roles_undeclared",
-                          "Omni : la start frame est envoyée sans déclaration [# Sources] dans le prompt."))
-    if has_ref and not _REFERENCES_RE.search(prompt):
+                          f"Omni : le prompt doit commencer par la déclaration des images envoyées "
+                          f"« {header} »."))
+    sentences = pp.omni_role_sentences(images)
+    if sentences and sentences not in " ".join(prompt.split()):
         out.append(_issue(UNDECLARED_LEVEL, "omni_roles_undeclared",
-                          "Omni : une image de référence est envoyée sans déclaration [# References] "
-                          "dans le prompt."))
+                          "Omni : il manque la phrase de rôle des images envoyées "
+                          f"(« {sentences} »)."))
     if not has_first and _SOURCES_RE.search(prompt):
         out.append(_issue("error", "omni_roles_extra",
                           "Omni : le prompt déclare une start frame [# Sources] mais aucune n'est envoyée."))

@@ -706,6 +706,26 @@
                 </select>
               </label>
             </div>
+            <!-- Réglages Google Omni de la pub (visibles quand la vidéo est faite par Omni). -->
+            <div id="aoOmniOptions" class="row hidden">
+              <label class="ao-res" title="N'envoie à Omni QUE l'image de départ du plan (pas l'image de référence du Plan 1).">
+                <input type="checkbox" id="aoOmniStartFrameOnly" checked> Start frame seule
+              </label>
+              <label class="ao-res">Caméra
+                <select id="aoOmniCamera">
+                  <option value="">Auto (fixe pour les plans parlés)</option>
+                  <option value="locked">Caméra fixe, cadrage identique à l'image de départ</option>
+                  <option value="push_in">Léger travelling avant (push in)</option>
+                  <option value="handheld">Caméra à la main UGC (smartphone)</option>
+                </select>
+              </label>
+              <label class="ao-res" title="Ancien mode : coupe chaque plan en tours de quelques secondes enchaînés. Désactivé : 1 plan parlé = 1 appel (10 s max).">
+                <input type="checkbox" id="aoOmniAutoTurns"> Découpage auto en tours
+              </label>
+              <label class="ao-res" title="EXPÉRIMENTAL : les répliques d'un même personnage sont générées dans une seule chaîne Google (4 tours / 40 s max) pour garder exactement la même voix, puis recoupées en un clip par plan.">
+                <input type="checkbox" id="aoOmniVoiceChain"> Voix identique (chaîne) — expérimental
+              </label>
+            </div>
             <div class="estimate" id="aoAnimEstimate"></div>
             <div class="row">
               <label class="ao-res">Résolution vidéo

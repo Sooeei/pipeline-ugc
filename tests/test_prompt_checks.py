@@ -95,10 +95,16 @@ def test_omni_role_declaration():
     omni = pp.OMNI
     imgs = [_ref("first_frame"), _ref("reference", "b.png")]
     body = " The woman smiles at the camera. " * 8
-    ok = "[# Sources] image 1 is the first frame. [# References] image 2 is the anchor." + body
+    # Format officiel : déclaration exacte EN TÊTE + phrases de rôle (prompt_profiles.omni_role_*).
+    ok = f"{pp.omni_role_header(imgs)}{body}{pp.omni_role_sentences(imgs)}"
     assert not {"omni_roles_undeclared", "omni_roles_extra"} & set(_codes(prompt_checks.check(omni, ok, images=imgs)))
     missing = prompt_checks.check(omni, body, images=imgs)
-    assert [i["code"] for i in missing if i["code"] == "omni_roles_undeclared"] == ["omni_roles_undeclared"] * 2
+    assert [(i["level"], i["code"]) for i in missing if i["code"] == "omni_roles_undeclared"] ==         [("error", "omni_roles_undeclared")] * 2
+    # Déclaration approximative (sans balises ImageN) ou sans phrase de rôle : bloquée aussi.
+    loose = "[# Sources] image 1 is the first frame. [# References] image 2 is the anchor." + body
+    assert "omni_roles_undeclared" in _codes(prompt_checks.check(omni, loose, images=imgs))
+    no_sentence = f"{pp.omni_role_header(imgs)}{body}"
+    assert "omni_roles_undeclared" in _codes(prompt_checks.check(omni, no_sentence, images=imgs))
     extra = prompt_checks.check(omni, ok, images=[_ref("first_frame")])
     assert ("error", "omni_roles_extra") in [(i["level"], i["code"]) for i in extra]
 

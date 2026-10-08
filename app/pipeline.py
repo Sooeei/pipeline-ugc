@@ -18,7 +18,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import brain, config_app, cost, db, gen_trace, lipsync_rules, media, omni_timing
+from . import (
+    brain,
+    config_app,
+    cost,
+    db,
+    gen_trace,
+    lipsync_rules,
+    media,
+    omni_timing,
+    prompt_profiles,
+)
 from . import prompt_profiles as pp
 from .providers import (
     ContentFilterError,
@@ -35,6 +45,7 @@ from .providers import (
     nano_banana_generate_image,
     omni_extend_video,
     omni_generate_video,
+    omni_sent_images,
 )
 
 UpdateFn = Callable[[dict[str, Any]], None]
@@ -1348,58 +1359,238 @@ def _omni_quote_dialogue(dialogue: str) -> str:
     return "".join(out)
 
 
+# -------------------------------------------------------------------- Omni : réglages par pub
+# Caméra des plans Omni (ads.omni_camera) : "" = auto (fixe si le plan est parlé, handheld UGC
+# sinon) | clé de lipsync_rules.SPOKEN_CAMERAS (locked | push_in | handheld).
+OMNI_CAMERA_LABELS: dict[str, str] = {
+    "": "Auto (fixe pour les plans parlés)",
+    lipsync_rules.CAMERA_LOCKED: "Caméra fixe, cadrage identique à l'image de départ",
+    lipsync_rules.CAMERA_PUSH_IN: "Léger travelling avant (push in)",
+    lipsync_rules.CAMERA_HANDHELD: "Caméra à la main UGC (smartphone)",
+}
+OMNI_CHAIN_MAX_TURNS = int(prompt_profiles.OMNI.limits["chain_max_turns"])     # 4 tours / chaîne
+OMNI_CHAIN_MAX_SECONDS = int(prompt_profiles.OMNI.limits["chain_max_s"])       # 40 s / chaîne
+OMNI_LIPSYNC_RELIABLE_S = float(prompt_profiles.OMNI.limits["lipsync_reliable_s"])   # ~7 s
+
+
+def normalize_omni_camera(value: Any) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in lipsync_rules.SPOKEN_CAMERAS else ""
+
+
+def _ad_flag(ad: dict[str, Any] | None, key: str, default: bool) -> bool:
+    raw = (ad or {}).get(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return bool(int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def ad_omni_camera(ad: dict[str, Any] | None) -> str:
+    """Caméra choisie pour la pub ("" = auto)."""
+    return normalize_omni_camera((ad or {}).get("omni_camera"))
+
+
+def ad_start_frame_only(ad: dict[str, Any] | None) -> bool:
+    """« Start frame seule » (défaut OUI) : Omni ne reçoit QUE la keyframe du plan, pas l'ancre."""
+    return _ad_flag(ad, "omni_start_frame_only", True)
+
+
+def ad_auto_turns(ad: dict[str, Any] | None) -> bool:
+    """Découpage automatique d'un plan en tours chaînés (défaut NON : 1 plan parlé = 1 appel)."""
+    return _ad_flag(ad, "omni_auto_turns", False)
+
+
+def ad_voice_chain(ad: dict[str, Any] | None) -> bool:
+    """EXPÉRIMENTAL « Voix identique (chaîne) » (défaut NON)."""
+    return _ad_flag(ad, "omni_voice_chain", False)
+
+
+def omni_options(ad: dict[str, Any] | None) -> dict[str, Any]:
+    """Réglages Omni de la pub (réponse /ad + panneau Avatar IA)."""
+    return {
+        "omni_start_frame_only": ad_start_frame_only(ad),
+        "omni_camera": ad_omni_camera(ad),
+        "omni_auto_turns": ad_auto_turns(ad),
+        "omni_voice_chain": ad_voice_chain(ad),
+        "omni_camera_choices": [{"key": k, "label": v} for k, v in OMNI_CAMERA_LABELS.items()],
+    }
+
+
+def omni_speech_seconds(dialogue: str, wps: float | None = None) -> float:
+    """Durée de PAROLE estimée d'une réplique (mots ÷ débit), crochets retirés."""
+    words = config_app.spoken_word_count(brain.strip_brackets(str(dialogue or "")))
+    return words / float(wps or config_app.AVATAR_NATIVE_WORDS_PER_SEC)
+
+
+def omni_long_line_warning(label: Any, dialogue: str, wps: float | None = None) -> str:
+    """Avertissement FR si la réplique dépasse ~7 s de parole (lip-sync Omni peu fiable au-delà)."""
+    s = omni_speech_seconds(dialogue, wps)
+    if s <= OMNI_LIPSYNC_RELIABLE_S:
+        return ""
+    return (f"Plan {label} : ~{s:.1f} s de parole — réplique trop longue pour un lip-sync fiable : "
+            "coupe-la en 2 plans dans le script.")
+
+
+# -------------------------------------------------------------------- Omni : blocs du prompt
+_FIRST_FRAME_MENTION_RE = re.compile(r",\s*framing (?:otherwise )?identical to the first frame", re.I)
+
+
+def omni_camera_sentence(
+    camera_key: str = "", *, spoken: bool, style: str = config_app.DEFAULT_OMNI_STYLE,
+    first_frame: bool = True, continuation: bool = False,
+) -> str:
+    """Phrase caméra (anglais). Auto : fixe (locked off) pour un plan parlé, handheld UGC sinon.
+    Sans start frame (texte seul / tour chaîné) : pas de renvoi à « the first frame ».
+    Style 3D : la phrase de style précède la caméra, et le handheld perd « smartphone UGC »."""
+    key = normalize_omni_camera(camera_key) or (
+        lipsync_rules.DEFAULT_SPOKEN_CAMERA if spoken else lipsync_rules.CAMERA_HANDHELD)
+    is_3d = config_app.normalize_omni_style(style) == "3d"
+    if continuation and key == lipsync_rules.CAMERA_LOCKED:
+        cam = "Locked off static camera, same framing as before."
+    else:
+        cam = lipsync_rules.spoken_camera(key)
+        if continuation or not first_frame:
+            cam = _FIRST_FRAME_MENTION_RE.sub("", cam)
+    if is_3d:
+        cam = cam.replace("handheld smartphone UGC shot", "shot")
+        return f"{config_app.OMNI_3D_STYLE}. {cam}"
+    return cam
+
+
+def _omni_audio_rules() -> str:
+    """Règles audio des plans parlés sans le « No music. » (déjà dans les interdits Omni)."""
+    rules = re.split(r"(?<=\.)\s+", lipsync_rules.SPOKEN_AUDIO_RULES.strip())
+    return " ".join(r for r in rules if r and r.lower() != "no music.")
+
+
+def omni_motion(motion: str, spoken: bool) -> tuple[str, list[str]]:
+    """Mouvement nettoyé des marques ; plan PARLÉ : gestes de tête retirés (lip-sync)."""
+    text = brain.scrub_brand_names(" ".join(str(motion or "").split()))
+    if not spoken:
+        return text, []
+    return lipsync_rules.strip_lipsync_gestures(text)
+
+
+def _sentence(text: str) -> str:
+    """Phrase anglaise propre : majuscule initiale + point final (jamais appliqué À L'INTÉRIEUR
+    d'un dialogue : seule la 1re lettre de la phrase anglaise peut changer)."""
+    t = str(text or "").strip()
+    if t and t[0].islower():
+        t = t[0].upper() + t[1:]
+    return t if not t or t[-1] in ".!?…\"”" else f"{t}."
+
+
+def omni_images_for(*, text_only: bool, has_anchor: bool = False,
+                    n_refs: int = 0) -> list[prompt_profiles.SentImage]:
+    """Rôles des images ENVOYÉES (chemins vides) quand l'appelant ne les fournit pas : texte
+    seul → aucune ; sinon start frame (+ ancre en référence)."""
+    if text_only:
+        roles = [prompt_profiles.ROLE_REFERENCE] * n_refs
+    else:
+        roles = [prompt_profiles.ROLE_FIRST_FRAME] + [prompt_profiles.ROLE_REFERENCE] * (
+            (1 if has_anchor else 0) + n_refs)
+    return [{"path": "", "role": r} for r in roles]
+
+
+def _omni_ref_subject(images: list[prompt_profiles.SentImage], n_people: int = 1) -> str:
+    tag = prompt_profiles.omni_ref_tag(images, 0)
+    if not tag:
+        return ""
+    if n_people > 1:
+        return f"Keep the exact same people as in {tag} (faces, hair, outfits)."
+    return f"Keep the exact same person as in {tag} (face, hair, outfit)."
+
+
+def assemble_omni(
+    images: list[prompt_profiles.SentImage], *, lead: str = "", camera: str = "",
+    subject: list[str] | None = None, performance: list[str] | None = None,
+    audio: list[str] | None = None, spoken: bool = True,
+) -> str:
+    """Prompt Omni final via prompt_profiles.assemble(OMNI, …) dans l'ordre fixe : rôles des
+    images (+ `lead` : « Extend this video… ») → plan unique → caméra → sujet → jeu → audio →
+    interdits → phrases de rôle. Les rôles déclarés sont ceux de `images` (= images envoyées)."""
+    P = prompt_profiles
+    header = " ".join(x for x in (P.omni_role_header(images), lead) if x)
+    negatives = []
+    if spoken:
+        negatives.append(P.OMNI_NO_OTHER_SPEAKERS)
+    if P.omni_has_first_frame(images):
+        negatives.append(P.OMNI_NO_MIRROR)
+    negatives.append(P.OMNI_NEGATIVES)
+    return P.assemble(P.OMNI, {
+        P.B_IMAGE_ROLES: header,
+        P.B_SINGLE_SHOT: P.OMNI_SINGLE_SHOT,
+        P.B_CAMERA: _sentence(camera),
+        P.B_SUBJECT: " ".join(_sentence(s) for s in subject or [] if str(s or "").strip()),
+        P.B_PERFORMANCE: " ".join(_sentence(s) for s in performance or [] if str(s or "").strip()),
+        P.B_AUDIO: " ".join(_sentence(s) for s in audio or [] if str(s or "").strip()),
+        P.B_NEGATIVES: " ".join(negatives),
+        P.B_ROLE_SENTENCES: P.omni_role_sentences(images),
+    })
+
+
 def build_omni_prompt(
     prompt_motion: str,
     dialogue: str,
     voice_sheet: str,
     seconds: int,
     has_anchor: bool,
-    camera: str = config_app.OMNI_DEFAULT_CAMERA,
+    camera: str = "",
     intro: str = config_app.OMNI_INTRO_GESTURE,
     speaker: str = "",
     silent: str = "",
     scene_desc: str = "",
+    *,
+    camera_key: str = "",
+    style: str = config_app.DEFAULT_OMNI_STYLE,
+    images: list[prompt_profiles.SentImage] | None = None,
 ) -> str:
-    """Prompt Google Omni d'UN plan, dans un ordre STRICT : caméra/scène unique → mouvement
-    (nettoyé des marques) → dialogue minuté + voix (ou silence) → interdits → ancre éventuelle.
-    Le DIALOGUE est inséré VERBATIM (jamais nettoyé ni reformulé) ; seules les valeurs « [à
-    valider] » perdent leurs crochets (« [97 %] » → « 97 % », la base garde les crochets).
+    """Prompt Google Omni d'UN plan (UN appel), assemblé par prompt_profiles (ordre fixe).
+    Rôles des images DÉCLARÉS en tête ([# Sources <FIRST_FRAME>@Image1] [# References
+    <IMAGE_REF_0>@Image2]) + phrases de rôle à la fin ; `images` = images réellement envoyées
+    (providers.omni_sent_images), sinon déduites de `has_anchor` / `scene_desc`. Avec start frame :
+    seulement mouvement, caméra, jeu et audio (l'image n'est PAS redécrite). Le DIALOGUE est
+    inséré VERBATIM (seules les valeurs « [à valider] » perdent leurs crochets).
     `speaker` / `silent` = descriptions ANGLAISES des personnages 1 (parle) et 2 (muet).
-    `scene_desc` non vide = mode « texte_seul » : AUCUNE image de départ, la description visuelle
-    du plan est écrite dans le prompt (pas de <FIRST_FRAME>)."""
-    parts = [_omni_frame_header(camera, scene_desc)]
-    motion = brain.scrub_brand_names(prompt_motion or "")
-    if motion:
-        parts.append(motion)
+    `scene_desc` non vide = mode « texte_seul » : AUCUNE image, la description visuelle du plan
+    est écrite dans le prompt. `camera` = phrase imposée (sinon `camera_key` / auto)."""
+    text_only = bool(scene_desc.strip())
+    if images is None:
+        images = omni_images_for(text_only=text_only, has_anchor=has_anchor)
     text = brain.strip_brackets((dialogue or "").strip())
+    spoken = bool(text)
+    cam = camera.strip() or omni_camera_sentence(
+        camera_key, spoken=spoken, style=style,
+        first_frame=prompt_profiles.omni_has_first_frame(images))
+    motion, _removed = omni_motion(prompt_motion, spoken)
+    subject: list[str] = []
+    if text_only:
+        subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
+        if spoken:
+            subject.append(lipsync_rules.SPOKEN_FRAMING)
+    subject.append(motion)
+    subject.append(_omni_ref_subject(images, 2 if silent else 1))
     who = f"The speaking character ({speaker})" if speaker else "The person"
-    if text:
-        parts.append(
-            f"[0-1s] {intro}, silent. [1-{seconds}s] {who} says, spoken in French, in "
-            f"{voice_sheet}: \"{_omni_quote_dialogue(text)}\" Lips and expression stay in sync "
-            "with every word. The audio is their clear spoken voice up front over a quiet room "
-            "tone. No music."
-        )
-    else:
-        parts.append("No dialogue. The audio is a quiet natural room tone. No music.")
-    if silent:
-        parts.append(
-            f"The other character ({silent}) remains silent the whole time: no speech and no lip "
-            "movement, only natural listening reactions."
-        )
-    parts.append("No other speakers. No subtitles. No on-screen text.")
-    if has_anchor:
+    performance: list[str] = []
+    audio: list[str] = []
+    if spoken:
+        performance.append("Lips and expression stay in sync with every word")
+        performance.append(lipsync_rules.single_speaker_line(
+            "the speaking character" if speaker else "the person", [silent] if silent else None))
         if silent:
-            parts.append(
-                "<IMAGE_REF_0> is the locked scene reference: keep the exact same people (faces, "
-                "outfits) and the same voice. Use it as a reference, not as a literal frame."
-            )
-        else:
-            parts.append(
-                "<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it "
-                "as a reference, not as a literal frame."
-            )
-    return " ".join(parts)
+            performance.append(f"The other character ({silent}) remains silent the whole time: no "
+                               "speech and no lip movement, only natural listening reactions")
+        audio.append(f"[0-1s] {intro}, silent. [1-{seconds}s] {who} says, spoken in French, in "
+                     f"{voice_sheet}: \"{_omni_quote_dialogue(text)}\"")
+        audio.append("The audio is their clear spoken voice up front over a quiet room tone")
+        audio.append(_omni_audio_rules())
+    else:
+        audio.append("No dialogue. The audio is a quiet natural room tone")
+    return assemble_omni(images, camera=cam, subject=subject, performance=performance,
+                         audio=audio, spoken=spoken)
 
 
 def _log_omni_turn(plan_n: int, turn: int, turns: int, requested_s: int, mp4_path: str,
@@ -1420,6 +1611,25 @@ def _log_omni_turn(plan_n: int, turn: int, turns: int, requested_s: int, mp4_pat
                 "phrase n'est pas coupée.")
         _log_detail(f"Omni {warn}")
         db.log_activity("avatar_omni", warn)
+
+
+def omni_plan_warnings(label: Any, dialogue: str, motion: str, wps: float | None = None) -> list[str]:
+    """Avertissements FR d'un plan Omni : réplique > ~7 s (lip-sync peu fiable), gestes de tête
+    retirés du mouvement d'un plan parlé."""
+    out = []
+    if w := omni_long_line_warning(label, dialogue, wps):
+        out.append(w)
+    if str(dialogue or "").strip():
+        _clean, removed = omni_motion(motion, True)
+        if w := lipsync_rules.gestures_warning(removed):
+            out.append(f"Plan {label} : {w}")
+    return out
+
+
+def _log_omni_plan_warnings(label: Any, dialogue: str, motion: str, wps: float | None = None) -> None:
+    for w in omni_plan_warnings(label, dialogue, motion, wps):
+        _log_detail(f"Omni {w}")
+        db.log_activity("avatar_omni", w)
 
 
 def _assemble_chain(parts: list[str], expected_seconds: int, out_mp4: Path) -> None:
@@ -1453,31 +1663,34 @@ def build_omni_extension_prompt(
     seconds: int,
     speaker: str = "",
     silent: str = "",
+    *,
+    camera_key: str = "",
+    style: str = config_app.DEFAULT_OMNI_STYLE,
 ) -> str:
-    """Prompt d'un tour d'EXTENSION (même plan, même prise continue). Timecodes RELATIFS au début
-    de l'extension (doc Omni : « 0s refers to the beginning of the extended part »). Dialogue
-    VERBATIM (crochets retirés), personnage 1 qui parle, personnage 2 muet."""
+    """Prompt d'un tour d'EXTENSION (même plan, même prise continue ; AUCUNE image envoyée →
+    aucune déclaration de rôle). Timecodes RELATIFS au début de l'extension (doc Omni : « 0s
+    refers to the beginning of the extended part »). Dialogue VERBATIM (crochets retirés),
+    personnage 1 qui parle, personnage 2 muet."""
     people = "same two people" if silent else "same person"
-    parts = [
-        f"Extend this video: the scene continues in the same single unbroken shot, {people}, "
-        "same set, same voice."
-    ]
     text = brain.strip_brackets((dialogue or "").strip())
+    spoken = bool(text)
     who = f"The speaking character ({speaker})" if speaker else "The person"
-    if text:
-        parts.append(
-            f"[0-{seconds}s] {who} says, spoken in French, in {voice_sheet}: "
-            f"\"{_omni_quote_dialogue(text)}\" Lips and expression stay in sync with every word."
-        )
+    motion, _removed = omni_motion(prompt_motion, spoken)
+    performance: list[str] = []
+    if spoken:
+        performance.append("Lips and expression stay in sync with every word")
+        if silent:
+            performance.append(f"The other character ({silent}) remains silent: no speech, no lip movement")
+        audio = [f"[0-{seconds}s] {who} says, spoken in French, in {voice_sheet}: "
+                 f"\"{_omni_quote_dialogue(text)}\"",
+                 "The audio is their clear spoken voice up front over a quiet room tone",
+                 _omni_audio_rules()]
     else:
-        parts.append(f"[0-{seconds}s] No dialogue.")
-    motion = brain.scrub_brand_names(prompt_motion or "")
-    if motion:
-        parts.append(motion)
-    if silent:
-        parts.append(f"The other character ({silent}) remains silent: no speech, no lip movement.")
-    parts.append("No music. No subtitles.")
-    return " ".join(parts)
+        audio = [f"[0-{seconds}s] No dialogue. The audio is a quiet natural room tone"]
+    return assemble_omni(
+        [], lead=f"Extend this video: the scene continues, {people}, same set, same voice.",
+        camera=omni_camera_sentence(camera_key, spoken=spoken, style=style, continuation=True),
+        subject=[motion], performance=performance, audio=audio, spoken=spoken)
 
 
 _TURN_ACTION_KEYS = ("avant", "pendant", "apres", "beats_avant", "beats_apres")
@@ -1722,39 +1935,26 @@ def retime_turns(segs: list[dict[str, Any]], wps_for: WpsFor, max_spoken: int | 
     return out
 
 
-def _omni_camera(style: str) -> str:
-    if config_app.normalize_omni_style(style) == "3d":
-        return (f"Vertical 9:16 shot, {config_app.OMNI_3D_STYLE}, with subtle natural camera "
-                "movement")
-    return config_app.OMNI_DEFAULT_CAMERA
-
-
-def _omni_frame_header(camera: str, scene_desc: str = "") -> str:
-    """Ouverture du prompt Omni : <FIRST_FRAME> + caméra (keyframe en 1re image) ; en mode
-    « texte_seul » (scene_desc non vide) : caméra + description VISUELLE du plan, sans image."""
-    if scene_desc.strip():
-        desc = brain.scrub_brand_names(" ".join(scene_desc.split()))
-        return f"{camera}, in a single unbroken scene with no scene cuts. The scene: {desc}"
-    return f"<FIRST_FRAME> {camera}, in a single unbroken scene with no scene cuts."
-
-
 def build_omni_turn_prompt(
     turn: Any, timing: dict[str, Any], *, first: bool, speaker_desc: str = "",
     speaker_name: str = "", voice_sheet: str = "", others: list[str] | None = None,
     has_anchor: bool = False, style: str = config_app.DEFAULT_OMNI_STYLE, n_people: int = 1,
-    video_prompt: str = "", scene_desc: str = "",
+    video_prompt: str = "", scene_desc: str = "", camera_key: str = "",
+    images: list[prompt_profiles.SentImage] | None = None,
 ) -> str:
-    """Prompt Google Omni d'UN tour chronométré. Ordre : cadre (1er tour : <FIRST_FRAME> caméra +
-    style ; extension : « Extend this video… ») → partie MINUTÉE (omni_timing, timecodes = même
-    calcul que la durée envoyée) → son / lip-sync → autres personnages muets → interdits →
-    ancre (1er tour). UN seul personnage parle ; tour muet = « No dialogue ». Gestes nettoyés
-    des marques ; dialogue VERBATIM (crochets retirés). 1er tour : `video_prompt` (mouvement +
-    qui parle, étape Keyframes) suit le cadre ; `scene_desc` = mode « texte_seul » (pas d'image
-    de départ : la description visuelle du plan remplace <FIRST_FRAME>)."""
+    """Prompt Google Omni d'UN tour chronométré (plan à tours, option « découpage auto »),
+    assemblé par prompt_profiles dans l'ordre fixe. 1er tour : rôles des images déclarés en tête
+    (`images` = images réellement envoyées, sinon déduites de `has_anchor` / `scene_desc`) ;
+    extension : « Extend this video… », aucune image → aucune déclaration. Partie MINUTÉE
+    (omni_timing, timecodes = même calcul que la durée envoyée) dans le bloc audio. UN seul
+    personnage parle ; tour muet = « No dialogue ». Gestes nettoyés des marques (et des gestes de
+    tête si parlé) ; dialogue VERBATIM (crochets retirés). 1er tour : `video_prompt` (mouvement)
+    en sujet ; `scene_desc` = mode « texte_seul » (pas d'image : description visuelle écrite)."""
     t = omni_timing.normalize_turn(turn)
+    mute = bool(timing.get("mute") or t["mute"])
+    spoken = not mute
     for k in ("avant", "pendant", "apres"):
-        t[k] = brain.scrub_brand_names(t[k])
-    is_3d = config_app.normalize_omni_style(style) == "3d"
+        t[k], _removed = omni_motion(t[k], spoken)
     if speaker_desc and speaker_name:
         who = f"{speaker_name}, the speaking character ({speaker_desc}),"
     elif speaker_desc:
@@ -1762,36 +1962,113 @@ def build_omni_turn_prompt(
     else:
         who = f"{speaker_name}, the speaking character," if speaker_name else "The person"
     timed = omni_timing.build_turn_timecode_prompt(t, timing, speaker_desc=who, voice_sheet=voice_sheet)
+    subject: list[str] = []
     if first:
-        parts = [_omni_frame_header(_omni_camera(style), scene_desc)]
+        text_only = bool(scene_desc.strip())
+        if images is None:
+            images = omni_images_for(text_only=text_only, has_anchor=has_anchor)
+        lead = ""
+        cam = omni_camera_sentence(camera_key, spoken=spoken, style=style,
+                                   first_frame=prompt_profiles.omni_has_first_frame(images))
+        if text_only:
+            subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
         if video_prompt.strip():
-            parts.append(brain.scrub_brand_names(" ".join(video_prompt.split())))
+            subject.append(omni_motion(video_prompt, spoken)[0])
+        subject.append(_omni_ref_subject(images, n_people))
     else:
+        images = []
         people = "same people" if n_people > 1 else "same person"
-        parts = [f"Extend this video: the scene continues in the same single unbroken shot, {people}, "
-                 "same set, same voices."]
-        if is_3d:
-            parts.append(f"Same {config_app.OMNI_3D_STYLE}.")
-    parts.append(timed)
-    if timing.get("mute") or t["mute"]:
-        parts.append("Nobody speaks: no lip movement. The audio is a quiet natural room tone. No music.")
+        lead = f"Extend this video: the scene continues, {people}, same set, same voices."
+        cam = omni_camera_sentence(camera_key, spoken=spoken, style=style, continuation=True)
+    performance: list[str] = []
+    if mute:
+        performance.append("Nobody speaks: no lip movement")
+        audio = [timed, "The audio is a quiet natural room tone"]
     else:
-        parts.append("Lips and expression stay in sync with every word; only the speaking character's "
-                     "lips move. The audio is their clear spoken voice up front over a quiet room tone. "
-                     "No music.")
+        performance.append("Lips and expression stay in sync with every word; only the speaking "
+                           "character's lips move")
         if others:
             s = "s" if len(others) > 1 else ""
-            parts.append(f"The other character{s} ({'; '.join(others)}) remain{'' if s else 's'} silent "
-                         "the whole time: no speech and no lip movement, only natural listening reactions.")
-    parts.append("No other speakers. No subtitles. No on-screen text.")
-    if first and has_anchor:
-        if n_people > 1:
-            parts.append("<IMAGE_REF_0> is the locked scene reference: keep the exact same people "
-                         "(faces, outfits) and the same voices. Use it as a reference, not as a literal frame.")
-        else:
-            parts.append("<IMAGE_REF_0> is the locked person: keep the exact same face and voice. Use it "
-                         "as a reference, not as a literal frame.")
-    return " ".join(parts)
+            performance.append(f"The other character{s} ({'; '.join(others)}) remain{'' if s else 's'} "
+                               "silent the whole time: no speech and no lip movement, only natural "
+                               "listening reactions")
+        audio = [timed, "The audio is their clear spoken voice up front over a quiet room tone",
+                 _omni_audio_rules()]
+    return assemble_omni(images, lead=lead, camera=cam, subject=subject,
+                         performance=performance, audio=audio, spoken=spoken)
+
+
+def _omni_who(n: int, names: dict[int, str]) -> str:
+    name = str((names or {}).get(n) or "").strip()
+    return f"Character {n} ({name})" if name else f"Character {n}"
+
+
+OMNI_GESTURE_MAX_WORDS = 12   # geste / expression du bloc gardé dans le prompt vidéo
+
+
+def _omni_gesture(video_prompt: str, spoken: bool) -> str:
+    text, _removed = omni_motion(video_prompt, spoken)
+    return " ".join(text.split()[:OMNI_GESTURE_MAX_WORDS]).rstrip(" .,;:")
+
+
+def build_omni_block_prompt(
+    video_prompt: str, *, speaker: int, others_in_frame: list[int], dialogue: str,
+    voice_sheet: str, names: dict[int, str], scene_desc: str = "",
+    images: list[prompt_profiles.SentImage] | None = None, camera_key: str = "",
+    style: str = config_app.DEFAULT_OMNI_STYLE, chain_turn: bool = False,
+) -> str:
+    """Prompt Omni d'UN bloc Avatar IA v2 (UN appel, une réplique d'UN personnage), assemblé par
+    prompt_profiles (ordre fixe). Rôles des images déclarés en tête = `images` (images réellement
+    envoyées ; défaut : start frame seule, ou aucune en texte seul) + phrases de rôle à la fin.
+    Start frame : AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
+    `chain_turn` = tour suivant d'une chaîne « voix identique » (previous_interaction_id) :
+    « Show the same character in the next scene, … » ; la keyframe du bloc éventuelle est une
+    RÉFÉRENCE (cadrage / décor), jamais une 1re image. Réplique VERBATIM (crochets retirés)."""
+    sp = max(1, int(speaker or 1))
+    text_only = bool(scene_desc.strip())
+    if images is None:
+        images = omni_images_for(text_only=text_only)
+    text = _omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
+    spoken = bool(text)
+    first_frame = prompt_profiles.omni_has_first_frame(images)
+    gesture = _omni_gesture(video_prompt, spoken)
+    lead = ""
+    subject: list[str] = []
+    if chain_turn:
+        ref = prompt_profiles.omni_ref_tag(images, 0)
+        lead = f"Show the same character in the next scene{', ' + gesture if gesture else ''}."
+        gesture = ""
+        if ref:
+            subject.append(f"Framing, set and outfit as in {ref}")
+    if text_only:
+        subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
+        if spoken:
+            subject.append(lipsync_rules.SPOKEN_FRAMING)
+    subject.append(gesture)
+    if not chain_turn:
+        subject.append(_omni_ref_subject(images, 1 + len(set(others_in_frame or []) - {sp})))
+    who = _omni_who(sp, names)
+    others: list[str] = []
+    for m in dict.fromkeys(int(x) for x in others_in_frame or []):
+        if m != sp:
+            others.append(_omni_who(m, names))
+    performance: list[str] = []
+    audio: list[str] = []
+    if spoken:
+        performance.append(f"{who} talking, expressive mouth, subtle body motion")
+        performance.append(f"Lips and expression stay in sync with every word; only {who}'s lips move")
+        performance.extend(f"{o} keeps their mouth closed, does not speak" for o in others)
+        audio.append(f'{who} says, spoken in French: "{text}"')
+        if voice_sheet.strip():
+            audio.append(f"Voice: {voice_sheet.strip()}")
+        audio.append("The audio is their clear spoken voice up front over a quiet room tone")
+        audio.append(_omni_audio_rules())
+    else:
+        performance.extend(f"{o} keeps their mouth closed, does not speak" for o in [who, *others])
+        audio.append("No dialogue. The audio is a quiet natural room tone")
+    cam = omni_camera_sentence(camera_key, spoken=spoken, style=style, first_frame=first_frame)
+    return assemble_omni(images, lead=lead, camera=cam, subject=subject,
+                         performance=performance, audio=audio, spoken=spoken)
 
 
 def clip_text_only(c: dict[str, Any]) -> bool:
@@ -1873,20 +2150,37 @@ def animate_avatar_omni_clips(
     wps_for = ad_wps_for(ad)          # débit de la fiche voix de CHAQUE speaker
     sheet_for = ad_voice_sheet_for(ad)
     wps = wps_for(1)
-    sheet = sheet_for(1)
     max_spoken = omni_max_spoken()
     style = ad_style(ad)
-    # Mêmes descriptions que les images : la bible (si découpage client), sinon les personnages EN.
+    # Mêmes descriptions que les images : la bible (si découpage client), sinon les personnages EN
+    # (utilisées seulement en texte seul : avec start frame, noms seulement).
     descs = ad_character_descs(ad)
     names = ad_character_names(ad)
-    speaker = descs.get(1, "")
-    silent = descs.get(2, "")
     # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
     ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
+
+    camera_key = ad_omni_camera(ad)
+    start_frame_only = ad_start_frame_only(ad)
+    auto_turns = ad_auto_turns(ad)
 
     emit = on_update or _noop
     if pacer is None:
         pacer = omni_tier1_pacer(cfg)
+
+    def _use_turns(c: dict[str, Any]) -> bool:
+        """Plan à tours : chaîne de tours seulement si le découpage auto est activé, si une chaîne
+        est déjà entamée (reprise), si plusieurs personnes parlent (1 seul speaker par appel) ou
+        si la réplique ne tient pas en un appel (10 s). Sinon : UN appel pour tout le plan."""
+        segs = clip_segments(c)
+        if auto_turns or any(s.get("interaction_id") for s in segs):
+            return True
+        speakers = {int(omni_timing.normalize_turn(s)["speaker"]) for s in segs
+                    if str(s.get("text") or "").strip()}
+        if len(speakers) > 1:
+            return True
+        sp = next(iter(speakers), 1)
+        need = omni_speech_seconds(str(c.get("script") or ""), wps_for(sp)) + config_app.OMNI_INTRO_SECONDS
+        return need > config_app.OMNI_MAX_CLIP_SECONDS
 
     def _render(c: dict[str, Any], mp4: Path) -> None:
         if pacer is not None:
@@ -1898,24 +2192,38 @@ def animate_avatar_omni_clips(
                 "message": tier1_wait_message(w), "wait_s": round(w),
             }))
             emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
-        if clip_segments(c):
+        if clip_segments(c) and _use_turns(c):
             _render_chain(c, mp4)
             return
         n = int(c["scene_n"])
         dialogue = str(c.get("script") or "").strip()   # VERBATIM
-        seconds = config_app.omni_clip_seconds(dialogue, wps)
+        # Plan à tours joué en UN appel (découpage auto désactivé) : speaker du 1er tour parlé.
+        sp = clip_first_speaker(c) if clip_segments(c) else 1
+        seconds = config_app.omni_clip_seconds(dialogue, wps_for(sp))
         text_only = clip_text_only(c)
-        has_anchor = not text_only and ref is not None and int(ref["id"]) != int(c["id"])
+        has_anchor = (not text_only and not start_frame_only and ref is not None
+                      and int(ref["id"]) != int(c["id"]))
         motion = str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt", ""))
+        image = "" if text_only else str(c["image_path"])
+        anchor = str(ref["image_path"]) if (has_anchor and ref) else ""
+        sent_imgs = omni_sent_images(image, anchor)
+        other = 2 if sp == 1 else 1
+        if text_only:
+            sp_txt, si_txt = descs.get(sp, ""), descs.get(other, "")
+        else:   # start frame : l'image porte le visuel → noms seulement (pas de redescription)
+            sp_txt = names.get(sp, "")
+            si_txt = (names.get(other) or "the second person") if descs.get(other) else ""
         prompt = build_omni_prompt(
-            motion, dialogue, sheet, seconds, has_anchor,
-            speaker=speaker, silent=silent, scene_desc=clip_scene_desc(c) if text_only else "",
+            motion, dialogue, sheet_for(sp), seconds, has_anchor,
+            speaker=sp_txt, silent=si_txt, scene_desc=clip_scene_desc(c) if text_only else "",
+            camera_key=camera_key, style=style, images=sent_imgs,
         )
+        _log_omni_plan_warnings(n, dialogue, motion, wps_for(sp))
         db.update_clip(int(c["id"]), omni_prompt=json.dumps([prompt], ensure_ascii=False))
         res = omni_generate_video(
-            cfg, "" if text_only else str(c["image_path"]), prompt, mp4, seconds,
-            anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
+            cfg, image, prompt, mp4, seconds, anchor_path=anchor,
             model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, resolution=resolution,
+            dialogue=dialogue,
         )
         db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
         if not cfg.dry_run:
@@ -1941,7 +2249,10 @@ def animate_avatar_omni_clips(
         if done == k and c.get("status") == "pret":
             segs, done = reset_segments_progress(segs), 0   # plan déjà animé : on refait tout
         text_only = clip_text_only(c)
-        has_anchor = not text_only and ref is not None and int(ref["id"]) != clip_id
+        has_anchor = (not text_only and not start_frame_only and ref is not None
+                      and int(ref["id"]) != clip_id)
+        image = "" if text_only else str(c["image_path"])
+        anchor = str(ref["image_path"]) if (has_anchor and ref) else ""
         in_frame = clip_characters_in_frame(c, ad)
         # Texte seul : pas d'image envoyée → descriptions sans renvois aux photos de référence.
         cdescs = {m: strip_photo_refs(d) for m, d in descs.items()} if text_only else descs
@@ -1953,34 +2264,35 @@ def animate_avatar_omni_clips(
             sp = int(turn["speaker"])
             timing = turn_plan(turn, wps_for(sp), max_spoken)
             seconds = int(timing["seconds"])
-            # Tour 1 avec keyframe + video_prompt : l'image porte déjà le visuel → on ne redécrit
-            # pas les personnages (noms seulement), le video_prompt dit le mouvement.
-            lean = i == 0 and bool(video_prompt) and not text_only
+            # Keyframe (start frame) : l'image porte déjà le visuel → on ne redécrit pas les
+            # personnages (noms seulement) ; le video_prompt dit le mouvement.
+            lean = not text_only
             others = [(names.get(m) if lean else cdescs.get(m)) or names.get(m) or f"character {m}"
                       for m in in_frame if m != sp]
+            sent_imgs = omni_sent_images(image, anchor) if i == 0 else []
             prompt = build_omni_turn_prompt(
                 turn, timing, first=(i == 0), speaker_desc="" if lean else cdescs.get(sp, ""),
                 speaker_name=names.get(sp, ""), voice_sheet=sheet_for(sp), others=others,
                 has_anchor=has_anchor, style=style, n_people=max(len(in_frame), 1),
                 video_prompt=video_prompt if i == 0 else "",
                 scene_desc=clip_scene_desc(c) if (i == 0 and text_only) else "",
+                camera_key=camera_key, images=sent_imgs,
             )
             sent = [*sent[:i], prompt]
             db.update_clip(clip_id, omni_prompt=json.dumps(sent, ensure_ascii=False))
             part = mp4.with_name(f"{n}_tour{i + 1}.mp4")
             if i == 0:
                 res = omni_generate_video(
-                    cfg, "" if text_only else str(c["image_path"]), prompt, part, seconds,
-                    anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
+                    cfg, image, prompt, part, seconds, anchor_path=anchor,
                     model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
-                    resolution=resolution,
+                    resolution=resolution, dialogue=str(turn.get("text") or ""),
                 )
             else:
                 with gen_trace.context(step="extension"):
                     res = omni_extend_video(
                         cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
                         model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
-                        resolution=resolution,
+                        resolution=resolution, dialogue=str(turn.get("text") or ""),
                     )
             segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
                        "mp4_path": str(res.get("path") or part), "done": True}

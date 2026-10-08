@@ -383,6 +383,21 @@ def extract_audio_mp3(video: str | Path, out_mp3: str | Path) -> Path:
     return out
 
 
+def cut_mp4(src: str | Path, start: float, end: float, out_mp4: str | Path) -> Path:
+    """Extrait [start, end] (s) de `src` → `out_mp4`, ré-encodé (coupe précise à l'image près ;
+    chaîne Omni « voix identique » : un clip par plan aux timecodes mesurés)."""
+    out = Path(out_mp4)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    s = max(0.0, float(start))
+    d = max(0.1, float(end) - s)
+    _run_ffmpeg([
+        "-ss", f"{s:.3f}", "-i", str(src), "-t", f"{d:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        str(out),
+    ])
+    return out
+
+
 def make_placeholder_mp4_from_image(
     image: str | Path, out_mp4: str | Path, seconds: float = 4.0,
 ) -> Path:

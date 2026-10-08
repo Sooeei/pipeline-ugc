@@ -67,6 +67,7 @@ GROK_FIELDS = {
     "aspect_field": "aspect_ratio",          # "9:16"
     "done_status": "done",                   # statut terminal de succès
 }
+GROK_RESOLUTIONS = ("480p", "720p")         # résolutions acceptées par Grok Imagine (pas de 1080p)
 
 
 @dataclass
@@ -78,6 +79,7 @@ class ProviderConfig:
     openrouter_api_key: str = ""  # Nano Banana via OpenRouter (images « Objet animé »)
     xai_api_key: str = ""         # Grok Imagine / xAI (animation « Objet animé »)
     gemini_api_key: str = ""      # Google Gemini Omni (vidéo + voix « Avatar IA »)
+    elevenlabs_api_key: str = ""  # ElevenLabs (voix des blocs « Avatar IA » v2)
     objet_image_model: str = config_app.DEFAULT_OBJET_IMAGE_MODEL  # modèle image Nano Banana
     objet_video_model: str = config_app.DEFAULT_OBJET_VIDEO_MODEL  # modèle vidéo Grok
     mashup_video_model: str = config_app.DEFAULT_MASHUP_VIDEO_MODEL  # modèle vidéo Kling (Mashup)
@@ -94,6 +96,8 @@ class ProviderConfig:
     claude_code_token: str = ""                            # token `claude setup-token` (secret)
     claude_code_model: str = config_app.DEFAULT_CLAUDE_CODE_MODEL
     cost_mode: str = config_app.DEFAULT_COST_MODE
+    avatar_video_model: str = config_app.DEFAULT_AVATAR_VIDEO_MODEL  # Avatar IA v2 : grok|kling|omni
+    drift_threshold: float = config_app.DRIFT_THRESHOLD_DEFAULT      # seuil du contrôle de dérive
     dry_run: bool = True
 
 
@@ -633,6 +637,46 @@ def _image_mime(path: str) -> str:
 
 
 # ============================================================ NANO BANANA (images via OpenRouter)
+class ContentFilterError(ProviderError):
+    """Image refusée par le filtre de sécurité du modèle (Google) : le prompt doit être reformulé
+    (pipeline : 1 relance automatique avec une reformulation stricte, puis échec lisible)."""
+
+
+CONTENT_FILTER_MESSAGE = (
+    "Image bloquée par le filtre de sécurité Google — reformule le prompt (évite les mots liés à "
+    "la peau abîmée, au sang, aux blessures, ou les très gros plans de peau)."
+)
+_CONTENT_FILTER_MARKERS = ("content_filter", "content filter", "safety", "blocked", "prohibited",
+                           "recitation", "blocklist", "spii")
+
+
+def _content_filter_reason(data: Any) -> str:
+    """Raison de blocage d'une réponse OpenRouter (finish_reason / native_finish_reason /
+    error / promptFeedback) — "" si la réponse n'a pas été bloquée par un filtre de sécurité."""
+    if not isinstance(data, dict):
+        return ""
+    found: list[str] = []
+    for choice in data.get("choices") or []:
+        if isinstance(choice, dict):
+            found += [str(choice.get(k) or "") for k in ("finish_reason", "native_finish_reason")]
+            err = choice.get("error")
+            if isinstance(err, dict):
+                found.append(str(err.get("message") or err.get("code") or ""))
+    err = data.get("error")
+    if isinstance(err, dict):
+        found += [str(err.get("message") or ""), str(err.get("code") or "")]
+    elif err:
+        found.append(str(err))
+    fb = data.get("promptFeedback") or data.get("prompt_feedback")
+    if isinstance(fb, dict):
+        found.append(str(fb.get("blockReason") or fb.get("block_reason") or ""))
+    for reason in found:
+        low = reason.lower()
+        if any(m in low for m in _CONTENT_FILTER_MARKERS):
+            return reason
+    return ""
+
+
 def nano_banana_generate_image(
     cfg: ProviderConfig,
     prompt_image: str,
@@ -691,10 +735,19 @@ def nano_banana_generate_image(
         raise ProviderError(_friendly_network("OpenRouter", exc)) from exc
     if r.status_code >= 400:
         _log_detail(f"OpenRouter image {r.status_code} : {r.text[:500]}")
+        try:
+            err_data = r.json()
+        except Exception:  # noqa: BLE001 - corps non JSON
+            err_data = {"error": r.text[:2000]}
+        if r.status_code in (400, 403, 422) and _content_filter_reason(err_data):
+            raise ContentFilterError(CONTENT_FILTER_MESSAGE)
         raise ProviderError(_friendly_http("OpenRouter", r.status_code))
 
     data = r.json()
     img = _openrouter_first_image_bytes(data)
+    if not img and _content_filter_reason(data):
+        _log_detail(f"Nano Banana : bloquée par le filtre ({_content_filter_reason(data)[:120]})")
+        raise ContentFilterError(CONTENT_FILTER_MESSAGE)
     if not img:
         _log_detail(f"Nano Banana : aucune image dans la réponse ({str(data)[:300]})")
         raise ProviderError(
@@ -749,6 +802,43 @@ def nano_banana_check(cfg: ProviderConfig) -> dict:
         return {"ok": False, "message": _friendly_network("OpenRouter", exc)}
 
 
+def openrouter_balance(cfg: ProviderConfig) -> dict:
+    """Solde OpenRouter (tableau de bord) : GET /credits → total_credits − total_usage ($).
+    Simulation : {simulation: True} ; pas de clé : {} ; erreur : {ok: False, message} (jamais
+    d'exception)."""
+    if cfg.dry_run:
+        return {"simulation": True}
+    key = _clean_key(cfg.openrouter_api_key)
+    if not key:
+        return {}
+    try:
+        r = _request_with_retries(
+            "GET", f"{OPENROUTER_API_BASE}/credits",
+            service="OpenRouter", headers={"Authorization": f"Bearer {key}"},
+        )
+        if r.status_code >= 400:
+            _log_detail(f"OpenRouter credits {r.status_code} : {r.text[:200]}")
+            return {"ok": False, "message": _friendly_http("OpenRouter", r.status_code)}
+        data = (r.json() or {}).get("data") or {}
+        total = float(data.get("total_credits") or 0.0)
+        used = float(data.get("total_usage") or 0.0)
+        return {"ok": True, "balance_usd": round(total - used, 2), "usage_usd": round(used, 2),
+                "total_usd": round(total, 2)}
+    except Exception as exc:  # noqa: BLE001 - tableau de bord : jamais d'erreur
+        _log_detail(f"OpenRouter credits : {exc}")
+        return {"ok": False, "message": _friendly_network("OpenRouter", exc)}
+
+
+def xai_balance(cfg: ProviderConfig) -> dict:
+    """Solde xAI (Grok) : l'API publique xAI (clé d'inférence standard, api.x.ai) n'expose PAS
+    d'endpoint de solde/crédits documenté — la facturation passe par la Management API, avec une
+    clé de gestion distincte. On ne devine pas d'endpoint : renvoie {} (tuile « non disponible »).
+    Simulation : {simulation: True}."""
+    if cfg.dry_run:
+        return {"simulation": True}
+    return {}
+
+
 # ============================================================ GROK (animation, xAI)
 def grok_dialogue_prompt(motion: str, dialogue: str, tone: str = "", pace: str = "") -> str:
     """Compose le prompt Grok : mouvement du personnage + section AUDIO contenant le DIALOGUE.
@@ -776,8 +866,10 @@ def grok_generate_video(
     seconds: int = config_app.GROK_DEFAULT_CLIP_SECONDS,
     label: str = "",
     index: int = 0,
+    resolution: str = "",
 ) -> str:
     """Anime EXACTEMENT l'IMAGE validée (image->vidéo Grok) -> .mp4. Simulation : placeholder.
+    `resolution` (optionnel, Avatar IA v2) : « 480p » | « 720p » ; vide/inconnue → GROK_RESOLUTION.
 
     Réel : POST {base}/videos/generations (Bearer) avec l'IMAGE DE DÉPART dans
     « image: {url: <data URI base64 de l'image validée>} » (schéma confirmé live). Le
@@ -806,7 +898,9 @@ def grok_generate_video(
         # ⚠️ OBJET {"url": …} : c'est l'image SOURCE animée (pas image_url à plat, sinon ignorée).
         GROK_FIELDS["image_field"]: {"url": image_ref},
         GROK_FIELDS["duration_field"]: seconds,
-        GROK_FIELDS["resolution_field"]: config_app.GROK_RESOLUTION,
+        GROK_FIELDS["resolution_field"]: (
+            resolution if resolution in GROK_RESOLUTIONS else config_app.GROK_RESOLUTION
+        ),
         GROK_FIELDS["aspect_field"]: config_app.ASPECT_RATIO,
     }
     try:
@@ -911,8 +1005,11 @@ def kling_generate_video(
     label: str = "",
     index: int = 0,
     usage_out: dict[str, Any] | None = None,
+    generate_audio: bool = False,
 ) -> str:
     """Anime l'IMAGE validée (image→vidéo Kling, 1080p, SANS audio) → .mp4. Simulation : placeholder.
+    `generate_audio` (optionnel, Avatar IA v2 mode voix « native ») : audio généré par Kling ;
+    par défaut False (Mashup : JAMAIS d'audio).
 
     Réel : Kling passe par la MÊME clé OpenRouter. POST {OPENROUTER_API_BASE}/videos avec
     l'image de départ en base64 data-URI dans `input_references` (jamais un chemin local), et
@@ -942,7 +1039,7 @@ def kling_generate_video(
         "duration": int(seconds),
         "aspect_ratio": config_app.ASPECT_RATIO,
         "resolution": resolution,
-        "generate_audio": False,  # ⚠️ JAMAIS de voix/audio dans les clips Mashup
+        "generate_audio": bool(generate_audio),  # ⚠️ Mashup : toujours False (défaut)
         "input_references": [
             {"type": "image_url", "image_url": {"url": _data_uri(str(image_path))}}
         ],
@@ -1120,8 +1217,10 @@ def _omni_body(
     model_value: str = config_app.OMNI_MODEL,
     store: bool = False,
     previous_interaction_id: str = "",
+    resolution: str = "",
 ) -> dict[str, Any]:
-    """Corps de POST /interactions : images (plan puis ancre, 2 max) + prompt ; sortie vidéo 9:16.
+    """Corps de POST /interactions : images (plan puis ancre, 2 max ; AUCUNE en mode « texte_seul »
+    ou en extension) + prompt ; sortie vidéo 9:16 à `resolution` (720p par défaut, ou 1080p).
 
     `store=True` : l'interaction est conservée par Google → elle pourra être ÉTENDUE au tour
     suivant (obligatoire pour une chaîne). `previous_interaction_id` : tour d'EXTENSION de la vidéo
@@ -1129,14 +1228,14 @@ def _omni_body(
     response_format: dict[str, Any] = {
         "type": "video",
         "aspect_ratio": config_app.ASPECT_RATIO,
-        "resolution": config_app.OMNI_RESOLUTION,
+        "resolution": config_app.normalize_omni_resolution(resolution),
         "delivery": "uri",
     }
     if config_app.OMNI_SEND_DURATION:
         # VideoResponseFormat.duration (string « Ns », 3–10 s), aussi sur les tours d'extension.
         secs = max(config_app.OMNI_MIN_CLIP_SECONDS, min(config_app.OMNI_MAX_CLIP_SECONDS, int(seconds)))
         response_format["duration"] = f"{secs}s"
-    parts = list(image_parts[: config_app.OMNI_MAX_INPUT_IMAGES])
+    parts = [p for p in (image_parts or [])[: config_app.OMNI_MAX_INPUT_IMAGES] if p]
     parts.append({"type": "text", "text": prompt})
     body: dict[str, Any] = {
         "model": model_value,
@@ -1295,9 +1394,12 @@ def omni_generate_video(
     label: str = "",
     index: int = 0,
     store: bool = False,
+    resolution: str = "",
 ) -> dict[str, Any]:
     """Anime l'IMAGE validée du plan AVEC voix + lip-sync (Google Omni) → .mp4.
-    `store=True` = 1er tour d'une chaîne (la vidéo pourra être étendue).
+    `store=True` = 1er tour d'une chaîne (la vidéo pourra être étendue). `image_path` vide =
+    mode « texte_seul » : aucune image envoyée (ni plan ni ancre), le prompt porte le visuel.
+    `resolution` = « 720p » (défaut) | « 1080p ».
 
     Renvoie {"path", "interaction_id", "usage"} (usage = facturation renvoyée par l'API, {} sinon). Simulation : placeholder + id « SIMU_OMNI_<n> ».
     Réel : POST /interactions synchrone (timeout OMNI_REQUEST_TIMEOUT), puis vidéo base64 ou URI.
@@ -1314,17 +1416,19 @@ def omni_generate_video(
     if not key:
         raise ProviderError("Clé API Google (Gemini) manquante — ajoute-la dans Réglages.")
 
-    try:
-        parts = [_omni_image_part(image_path)]
-    except Exception as exc:  # noqa: BLE001 - fichier absent / illisible
-        _log_detail(f"Google Omni image du plan illisible : {exc}")
-        raise ProviderError("Image du plan introuvable ou illisible — régénère l'image du plan.") from exc
-    if anchor_path and str(anchor_path) != str(image_path) and Path(anchor_path).is_file():
+    parts: list[dict[str, Any]] = []
+    if str(image_path or "").strip():
         try:
-            parts.append(_omni_image_part(anchor_path))
-        except Exception as exc:  # noqa: BLE001 - ancre illisible : on continue sans
-            _log_detail(f"Google Omni ancre ignorée (illisible) : {exc}")
-    body = _omni_body(prompt, parts, seconds, model_value, store=store)
+            parts.append(_omni_image_part(image_path))
+        except Exception as exc:  # noqa: BLE001 - fichier absent / illisible
+            _log_detail(f"Google Omni image du plan illisible : {exc}")
+            raise ProviderError("Image du plan introuvable ou illisible — régénère l'image du plan.") from exc
+        if anchor_path and str(anchor_path) != str(image_path) and Path(anchor_path).is_file():
+            try:
+                parts.append(_omni_image_part(anchor_path))
+            except Exception as exc:  # noqa: BLE001 - ancre illisible : on continue sans
+                _log_detail(f"Google Omni ancre ignorée (illisible) : {exc}")
+    body = _omni_body(prompt, parts, seconds, model_value, store=store, resolution=resolution)
     interaction_id, usage = _omni_run(key, body, out_mp4)
     return {"path": out_mp4, "interaction_id": interaction_id, "usage": usage}
 
@@ -1338,6 +1442,7 @@ def omni_extend_video(
     model_value: str = config_app.OMNI_MODEL,
     label: str = "",
     index: int = 0,
+    resolution: str = "",
 ) -> dict[str, Any]:
     """Tour d'EXTENSION d'une vidéo Omni (même plan, même prise continue) : `previous_interaction_id`
     = interaction du tour précédent (créée avec store=true), texte seul — Google garde la vidéo, les
@@ -1355,7 +1460,7 @@ def omni_extend_video(
     if not previous_interaction_id:
         raise ProviderError("Tour précédent introuvable — relance l'animation de ce plan depuis le début.")
     body = _omni_body(prompt, [], seconds, model_value, store=True,
-                      previous_interaction_id=previous_interaction_id)
+                      previous_interaction_id=previous_interaction_id, resolution=resolution)
     interaction_id, usage = _omni_run(key, body, out_mp4)
     return {"path": out_mp4, "interaction_id": interaction_id, "usage": usage}
 

@@ -20,6 +20,7 @@ from typing import Any
 
 from . import brain, config_app, cost, db, media, omni_timing
 from .providers import (
+    ContentFilterError,
     ProviderConfig,
     ProviderError,
     _log_detail,
@@ -434,9 +435,15 @@ def generate_objet_images(
     typed_refs: list[dict[str, Any]] = db.list_ref_images_typed(ad_id) or [
         {"path": p, "kind": ""} for p in base_refs
     ]
-    model_id = _objet_image_model_id(cfg)
     ad_row = db.get_ad(ad_id) or {}
     kind = str(ad_row.get("kind") or "")
+    # Keyframes Avatar IA : TOUJOURS Nano Banana Pro (jamais le réglage global) ; coût idem.
+    img_extra: dict[str, Any] = {}
+    if kind == "avatar_omni":
+        cfg = omni_keyframe_cfg(cfg)
+        img_extra = {"keyframe_source": config_app.OMNI_KEYFRAME_IMAGE_MODEL, "keyframe_ok": 0}
+        db.set_ad_keyframes_ok(ad_id, False)   # nouveau keyframe → à revalider
+    model_id = _objet_image_model_id(cfg)
     # Consigne de cohérence adaptée au type : Mashup = look ultra-réaliste (SANS langage Pixar) ;
     # Objet vivant = personnage-mascotte. Sinon aucune (Plan 1). Avatar IA (Omni) : le RÔLE de
     # chaque réf est nommé dans le prompt (légende), l'ancre n'étant plus forcément la 1re image.
@@ -445,6 +452,9 @@ def generate_objet_images(
         prefix = _CONSISTENCY_BY_KIND.get(kind, _CHARACTER_CONSISTENCY)
 
     names = ad_character_names(ad_row) if kind == "avatar_omni" else {}
+    # Filtre Google : style du suffixe « family-friendly » (Objet animé = 3D animé).
+    safe_style = ad_style(ad_row) if kind == "avatar_omni" else ("3d" if kind == "objet" else "")
+    kind_of_path = {str(t.get("path") or ""): str(t.get("kind") or "") for t in typed_refs}
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
@@ -463,7 +473,11 @@ def generate_objet_images(
                 [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
         else:
             refs = _select_clip_refs(needed, typed_refs, character_ref)
-        if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix):
+        # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
+        sent_kinds = [kind_of_path.get(p, "") for p in refs]
+        if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix,
+                               extra=img_extra, keep_kinds=[k for k in sent_kinds if k],
+                               safe_style=safe_style):
             ok += 1
     ko = len(shots) - ok
     db.set_ad_status(ad_id, "objet_images")
@@ -504,24 +518,31 @@ def _omni_ref_candidates(
     first_speaker: int = 1,
 ) -> tuple[list[dict[str, str]], int]:
     """Toutes les réfs utiles d'un plan Avatar IA, dans l'ordre de PRIORITÉ, + le nombre de réfs
-    « essentielles » (1 visage par personnage à l'image, 1 photo produit, l'ancre).
-    Ordre : visages des personnages à l'image (celui qui parle au 1er tour d'abord, puis par
-    numéro) > produit > ancre, puis les photos en plus (2e photo d'un même type, décor, style,
-    réfs sans type). Types normalisés : « visage » = visage1 (anciennes pubs)."""
+    « essentielles » (par personnage à l'image : sa planche personnage puis son visage ; 1 photo
+    produit ; l'ancre). Ordre : personnages à l'image (celui qui parle au 1er tour d'abord, puis
+    par numéro) > produit > ancre, puis les photos en plus (2e photo d'un même type, décor, style,
+    réfs sans type). Types normalisés : « visage » = visage1 (anciennes pubs). La planche du
+    personnage N (« plancheN ») = sa réf PRINCIPALE : envoyée dès que ce personnage est à l'image
+    (visageN ou plancheN demandé), juste AVANT son visage."""
     if needed == []:
         return [], 0
     norm = config_app.normalize_omni_ref_kind
     need = None if needed is None else {norm(k) for k in needed}
 
     def wanted(k: str) -> bool:
-        return need is None or k == "" or k in need
+        if need is None or k == "" or k in need:
+            return True
+        sheet = config_app.omni_sheet_index(k)
+        return bool(sheet) and config_app.omni_face_kind(sheet) in need
 
     refs = [{"kind": (t.get("kind") or "").strip().lower(), "path": str(t.get("path") or "")}
             for t in typed_refs if t.get("path")]
     refs = [r for r in refs if wanted(norm(r["kind"]))]
-    faces = sorted({config_app.omni_face_index(r["kind"]) for r in refs} - {0},
+    faces = sorted({config_app.omni_character_index(r["kind"]) for r in refs} - {0},
                    key=lambda n: (n != int(first_speaker or 1), n))
-    order = [config_app.omni_face_kind(n) for n in faces] + ["produit"]
+    # v2 : la PLANCHE du personnage est sa réf principale (design complet) → avant son visage.
+    order = [k for n in faces
+             for k in (config_app.omni_sheet_kind(n), config_app.omni_face_kind(n))] + ["produit"]
     first: list[dict[str, str]] = []
     for k in order:
         hit = next((r for r in refs if norm(r["kind"]) == k), None)
@@ -568,7 +589,7 @@ def omni_refs_overflow_warning(
 # Rôle de chaque réf, nommé dans le prompt image Avatar IA (« reference image 1 = … »).
 _OMNI_REF_ROLES = {
     "produit": "the client's product — reproduce it exactly (same bottle shape, colors, cap and "
-               "label)",
+               "label) as a plain inanimate object: never give it a face, eyes or a mouth",
     "ancre": "the validated previous shot — keep the same people, outfits, set and lighting; "
              "only framing, pose and action change",
     "decor": "the set / background to reproduce",
@@ -578,11 +599,19 @@ _OMNI_REF_ROLES = {
 
 
 def _omni_ref_role(kind: str, names: dict[int, str] | None = None) -> str:
+    sheet = config_app.omni_sheet_index(kind)
+    if sheet:
+        name = (names or {}).get(sheet, "")
+        who = f"character sheet of character {sheet}" + (f" ({name})" if name else "")
+        return (f"{who} — THE MAIN reference for this character: reproduce exactly the same "
+                "design (face, hair, body shape, outfit, colors and every signature detail) in "
+                "this shot; use the sheet's views as reference, never draw the sheet itself")
     n = config_app.omni_face_index(kind)
     if n:
         name = (names or {}).get(n, "")
         who = f"character {n}'s face" + (f" ({name})" if name else "")
-        return f"{who} — keep this exact face identical (same age, features, skin, hair)"
+        return (f"{who} — keep this exact face identical (same age, features, skin, hair), "
+                "consistent with their character sheet")
     return _OMNI_REF_ROLES.get(config_app.normalize_omni_ref_kind(kind), _OMNI_REF_ROLES[""])
 
 
@@ -596,6 +625,13 @@ def omni_refs_legend(picked: list[dict[str, str]], names: dict[int, str] | None 
     return "REFERENCE IMAGES (in order): " + "; ".join(lines) + ".\n\n"
 
 
+def omni_keyframe_cfg(cfg: ProviderConfig) -> ProviderConfig:
+    """Copie de la config qui force le modèle image des keyframes Avatar IA (Nano Banana Pro)."""
+    from dataclasses import replace
+
+    return replace(cfg, objet_image_model=config_app.OMNI_KEYFRAME_IMAGE_MODEL)
+
+
 def _objet_image_model_id(cfg: ProviderConfig) -> str:
     return config_app.OBJET_IMAGE_MODELS.get(
         cfg.objet_image_model, config_app.OBJET_IMAGE_MODELS[config_app.DEFAULT_OBJET_IMAGE_MODEL]
@@ -605,21 +641,43 @@ def _objet_image_model_id(cfg: ProviderConfig) -> str:
 def _generate_one_image(
     cfg: ProviderConfig, ad_id: int, ad_name: str, folder: Path, model_id: str,
     refs: list[str], s: dict[str, Any], emit: UpdateFn, prefix: str = "",
+    extra: dict[str, Any] | None = None, *, keep_kinds: list[str] | None = None,
+    safe_style: str = "",
 ) -> bool:
     """Génère UNE image Nano Banana pour un plan (avec réfs). Renvoie True si prête. Ne lève pas.
-    `prefix` = éventuelle consigne (ex. cohérence personnage pour l'objet vivant)."""
+    `prefix` = éventuelle consigne (ex. cohérence personnage pour l'objet vivant) ; `extra` =
+    colonnes clip écrites avec l'image (Avatar IA : keyframe_source, keyframe_ok=0).
+    Dernières étapes avant l'appel : renvois aux photos NON envoyées retirés (`keep_kinds` =
+    types réellement envoyés ; None = on ne touche à rien) puis filtre de mots Google
+    (brain.google_safe_prompt). Image bloquée par le filtre → 1 relance automatique avec une
+    reformulation stricte, puis échec propre (message lisible dans clips.error)."""
     n = int(s["n"])
     clip_id = int(s["clip_id"])
     prompt_image = prefix + str(s.get("prompt_image", ""))
+    if keep_kinds is not None:
+        prompt_image = strip_photo_refs(prompt_image, keep_kinds=keep_kinds)
     img = folder / f"{n}.png"
     try:
         emit({"scene": n, "phase": "image", "status": "en_cours"})
-        nano_banana_generate_image(
-            cfg, prompt_image, refs, img, label=ad_name, subtitle=f"plan {n}", index=n - 1,
-        )
+        try:
+            nano_banana_generate_image(
+                cfg, brain.google_safe_prompt(prompt_image, safe_style), refs, img,
+                label=ad_name, subtitle=f"plan {n}", index=n - 1,
+            )
+        except ContentFilterError:
+            emit({"scene": n, "phase": "image", "status": "en_cours",
+                  "message": f"Plan {n} : image bloquée par le filtre Google — nouvel essai avec "
+                             "un prompt reformulé…"})
+            try:
+                nano_banana_generate_image(
+                    cfg, brain.google_safe_prompt(prompt_image, safe_style, strict=True), refs, img,
+                    label=ad_name, subtitle=f"plan {n}", index=n - 1,
+                )
+            except ContentFilterError as exc2:
+                raise ContentFilterError(IMAGE_FILTER_FAILED_MSG) from exc2
         if not cfg.dry_run:
             cost.record_image(ad_id, model_id)  # 1 image Nano Banana réellement générée
-        db.update_clip(clip_id, image_path=str(img), status="image_pret", error=None)
+        db.update_clip(clip_id, image_path=str(img), status="image_pret", error=None, **(extra or {}))
         emit({"scene": n, "phase": "pret", "status": "ok", "image": str(img)})
         return True
     except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
@@ -809,13 +867,16 @@ def build_omni_prompt(
     intro: str = config_app.OMNI_INTRO_GESTURE,
     speaker: str = "",
     silent: str = "",
+    scene_desc: str = "",
 ) -> str:
     """Prompt Google Omni d'UN plan, dans un ordre STRICT : caméra/scène unique → mouvement
     (nettoyé des marques) → dialogue minuté + voix (ou silence) → interdits → ancre éventuelle.
     Le DIALOGUE est inséré VERBATIM (jamais nettoyé ni reformulé) ; seules les valeurs « [à
     valider] » perdent leurs crochets (« [97 %] » → « 97 % », la base garde les crochets).
-    `speaker` / `silent` = descriptions ANGLAISES des personnages 1 (parle) et 2 (muet)."""
-    parts = [f"<FIRST_FRAME> {camera}, in a single unbroken scene with no scene cuts."]
+    `speaker` / `silent` = descriptions ANGLAISES des personnages 1 (parle) et 2 (muet).
+    `scene_desc` non vide = mode « texte_seul » : AUCUNE image de départ, la description visuelle
+    du plan est écrite dans le prompt (pas de <FIRST_FRAME>)."""
+    parts = [_omni_frame_header(camera, scene_desc)]
     motion = brain.scrub_brand_names(prompt_motion or "")
     if motion:
         parts.append(motion)
@@ -1015,7 +1076,7 @@ def clip_characters_in_frame(c: dict[str, Any], ad: dict[str, Any]) -> list[int]
     """Personnages À L'IMAGE dans ce plan : visages demandés (refs_needed visageN) + speakers des
     tours ; sinon tous les personnages décrits (bible / personnages)."""
     needed = _norm_refs_needed(c.get("refs_needed")) or []
-    nums = {config_app.omni_face_index(k) for k in needed} - {0}
+    nums = {config_app.omni_character_index(k) for k in needed} - {0}
     nums |= {int(omni_timing.normalize_turn(s)["speaker"]) for s in clip_segments(c)
              if str(s.get("text") or "").strip()}
     if not nums:
@@ -1177,16 +1238,28 @@ def _omni_camera(style: str) -> str:
     return config_app.OMNI_DEFAULT_CAMERA
 
 
+def _omni_frame_header(camera: str, scene_desc: str = "") -> str:
+    """Ouverture du prompt Omni : <FIRST_FRAME> + caméra (keyframe en 1re image) ; en mode
+    « texte_seul » (scene_desc non vide) : caméra + description VISUELLE du plan, sans image."""
+    if scene_desc.strip():
+        desc = brain.scrub_brand_names(" ".join(scene_desc.split()))
+        return f"{camera}, in a single unbroken scene with no scene cuts. The scene: {desc}"
+    return f"<FIRST_FRAME> {camera}, in a single unbroken scene with no scene cuts."
+
+
 def build_omni_turn_prompt(
     turn: Any, timing: dict[str, Any], *, first: bool, speaker_desc: str = "",
     speaker_name: str = "", voice_sheet: str = "", others: list[str] | None = None,
     has_anchor: bool = False, style: str = config_app.DEFAULT_OMNI_STYLE, n_people: int = 1,
+    video_prompt: str = "", scene_desc: str = "",
 ) -> str:
     """Prompt Google Omni d'UN tour chronométré. Ordre : cadre (1er tour : <FIRST_FRAME> caméra +
     style ; extension : « Extend this video… ») → partie MINUTÉE (omni_timing, timecodes = même
     calcul que la durée envoyée) → son / lip-sync → autres personnages muets → interdits →
     ancre (1er tour). UN seul personnage parle ; tour muet = « No dialogue ». Gestes nettoyés
-    des marques ; dialogue VERBATIM (crochets retirés)."""
+    des marques ; dialogue VERBATIM (crochets retirés). 1er tour : `video_prompt` (mouvement +
+    qui parle, étape Keyframes) suit le cadre ; `scene_desc` = mode « texte_seul » (pas d'image
+    de départ : la description visuelle du plan remplace <FIRST_FRAME>)."""
     t = omni_timing.normalize_turn(turn)
     for k in ("avant", "pendant", "apres"):
         t[k] = brain.scrub_brand_names(t[k])
@@ -1199,7 +1272,9 @@ def build_omni_turn_prompt(
         who = f"{speaker_name}, the speaking character," if speaker_name else "The person"
     timed = omni_timing.build_turn_timecode_prompt(t, timing, speaker_desc=who, voice_sheet=voice_sheet)
     if first:
-        parts = [f"<FIRST_FRAME> {_omni_camera(style)}, in a single unbroken scene with no scene cuts."]
+        parts = [_omni_frame_header(_omni_camera(style), scene_desc)]
+        if video_prompt.strip():
+            parts.append(brain.scrub_brand_names(" ".join(video_prompt.split())))
     else:
         people = "same people" if n_people > 1 else "same person"
         parts = [f"Extend this video: the scene continues in the same single unbroken shot, {people}, "
@@ -1228,6 +1303,51 @@ def build_omni_turn_prompt(
     return " ".join(parts)
 
 
+def clip_text_only(c: dict[str, Any]) -> bool:
+    """Plan en mode « texte_seul » : Omni sans image de départ."""
+    return config_app.normalize_keyframe_mode(c.get("keyframe_mode")) == "texte_seul"
+
+
+def omni_clip_animatable(c: dict[str, Any]) -> bool:
+    """Keyframe VALIDÉ (keyframe_ok=1) et, en mode start_frame, une image présente."""
+    return bool(int(c.get("keyframe_ok") or 0)) and (clip_text_only(c) or bool(c.get("image_path")))
+
+
+IMAGE_FILTER_FAILED_MSG = (
+    "Image bloquée par le filtre de sécurité Google, même après reformulation : modifie le prompt "
+    "(évite les mots liés à la peau abîmée — boutons, pus, acné —, au sang, aux blessures, et les "
+    "très gros plans de peau)."
+)
+
+
+def strip_photo_refs(text: str, keep_kinds: Any = None) -> str:
+    """Retire d'un texte les renvois aux photos de référence (« "visage1" reference photo »,
+    « "planche2" character sheet », « ("decor" photo) »…). `keep_kinds` = types de photos
+    RÉELLEMENT envoyées (leurs renvois sont gardés) ; None = tout retirer (mode texte_seul :
+    AUCUNE image n'est envoyée à Omni, il ne doit pas lire de renvois à des images absentes).
+    Tous modes (Avatar IA, Objet, Images, Mashup) : appliqué juste avant l'appel Nano Banana."""
+    return brain.strip_photo_mentions(text, keep_kinds)
+
+
+def clip_scene_desc(c: dict[str, Any]) -> str:
+    """Description VISUELLE du plan (mode texte_seul) : prompt image complet, sinon partie propre,
+    sans renvois aux photos de référence (aucune image n'accompagne ce prompt)."""
+    raw = str(c.get("prompt_image") or "").strip() or str(c.get("shot_prompt") or "").strip()
+    return strip_photo_refs(raw)
+
+
+def clip_omni_prompts(c: dict[str, Any]) -> list[str]:
+    """clips.omni_prompt décodé : liste des prompts texte envoyés à Omni (un par tour)."""
+    raw = c.get("omni_prompt")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return [str(raw)]
+    return [str(x) for x in data] if isinstance(data, list) else [str(data)]
+
+
 def animate_avatar_omni_clips(
     cfg: ProviderConfig,
     ad_id: int,
@@ -1245,19 +1365,20 @@ def animate_avatar_omni_clips(
     Run réel : les plans sont ESPACÉS pour rester sous le plafond Google Tier 1 (`pacer`, par
     défaut omni_tier1_pacer) ; le plan qui attend affiche « prochain plan dans X min »."""
     all_clips = db.clips_for_ad(ad_id)
+    ad = db.get_ad(ad_id) or {}
+    # GARDE-FOU (défense en profondeur, cf. main) : seuls les keyframes VALIDÉS sont animés ;
+    # l'animation globale exige en plus « Valider les keyframes » (ads.keyframes_ok=1).
     if only_clip_id is not None:
         clips = [
             c for c in all_clips
-            if int(c["id"]) == int(only_clip_id)
-            and c.get("image_path")
+            if int(c["id"]) == int(only_clip_id) and omni_clip_animatable(c)
             and c.get("status") in ("valide", "echec", "pret")
         ]
+    elif not int(ad.get("keyframes_ok") or 0):
+        clips = []
     else:
-        clips = [
-            c for c in all_clips
-            if c.get("image_path") and c.get("status") in ("valide", "echec")
-        ]
-    ad = db.get_ad(ad_id) or {}
+        clips = [c for c in all_clips if omni_clip_animatable(c) and c.get("status") in ("valide", "echec")]
+    resolution = config_app.normalize_omni_resolution(ad.get("omni_resolution"))
     wps_for = ad_wps_for(ad)          # débit de la fiche voix de CHAQUE speaker
     sheet_for = ad_voice_sheet_for(ad)
     wps = wps_for(1)
@@ -1292,15 +1413,18 @@ def animate_avatar_omni_clips(
         n = int(c["scene_n"])
         dialogue = str(c.get("script") or "").strip()   # VERBATIM
         seconds = config_app.omni_clip_seconds(dialogue, wps)
-        has_anchor = ref is not None and int(ref["id"]) != int(c["id"])
+        text_only = clip_text_only(c)
+        has_anchor = not text_only and ref is not None and int(ref["id"]) != int(c["id"])
+        motion = str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt", ""))
         prompt = build_omni_prompt(
-            str(c.get("motion_prompt", "")), dialogue, sheet, seconds, has_anchor,
-            speaker=speaker, silent=silent,
+            motion, dialogue, sheet, seconds, has_anchor,
+            speaker=speaker, silent=silent, scene_desc=clip_scene_desc(c) if text_only else "",
         )
+        db.update_clip(int(c["id"]), omni_prompt=json.dumps([prompt], ensure_ascii=False))
         res = omni_generate_video(
-            cfg, str(c["image_path"]), prompt, mp4, seconds,
+            cfg, "" if text_only else str(c["image_path"]), prompt, mp4, seconds,
             anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
-            model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1,
+            model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, resolution=resolution,
         )
         db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
         if not cfg.dry_run:
@@ -1314,8 +1438,6 @@ def animate_avatar_omni_clips(
         fiche voix, durée chronométrée (omni_timing) envoyée à Google et timecodes du prompt
         issus du MÊME calcul. Chaque tour réussi est ENREGISTRÉ (id + fichier) → une reprise
         repart du dernier tour réussi. Résultat : UN mp4."""
-        import json
-
         n = int(c["scene_n"])
         clip_id = int(c["id"])
         segs = clip_segments(c)
@@ -1327,31 +1449,46 @@ def animate_avatar_omni_clips(
             done += 1
         if done == k and c.get("status") == "pret":
             segs, done = reset_segments_progress(segs), 0   # plan déjà animé : on refait tout
-        has_anchor = ref is not None and int(ref["id"]) != clip_id
+        text_only = clip_text_only(c)
+        has_anchor = not text_only and ref is not None and int(ref["id"]) != clip_id
         in_frame = clip_characters_in_frame(c, ad)
+        # Texte seul : pas d'image envoyée → descriptions sans renvois aux photos de référence.
+        cdescs = {m: strip_photo_refs(d) for m, d in descs.items()} if text_only else descs
+        video_prompt = str(c.get("video_prompt") or "").strip()
+        sent = clip_omni_prompts(c)[:done] if done else []   # prompts des tours déjà faits
         for i in range(done, k):
             s = segs[i]
             turn = omni_timing.normalize_turn(s)
             sp = int(turn["speaker"])
             timing = turn_plan(turn, wps_for(sp), max_spoken)
             seconds = int(timing["seconds"])
-            others = [descs.get(m) or names.get(m) or f"character {m}" for m in in_frame if m != sp]
+            # Tour 1 avec keyframe + video_prompt : l'image porte déjà le visuel → on ne redécrit
+            # pas les personnages (noms seulement), le video_prompt dit le mouvement.
+            lean = i == 0 and bool(video_prompt) and not text_only
+            others = [(names.get(m) if lean else cdescs.get(m)) or names.get(m) or f"character {m}"
+                      for m in in_frame if m != sp]
             prompt = build_omni_turn_prompt(
-                turn, timing, first=(i == 0), speaker_desc=descs.get(sp, ""),
+                turn, timing, first=(i == 0), speaker_desc="" if lean else cdescs.get(sp, ""),
                 speaker_name=names.get(sp, ""), voice_sheet=sheet_for(sp), others=others,
                 has_anchor=has_anchor, style=style, n_people=max(len(in_frame), 1),
+                video_prompt=video_prompt if i == 0 else "",
+                scene_desc=clip_scene_desc(c) if (i == 0 and text_only) else "",
             )
+            sent = [*sent[:i], prompt]
+            db.update_clip(clip_id, omni_prompt=json.dumps(sent, ensure_ascii=False))
             part = mp4.with_name(f"{n}_tour{i + 1}.mp4")
             if i == 0:
                 res = omni_generate_video(
-                    cfg, str(c["image_path"]), prompt, part, seconds,
+                    cfg, "" if text_only else str(c["image_path"]), prompt, part, seconds,
                     anchor_path=str(ref["image_path"]) if (has_anchor and ref) else "",
                     model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
+                    resolution=resolution,
                 )
             else:
                 res = omni_extend_video(
                     cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
                     model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
+                    resolution=resolution,
                 )
             segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
                        "mp4_path": str(res.get("path") or part), "done": True}

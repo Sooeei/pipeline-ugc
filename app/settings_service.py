@@ -17,6 +17,7 @@ def load_provider_config() -> ProviderConfig:
         openrouter_api_key=s.get("openrouter_api_key", ""),
         xai_api_key=s.get("xai_api_key", ""),
         gemini_api_key=s.get("gemini_api_key", ""),
+        elevenlabs_api_key=s.get("elevenlabs_api_key", ""),
         objet_image_model=s.get("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL),
         objet_video_model=s.get("objet_video_model", config_app.DEFAULT_OBJET_VIDEO_MODEL),
         mashup_video_model=s.get("mashup_video_model", config_app.DEFAULT_MASHUP_VIDEO_MODEL),
@@ -35,6 +36,10 @@ def load_provider_config() -> ProviderConfig:
         claude_code_token=s.get("claude_code_token", ""),
         claude_code_model=config_app.normalize_claude_code_model(s.get("claude_code_model")),
         cost_mode=s.get("cost_mode", config_app.DEFAULT_COST_MODE),
+        avatar_video_model=config_app.normalize_avatar_video_model(s.get("avatar_video_model")),
+        drift_threshold=config_app.normalize_drift_threshold(
+            s.get("drift_threshold", config_app.DRIFT_THRESHOLD_DEFAULT)
+        ),
         dry_run=s.get("dry_run", "1") == "1",
     )
 

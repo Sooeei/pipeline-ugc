@@ -98,7 +98,8 @@ def test_legacy_ad_get_estimate_animate_dry_run(tmp_path):
     texts = ["Je maquille des peaux matures tous les jours.", "Le lien est en bas."]
     cid = db.create_clip(ad_id, 1, " ".join(texts), "m", prompt_image="p",
                          refs_needed=json.dumps(["visage", "visage2"]))
-    db.update_clip(cid, image_path=img, status="valide", block_n=1,
+    db.set_ad_keyframes_ok(ad_id, True)   # « Valider les keyframes »
+    db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1, block_n=1,
                    segments=json.dumps([{"text": t, "motion": "he nods"} for t in texts]))
     with TestClient(app) as c:
         c.post("/api/settings", json={"dry_run": True})

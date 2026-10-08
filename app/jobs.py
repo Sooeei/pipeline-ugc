@@ -147,6 +147,21 @@ class JobManager:
                     summary = pipeline.animate_avatar_omni_clips(
                         cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
                     )
+                elif output_mode == "avatar_voices":
+                    # « Avatar IA » v2 — étape Voix : audio ElevenLabs par bloc. Import paresseux
+                    # (le module importe des briques qui peuvent dépendre de jobs).
+                    from . import avatar_voices
+
+                    summary = avatar_voices.generate_block_voices(
+                        cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
+                    ) or {}
+                elif output_mode == "avatar_video":
+                    # « Avatar IA » v2 — 1 appel image→vidéo par bloc (Grok / Kling / Omni).
+                    from . import avatar_video
+
+                    summary = avatar_video.animate_blocks(
+                        cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
+                    ) or {}
                 else:
                     summary = pipeline.generate_ad(
                         cfg, ad_id, ad_name, scenes, avatar_id,

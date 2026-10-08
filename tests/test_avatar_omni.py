@@ -68,8 +68,12 @@ def _omni_ad(n_clips=2, status="valide", dialogues=None, voice_profile=None, kin
     for i in range(n_clips):
         d = (dialogues or [])[i] if dialogues and i < len(dialogues) else f"Phrase {i + 1}."
         cid = db.create_clip(ad_id, i + 1, d, f"motion {i + 1}", prompt_image=f"img {i + 1}")
-        db.update_clip(cid, image_path=f"fake/{i + 1}.png", status=status)
+        # Étape Keyframes : un plan validé/animé/échoué a son keyframe validé (keyframe_ok=1).
+        db.update_clip(cid, image_path=f"fake/{i + 1}.png", status=status,
+                       keyframe_ok=int(status in ("valide", "pret", "echec")))
         ids.append(cid)
+    if status == "valide":   # = « Valider les keyframes » cliqué
+        db.set_ad_keyframes_ok(ad_id, True)
     return ad_id, ids
 
 
@@ -90,9 +94,10 @@ def test_avatar_omni_e2e_api_dry_run(monkeypatch):
         assert set(plan) >= {"ad", "shots", "warnings", "max_words", "estimate", "dry_run"}
         shots = plan["shots"]
         assert brain.realign_to_script(SCRIPT, [s["dialogue"] for s in shots]) is not None   # verbatim
-        assert plan["max_words"] == 17 and plan["dry_run"] is True     # tours de 8 s à 2,5 mots/s
-        est = c.post("/api/avatar-omni/estimate", json={"shots": shots, "voice_profile": VP}).json()
-        assert est["seconds_total"] == plan["estimate"]["seconds_total"]
+        # v2 « audio d'abord » : blocs ≤ 10 s à 2,5 mots/s, un speaker par bloc, pas de tours.
+        assert plan["max_words"] == 25 and plan["dry_run"] is True
+        assert all(s["speaker"] == 1 and s["segments"] == [] for s in shots)
+        assert plan["estimate"]["seconds_total"] == sum(s["duration_s"] for s in shots)
 
         r = c.post(
             "/api/avatar-omni/generate-images",
@@ -106,6 +111,10 @@ def test_avatar_omni_e2e_api_dry_run(monkeypatch):
         _wait(c, r.json()["job_id"])
         assert db.get_ad(ad_id)["kind"] == "avatar_omni"
         assert [x["kind"] for x in db.list_ref_images_typed(ad_id)] == ["visage"]
+        assert db.get_ad(ad_id)["pipeline_version"] == 2                  # nouvelle pub = v2
+        assert all(int(cl["speaker"]) == 1 for cl in db.clips_for_ad(ad_id))
+        # Le reste du test couvre l'ANCIEN pipeline Omni (pubs v1 existantes) : on repasse la pub en v1.
+        db.set_ad_fields(ad_id, pipeline_version=1)
 
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
         assert ad["voice_profile"]["gender"] == "female" and ad["voice_locked"] == {"1": False}
@@ -128,6 +137,9 @@ def test_avatar_omni_e2e_api_dry_run(monkeypatch):
         assert all(s["image_url"] for s in ad["shots"])
         for s in ad["shots"]:
             c.post(f"/api/avatar-omni/validate/{s['clip_id']}", json={"valide": True})
+        # Sans « Valider les keyframes » : animation globale refusée (garde-fou)
+        assert c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True}).status_code == 409
+        assert c.post(f"/api/avatar-omni/keyframes/validate-all/{ad_id}").status_code == 200
 
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 200, r.text
@@ -214,8 +226,8 @@ def test_max_words_values_per_pace():
     assert config_app.omni_max_words(3.0) == 27
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
-        # Plan (tours de 8 s) : mots max d'un tour sans geste = floor((8 − 0,5 − 0,7) × débit).
-        for pace, mw in (("naturel", 17), ("lent", 13), ("dynamique", 20)):
+        # Plan v2 : mots max d'un bloc = AVATAR_MAX_BLOCK_S (10 s) × débit de la fiche voix.
+        for pace, mw in (("naturel", 25), ("lent", 20), ("dynamique", 30)):
             r = c.post("/api/avatar-omni/plan",
                        json={"script": SCRIPT, "mode": "manual", "voice_profile": {**VP, "pace": pace}})
             assert r.status_code == 200 and r.json()["max_words"] == mw, (pace, r.text)
@@ -350,12 +362,14 @@ def test_voice_profile_persisted_and_reused_by_resume_and_test_plan(monkeypatch)
         assert r.status_code == 200, r.text
         ad_id = r.json()["ad_id"]
         _wait(c, r.json()["job_id"])
+        db.set_ad_fields(ad_id, pipeline_version=1)   # ce test couvre l'ANCIEN pipeline Omni (v1)
         assert json.loads(db.get_ad(ad_id)["voice_profile"]) == config_app.normalize_voice_profile(vp)
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
         assert ad["voice_sheet"] == sheet
         # images du Plan 2 + validation
         for cl in db.clips_for_ad(ad_id):
-            db.update_clip(int(cl["id"]), image_path=f"fake/{cl['scene_n']}.png", status="valide")
+            db.update_clip(int(cl["id"]), image_path=f"fake/{cl['scene_n']}.png", status="image_pret")
+        assert c.post(f"/api/avatar-omni/keyframes/validate-all/{ad_id}").status_code == 200
         cid1, cid2 = [int(cl["id"]) for cl in db.clips_for_ad(ad_id)]
 
         # PATCH avant animation → 200
@@ -734,7 +748,7 @@ def test_real_animation_records_omni_cost(monkeypatch):
 def test_estimate_avatar_omni_and_tier1_warning():
     e = cost.estimate_avatar_omni([3, 10, 4])
     assert e["shots"] == 3 and e["seconds_total"] == 17 and e["usd_video"] == 1.7
-    assert e["usd_images"] == round(3 * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
+    assert e["usd_images"] == round(3 * cost.omni_keyframe_image_usd(), 2)   # Nano Banana Pro
     assert e["usd_total"] == round(e["usd_images"] + 1.7, 2) and e["tier1_warning"] is False
     assert cost.estimate_avatar_omni([10] * 10)["tier1_warning"] is False    # 10 $ pile
     assert cost.estimate_avatar_omni([10] * 11)["tier1_warning"] is True     # 11 $ > 10 $
@@ -795,10 +809,11 @@ def test_animate_real_mode_guards():
         assert c.post("/api/avatar-omni/animate/99999", json={}).json()["detail"] == (
             "Avatar IA introuvable.")
         ad2, ids2 = _omni_ad(1, status="image_pret")
-        assert c.post(f"/api/avatar-omni/animate/{ad2}", json={}).json()["detail"] == (
-            "Aucun plan validé à animer (valide d'abord les images).")
-        assert c.post(f"/api/avatar-omni/animate/{ad2}", json={"clip_id": ids2[0]}).json()[
-            "detail"] == "Valide ce plan avant de le tester."
+        r = c.post(f"/api/avatar-omni/animate/{ad2}", json={})
+        assert r.status_code == 409 and r.json()["detail"] == (
+            "Valide d'abord les keyframes (« Valider les keyframes ») avant de générer les vidéos.")
+        r = c.post(f"/api/avatar-omni/animate/{ad2}", json={"clip_id": ids2[0]})
+        assert r.status_code == 409 and r.json()["detail"] == "Valide d'abord le keyframe de ce plan."
 
 
 def test_costs_report_lists_gemini_service_via_api():

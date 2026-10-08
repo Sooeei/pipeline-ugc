@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 
@@ -1138,12 +1139,16 @@ Pour CHAQUE plan, tu écris deux prompts EN ANGLAIS :
     petit transfert du poids du corps, épaules qui se détendent, sourcil qui bouge, respiration
     visible, courte pause naturelle, micro-inclinaison de la tête).
   • N'écris PAS le clignement des yeux (déjà naturel ; l'écrire donne des clignements forcés).
-  • NE mets PAS le dialogue ici (il est fourni à part) ni de description de voix.
+  • NE mets PAS le dialogue ici (il est fourni à part) ni de description de voix (la fiche voix
+    est injectée telle quelle par le code).
+  • C'est le PROMPT VIDÉO (l'image de départ porte déjà le reste) : UNIQUEMENT le mouvement,
+    JAMAIS le décor, la lumière ni l'apparence de la personne.
 - "dialogue" : l'EXTRAIT LITTÉRAL du SCRIPT pour ce plan (cf. RÈGLE ABSOLUE). Ne mets PAS de
   guillemets autour, ne reformule pas, ne coupe pas au milieu d'une phrase.
-- "refs_needed" : les types de photos de référence utiles à CE plan, parmi "visage", "produit",
-  "decor", "style". Plan avec la personne → au moins ["visage"] (+ "produit" si le produit est à
-  l'image, + "decor"/"style" si utile). B-roll produit sans la personne → ["produit"]. Plan
+- "refs_needed" : les types de photos de référence utiles à CE plan, parmi "visage", "planche1"
+  (planche personnage / character sheet de la personne), "produit", "decor", "style". Plan avec
+  la personne → au moins ["visage"] (+ "planche1", + "produit" si le produit est à l'image,
+  + "decor"/"style" si utile). B-roll produit sans la personne → ["produit"]. Plan
   purement décor sans personne ni produit → [].
 
 RÈGLES :
@@ -1174,9 +1179,10 @@ le décor et la lumière (ce sont des guides, jamais du texte à afficher).
   expression, court. FACE CAMÉRA TOUJOURS (jamais de profil, « turn », « look away »). Aucun
   geste de comptage sur les doigts. Mains sobres (gestes marqués rares ; produit tenu stable).
   Micro-mouvements VARIÉS d'un plan à l'autre (tête, épaules, sourcil, respiration, pause).
-  N'écris pas le clignement des yeux. NE mets PAS le dialogue.
-- "refs_needed" : parmi "visage", "produit", "decor", "style" — personne à l'image → au moins
-  ["visage"] ; B-roll produit → ["produit"] ; décor seul → [].
+  N'écris pas le clignement des yeux. NE mets PAS le dialogue ni la voix. C'est le PROMPT VIDÉO :
+  UNIQUEMENT le mouvement, JAMAIS le décor, la lumière ni l'apparence de la personne.
+- "refs_needed" : parmi "visage", "planche1" (planche personnage), "produit", "decor", "style" —
+  personne à l'image → au moins ["visage"] (+ "planche1") ; B-roll produit → ["produit"] ; décor seul → [].
 Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
   {"shots":[{"prompt_image":"...","prompt_motion":"...","refs_needed":["visage"]}]}
 """
@@ -1358,8 +1364,16 @@ def _avatar_omni_manual_shots(
         pm = str(v.get("prompt_motion", "")).strip() or c_motion
         rn = _norm_refs_needed(v.get("refs_needed")) if v else None
         shots.append({"n": i + 1, "prompt_image": pi, "prompt_motion": pm, "dialogue": seg,
-                      "refs_needed": rn if rn is not None else c_refs})
+                      "refs_needed": rn if rn is not None else c_refs,
+                      "video_prompt": str(v.get("video") or "").strip()})
     return shots
+
+
+def _shot_video_prompt(shot: dict[str, Any], style: str) -> str:
+    """Prompt vidéo d'un plan manuel / ancien auto : celui du modèle (nettoyé) sinon repli
+    depuis prompt_motion (mouvement seul) + « Character 1 parle »."""
+    video = clean_video_prompt(str(shot.get("video_prompt") or ""), [str(shot.get("dialogue") or "")])
+    return video or _legacy_video_prompt(str(shot.get("prompt_motion") or ""), style)
 
 
 def _styled_prompt_image(prompt: str, style: str) -> str:
@@ -1424,6 +1438,7 @@ def generate_avatar_omni_plan(
                 wps_for=wps_for, max_spoken=max_spoken)
             sh["duration_s"] = sum(int(t["seconds"]) for t in sh["segments"])
             sh["prompt_image"] = _styled_prompt_image(sh["prompt_image"], style)
+            sh["video_prompt"] = _shot_video_prompt(sh, style)
             timer_warnings.extend(turn_warnings(sh["n"], sh["segments"]))
         return {"ad": _slug(script), "shots": shots, "warnings": timer_warnings,
                 "max_words": turn_max_words(max_spoken, wps_for(1)), "max_spoken": max_spoken,
@@ -1467,6 +1482,7 @@ def generate_avatar_omni_plan(
         warn_kind = "phrase"
         for sh in shots:
             sh["prompt_image"] = _styled_prompt_image(str(sh["prompt_image"]), style)
+            sh["video_prompt"] = _shot_video_prompt(sh, style)
     warnings = [
         w for s in shots
         if (w := omni_dialogue_warning(int(s["n"]), str(s["dialogue"]), max_words, warn_kind))
@@ -1619,6 +1635,7 @@ def _style_text(style: str) -> str:
 # « : », « ; » ou « — ») ; Claude TRADUIT la direction 🎬 en prompts anglais, il n'invente rien.
 _CLIENT_BLOCK_RE = re.compile(r"^\s*BLOC\s+(\d+)\b(.*)$", re.IGNORECASE)
 _CLIENT_DIRECTION_MARK = "\U0001f3ac"   # 🎬
+_CLIENT_SPEAKER_MARK = "\U0001f5e3"     # 🗣 (ligne « qui parle », optionnelle — v2)
 _CLIENT_CLOSERS = "»\"”’)]"
 
 
@@ -1669,6 +1686,10 @@ def parse_client_doc(text: str) -> list[dict[str, Any]]:
         if cur is None:
             continue   # texte avant le 1er bloc (intro, notes) : ignoré
         stripped = line.strip()
+        if stripped.startswith(_CLIENT_SPEAKER_MARK):
+            # « 🗣️ Personnage 2 (Lea) » : QUI PARLE dans ce bloc (v2) — jamais du dialogue.
+            cur["speaker_hint"] = stripped[len(_CLIENT_SPEAKER_MARK):].lstrip("️").strip()
+            continue
         if stripped.startswith(_CLIENT_DIRECTION_MARK):
             in_direction = True
             stripped = stripped[len(_CLIENT_DIRECTION_MARK):].lstrip("️").strip()
@@ -1688,10 +1709,13 @@ def parse_client_doc(text: str) -> list[dict[str, Any]]:
         dialogue = "\n".join(b["dialogue_lines"]).strip()
         if not dialogue:
             raise BrainError(f"Bloc {b['block_n']} : aucun dialogue trouvé (texte avant « 🎬 »).")
-        out.append({
+        item = {
             "block_n": b["block_n"], "timecode": b["timecode"], "title": b["title"],
             "dialogue": dialogue, "direction": " ".join(b["direction_lines"]).strip(),
-        })
+        }
+        if b.get("speaker_hint"):
+            item["speaker_hint"] = b["speaker_hint"]
+        out.append(item)
     return out
 
 
@@ -1756,9 +1780,18 @@ RÈGLES :
   une mascotte qui parle (décris sa forme, ses couleurs, ses yeux et sa bouche) ; jamais de nom de
   studio ni d'œuvre.
 - "set" : le décor fixe (lieu, comptoir/table, miroir, fond, lumière), cohérent avec les directions.
+- "character1_traits" … "character4_traits" : les 3 TRAITS VISUELS CLÉS du personnage N, les plus
+  distinctifs et stables, en anglais, séparés par des virgules, 15 mots maximum (ex. « long wavy
+  copper-red hair, freckles, big brown eyes » ; objet / mascotte : « round coral-red body, heavy
+  frowning eyebrows, wide sarcastic mouth »). Ils sont répétés EN TÊTE de CHAQUE image : ils
+  doivent suffire à reconnaître le personnage (couleur et forme des cheveux, marque distinctive,
+  couleur des yeux / forme, couleur, détail signature). Vide si le personnage n'existe pas.
 - "product" : description visuelle FIXE du produit du client (forme du flacon, couleurs, bouchon,
   étiquette), identique partout. AUCUNE marque tierce (un produit concurrent cité par le client
-  devient « a generic foundation bottle », jamais son nom).
+  devient « a generic foundation bottle », jamais son nom). Le PRODUIT est un OBJET NEUTRE : JAMAIS
+  de visage, d'yeux ni de bouche — même si un personnage est le produit personnifié (ex. une gourde
+  qui parle) : ce personnage-là est décrit dans son "characterN" (d'après sa planche) et n'a un
+  visage que dans les plans où il parle ou est explicitement présent.
 - "positions" : placement PAR DÉFAUT des personnages et objets dans le cadre (qui est à gauche /
   à droite, debout / assis, distance à la caméra, où sont posés les produits).
 - PHOTOS DE RÉFÉRENCE : si une photo « visageN » (personnage N ; « visage » = personnage 1) ou
@@ -1767,16 +1800,26 @@ RÈGLES :
   reference photo », « EXACTLY the product in the "produit" reference photo »), puis ne décrit QUE
   ce qui est VISIBLE sur la photo (genre, âge apparent, cheveux, carnation…) + la tenue / les
   accessoires DEMANDÉS par les directions (gants…). N'invente AUCUN trait qui contredirait la photo.
+- PLANCHE PERSONNAGE : une photo « plancheN » est la PLANCHE (character sheet : plusieurs vues,
+  poses et expressions) du PERSONNAGE N. Écris "characterN" à partir du visage ET de la planche :
+  avec une photo « visageN », la description commence par « EXACTLY the person in the "visageN"
+  reference photo, matching the "plancheN" character sheet » ; sans photo visage, par « EXACTLY
+  the character in the "plancheN" character sheet ». Reprends ce que la planche montre de STABLE
+  (silhouette, proportions, couleurs, tenue, matières ; pour un objet ou une mascotte : forme,
+  yeux, bouche) ; jamais un détail qui contredit la planche.
 - PERSONNAGES NON DÉCRITS : DÉDUIS l'âge, le genre et le profil du SCRIPT (dialogues ET
   directions) : « peaux matures », « mes plis », « mes rides », « depuis la ménopause » → une
   femme de 55 ans et plus ; « je maquille », « mon salon » → un(e) maquilleur(se) professionnel(le) ;
   « il » / « elle » dans les directions → le genre. Les INDICES DÉDUITS DU SCRIPT fournis sont
   prioritaires. JAMAIS un profil qui contredit le script (pas une femme de 25 ans pour des
   « peaux matures »).
-- Aucun texte à l'image, aucun nom de marque autre que celui du produit du client.
+- Aucun texte à l'image, aucun nom de marque autre que celui du produit du client. Images grand
+  public : pas de mots médicaux ni de peau abîmée (« small red bumps » plutôt que « pimples »,
+  « bumpy texture » plutôt que « acne »), pas de sang ni de plaie.
 Réponds UNIQUEMENT avec le JSON :
   {"bible":{"character1":"...","character2":"...","character3":"","character4":"","set":"...",
-  "product":"...","positions":"..."}}
+  "product":"...","positions":"...","character1_traits":"...","character2_traits":"...",
+  "character3_traits":"","character4_traits":""}}
 """
 
 AVATAR_OMNI_CLIENT_SYSTEM_PROMPT = """\
@@ -1792,9 +1835,21 @@ RÈGLES :
 - LA DIRECTION DU CLIENT PRIME sur toute règle par défaut : si elle demande de compter sur les
   doigts, de regarder l'autre personnage plutôt que la caméra, un contact physique, un objet tenu,
   un geste précis… tu le fais, exactement, dans l'ordre indiqué. N'ajoute rien qu'elle ne demande pas.
-- "shot" : ce qui est PROPRE à l'image de départ de CE plan (cadrage, qui fait quoi au début,
-  objets en main, écarts par rapport aux positions par défaut) + l'ÉTAT DE CONTINUITÉ en cours.
-  Ne répète pas la bible. En anglais, 60 mots maximum.
+- DEUX PROMPTS SÉPARÉS PAR PLAN (en anglais) :
+  • "shot" = PROMPT IMAGE (Nano Banana Pro) de l'image de départ (keyframe), une image FIXE :
+    cadrage vertical 9:16 (close-up / medium / wide, angle), QUELS personnages sont à l'image
+    (« Character N », avec leur photo : « ("visageN" photo, "plancheN" sheet) », le produit
+    « ("produit" photo) »), leur pose et leur EXPRESSION au tout début du plan, objets en main,
+    écarts par rapport aux positions par défaut, lumière si elle change, décor (« "decor" photo »
+    si cette réf est utilisée) + l'ÉTAT DE CONTINUITÉ en cours. AUCUN mouvement, AUCUNE réplique.
+    Ne répète pas la bible. 60 mots maximum.
+  • "video" = PROMPT VIDÉO (Omni image-to-video) : UNIQUEMENT le MOUVEMENT — caméra (fixe,
+    léger push-in, handheld…), ce qui bouge, gestes, regards, réactions, dans l'ordre des tours —
+    et QUI PARLE (« Character N speaks… », ou l'objet : « Character 2 (the bottle) speaks… »).
+    AUCUNE description du décor, de la lumière ni de l'apparence des personnages (l'image de
+    départ les porte déjà). N'écris PAS les répliques (elles sont envoyées VERBATIM à part), ne
+    décris PAS la voix, ne la paraphrase pas (la fiche voix est injectée telle quelle par le CODE).
+    50 mots maximum.
 - "turns" : la vidéo du plan découpée en TOURS, dans l'ordre :
   • "text" : tranche EXACTE et CONTIGUË du dialogue, copiée MOT POUR MOT (rien d'ajouté, rien
     d'enlevé, mêmes [crochets]) ; la concaténation des "text" non vides = le dialogue COMPLET du
@@ -1817,39 +1872,73 @@ RÈGLES :
   bottle ». Aucun texte incrusté, sous-titre ni watermark (l'étiquette du produit du client peut
   être lisible si la direction le demande). Aucun nom de studio d'animation.
 - "refs_needed" : photos de référence utiles parmi "visage1".."visage4" (visage du personnage N
-  quand il est À L'IMAGE dans ce plan), "produit", "decor", "style" ; [] si aucune.
+  quand il est À L'IMAGE dans ce plan), "planche1".."planche4" (planche personnage / character
+  sheet du personnage N quand il est À L'IMAGE), "produit", "decor", "style" ; [] si aucune.
+
+EXEMPLE 1 — réaliste UGC, une personne face caméra présente le produit.
+  Dialogue : J'ai testé ce sérum pendant trente jours. Regardez ma peau.
+  🎬 Elle tient le flacon près de sa joue, face caméra, puis l'approche de l'objectif.
+  {"shot":"Medium close-up, vertical 9:16, eye level. Character 1 (\\"visage1\\" photo) alone in frame, centered, facing the camera with a curious half-smile, holding the serum bottle (\\"produit\\" photo) near her cheek, label toward the lens.",
+   "video":"Static handheld smartphone framing with a slight natural sway. Character 1 speaks to the camera, then brings the bottle closer to the lens and ends on a confident smile.",
+   "turns":[
+    {"text":"J'ai testé ce sérum pendant trente jours.","speaker":1,"avant":"","pendant":"speaks to the camera, bottle held near her cheek","apres":"","beats_avant":[],"beats_apres":[],"mute":false},
+    {"text":"Regardez ma peau.","speaker":1,"avant":"","pendant":"brings the bottle toward the lens","apres":"confident smile","beats_avant":[],"beats_apres":["sourire"],"mute":false}],
+   "state_after":"bottle held toward the camera","refs_needed":["visage1","produit"]}
+
+EXEMPLE 2 — 3D animée, un OBJET qui parle (personnage 2 = une gourde, parle ; personnage 1 =
+une jeune femme, muette).
+  Dialogue : Hé, tu m'as encore oubliée sur le bureau ! Bois un peu, ça va te réveiller.
+  🎬 La gourde interpelle la jeune femme assise à son bureau ; elle sursaute puis sourit et la prend.
+  {"shot":"Medium two-shot, vertical 9:16, slightly low angle. Character 2, the talking water bottle (\\"planche2\\" sheet), stands on the desk in the right foreground, eyes wide, mouth open; Character 1 (\\"visage1\\" photo, \\"planche1\\" sheet) sits on the left, turned toward the bottle, surprised face.",
+   "video":"Slow push-in toward the bottle. Character 2 (the bottle) speaks to Character 1: its mouth and eyes animate in sync, it hops and leans toward her. Character 1 stays silent, startles, then smiles and reaches for the bottle.",
+   "turns":[
+    {"text":"Hé, tu m'as encore oubliée sur le bureau !","speaker":2,"avant":"","pendant":"the bottle hops and leans toward Character 1","apres":"Character 1 startles","beats_avant":[],"beats_apres":["reaction"],"mute":false},
+    {"text":"Bois un peu, ça va te réveiller.","speaker":2,"avant":"","pendant":"the bottle tilts toward her, cheeky grin","apres":"Character 1 smiles and grabs the bottle","beats_avant":[],"beats_apres":["prendre"],"mute":false}],
+   "state_after":"Character 1 holds the bottle","refs_needed":["visage1","planche1","planche2"]}
+  (Les "text" sont copiés MOT POUR MOT du dialogue ; "video" ne décrit ni le bureau, ni la
+  lumière, ni l'apparence de la gourde ou de la femme, ni la voix.)
+
 Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par plan, dans l'ORDRE :
-  {"shots":[{"shot":"...","turns":[{"text":"...","speaker":1,"avant":"...","pendant":"...",
-  "apres":"...","beats_avant":[],"beats_apres":["sourire"],"mute":false}],"state_after":"...",
-  "refs_needed":["visage1"]}]}
+  {"shots":[{"shot":"...","video":"...","turns":[{"text":"...","speaker":1,"avant":"...",
+  "pendant":"...","apres":"...","beats_avant":[],"beats_apres":["sourire"],"mute":false}],
+  "state_after":"...","refs_needed":["visage1"]}]}
 """
 
 AVATAR_OMNI_DIRECTOR_SYSTEM_PROMPT = """\
 Tu es RÉALISATEUR de pubs UGC vidéo verticales 9:16. Tu reçois le SCRIPT (ce que disent les
 personnages, VERBATIM), un brief, les PERSONNAGES (jusqu'à 4, chacun « parle » ou « muet »), le
 produit, le décor et le STYLE. Tu écris le DÉCOUPAGE de la pub en BLOCS PAR IDÉE (hook, problème,
-révélation, démo, preuve, offre, CTA…), comme un document de découpage client.
+révélation, démo, preuve, offre, CTA…), comme un document de découpage client — un bloc par
+réplique (un seul personnage parle par bloc).
 
 RÈGLES :
 - "dialogue" : tranche EXACTE et CONTIGUË du script, copiée MOT POUR MOT (même ponctuation, mêmes
   tournures, mêmes fautes, mêmes [crochets]) ; la concaténation des dialogues, dans l'ordre, = le
   script ENTIER. Ne reformule, ne corrige, n'ajoute, n'enlève, ne réordonne RIEN.
-- Un bloc = une idée = un plan continu (≈ 5 à 25 s de parole). Le hook est son propre bloc.
+- UN BLOC = UNE RÉPLIQUE COMPLÈTE d'UN SEUL personnage (= une image + une vidéo de ≤ 10 s où ce
+  personnage parle). Dès que le locuteur change → NOUVEAU bloc. Ne coupe JAMAIS une réplique
+  courte d'un même personnage (« Non ! Pas celui-là ! Il est bourré d'huile ! » = UN bloc). Une
+  réplique de plus de ~10 s (≈ 25 mots) peut être coupée en blocs du même personnage, en fin de
+  phrase (le code la coupe de toute façon à la ponctuation). Le hook est son propre bloc.
+- "speaker" : NUMÉRO du personnage qui dit ce bloc (seuls les personnages qui « parlent »).
 - "title" : titre court en MAJUSCULES (ex. « HOOK », « LE PROBLÈME », « LA PREUVE », « CTA »).
 - "direction" : mise en scène EN FRANÇAIS, concrète et filmable : qui est à l'image, QUI PARLE
-  (nom ou « personnage N » ; un seul personnage parle à la fois), gestes calés sur des MOTS précis
-  du dialogue (« sur "quatre affaires", il lève quatre doigts »), regards, produit à l'image ou non
-  (et en main de qui), changements d'état (assis, produit posé…). Pas de texte à l'écran, pas de
-  musique. Un personnage MUET réagit (regards, expressions) mais ne parle jamais.
+  (nom ou « personnage N »), UN geste principal et l'expression du personnage qui parle, regards,
+  produit à l'image ou non (et en main de qui), changements d'état (assis, produit posé…). Pas de
+  texte à l'écran, pas de musique. Un personnage MUET réagit (regards, expressions) mais ne parle
+  jamais. Le PRODUIT est un objet neutre (jamais de visage) ; un produit qui parle est un
+  PERSONNAGE à part entière.
 - STYLE : respecte la consigne de style fournie (3D animée : personnages stylisés, objets ou
   mascottes qui parlent possibles ; humains toujours ADULTES, visages génériques ; aucun nom de
   studio).
 Réponds UNIQUEMENT avec le JSON :
-  {"blocks":[{"title":"HOOK","dialogue":"...","direction":"..."}]}
+  {"blocks":[{"title":"HOOK","speaker":1,"dialogue":"...","direction":"..."}]}
 """
 
 _CHARACTER_KEYS = tuple(f"character{i}" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1))
 _BIBLE_KEYS = (*_CHARACTER_KEYS, "set", "product", "positions")
+# 3 traits visuels clés par personnage (v2) : répétés EN TÊTE de chaque prompt image.
+_TRAIT_KEYS = tuple(f"character{i}_traits" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1))
 _BIBLE_LABELS = {
     **{f"character{i}": f"CHARACTER {i}" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1)},
     "set": "SET", "product": "PRODUCT", "positions": "DEFAULT POSITIONS",
@@ -1866,7 +1955,8 @@ def image_suffix(style: str = config_app.DEFAULT_OMNI_STYLE) -> str:
 
 
 def normalize_bible(raw: Any) -> dict[str, str]:
-    """Bible visuelle {character1..character4, set, product, positions} (dict ou JSON)."""
+    """Bible visuelle {character1..character4, set, product, positions, character1_traits..
+    character4_traits} (dict ou JSON). Traits : 3 traits clés par personnage (≤ 200 car.)."""
     data: Any = raw
     if isinstance(raw, str | bytes):
         try:
@@ -1875,7 +1965,78 @@ def normalize_bible(raw: Any) -> dict[str, str]:
             data = {}
     if not isinstance(data, dict):
         data = {}
-    return {k: " ".join(str(data.get(k) or "").split())[:1200] for k in _BIBLE_KEYS}
+    out = {k: " ".join(str(data.get(k) or "").split())[:1200] for k in _BIBLE_KEYS}
+    out.update({k: " ".join(str(data.get(k) or "").split())[:200] for k in _TRAIT_KEYS})
+    return out
+
+
+# Traits de REPLI (bible sans traits : anciennes pubs, bible éditée, simulation) : extraits de la
+# description du personnage, par priorité (cheveux / forme > marques distinctives > yeux >
+# couleurs > tenue), sans les mentions de style ni de photo.
+_TRAIT_PRIORITY = (
+    re.compile(r"\b(hair|haired|bald|ponytail|braids?|bun|shaped|shape|body|ball|blob)\b", re.I),
+    re.compile(r"\b(freckles?|beard|mustache|moustache|glasses|tattoos?|mole|scar)\b", re.I),
+    re.compile(r"\b(eyes?|eyed|eyebrows?)\b", re.I),
+    re.compile(r"\b(red|copper|ginger|auburn|blond\w*|brunette|black|white|pink|blue|green|yellow|"
+               r"brown|grey|gray|orange|purple|coral|golden|silver|beige)\b", re.I),
+    re.compile(r"\b(wears?|wearing|dress|shirt|robe|bathrobe|hoodie|jacket|sweater|apron|gloves)\b", re.I),
+)
+_TRAIT_SKIP_RE = re.compile(
+    r"\b(style|film|animated|animation|generic|celebrity|reference|sheet|photo|never|always|"
+    r"default|pose|silent|speaks?|frame)\b", re.I)
+_TRAIT_PREFIX_RE = re.compile(
+    r'^\s*EXACTLY the (?:person|character|product) in the "[\w-]+" (?:reference photo|character sheet)'
+    r'(?:,\s*matching the "[\w-]+" character sheet)?\s*[:—–-]?\s*', re.I)
+
+
+def derive_traits(desc: str) -> str:
+    """3 traits visuels clés tirés d'une description (repli quand la bible n'en a pas)."""
+    txt = _TRAIT_PREFIX_RE.sub("", str(desc or ""))
+    chunks = re.split(r"[,;.:()]|\s[—–]\s|\bwith\b|\band\b", txt)
+    cleaned = []
+    for c in chunks:
+        c = " ".join(c.split())
+        c = re.sub(r"^(?:she|he|it|they)\s+(?:has|have|is|wears)\s+", "", c, flags=re.I)
+        c = re.sub(r"^(?:a|an|the|has)\s+", "", c, flags=re.I)
+        if c and len(c.split()) <= 12 and not _TRAIT_SKIP_RE.search(c):
+            cleaned.append(c)
+    ranked: list[tuple[int, int, str]] = []
+    for i, c in enumerate(cleaned):
+        prio = next((p for p, rx in enumerate(_TRAIT_PRIORITY) if rx.search(c)), None)
+        if prio is not None:
+            ranked.append((prio, i, c))
+    picked = sorted(sorted(ranked)[:3], key=lambda t: t[1])
+    out = [c for _, _, c in picked] or cleaned[:3]
+    return ", ".join(dict.fromkeys(out))[:200]
+
+
+def character_traits(bible: Any, n: int) -> str:
+    """Traits clés du personnage N : ceux de la bible, sinon dérivés de sa description."""
+    b = normalize_bible(bible)
+    return b.get(f"character{int(n)}_traits") or derive_traits(b.get(f"character{int(n)}", ""))
+
+
+_SHOT_CHAR_RE = re.compile(r"\bCharacter\s+([1-4])\b", re.IGNORECASE)
+
+
+def traits_header(
+    bible: Any, characters: list[int] | None = None, names: dict[int, str] | None = None,
+) -> str:
+    """Ligne « KEY TRAITS » placée EN TÊTE du prompt image (avant la bible et THIS SHOT) :
+    3 traits clés par personnage à l'image (`characters` ; None = tous ceux décrits)."""
+    b = normalize_bible(bible)
+    nums = characters if characters else [
+        n for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1) if b.get(f"character{n}")]
+    parts = []
+    for n in dict.fromkeys(int(x) for x in nums):
+        traits = character_traits(b, n)
+        if not traits:
+            continue
+        name = (names or {}).get(n, "")
+        parts.append(f"Character {n}" + (f" ({name})" if name else "") + f": {traits}")
+    if not parts:
+        return ""
+    return "KEY TRAITS (identical in every shot, never change them) — " + "; ".join(parts) + "."
 
 
 def bible_text(bible: Any) -> str:
@@ -1885,11 +2046,19 @@ def bible_text(bible: Any) -> str:
     return "VISUAL BIBLE (identical in every shot) —\n" + "\n".join(lines)
 
 
-def compose_client_prompt_image(bible: Any, shot: str, style: str = config_app.DEFAULT_OMNI_STYLE) -> str:
-    """prompt_image d'un plan client = bible (injectée par le CODE) + ce qui change dans ce plan
-    + la ligne de style (réaliste UGC ou 3D animée). Aucun nom de studio (scrub_brand_names)."""
+def compose_client_prompt_image(
+    bible: Any, shot: str, style: str = config_app.DEFAULT_OMNI_STYLE, *,
+    names: dict[int, str] | None = None, characters: list[int] | None = None,
+) -> str:
+    """prompt_image d'un plan client = TRAITS CLÉS des personnages à l'image (EN TÊTE : ils
+    fixent l'identité) + bible (injectée par le CODE) + ce qui change dans ce plan + la ligne de
+    style (réaliste UGC ou 3D animée). Personnages à l'image : `characters`, sinon ceux cités
+    « Character N » dans le plan, sinon tous. Aucun nom de studio (scrub_brand_names)."""
     shot_txt = scrub_brand_names((shot or "").strip())
-    return f"{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}\n{image_suffix(style)}"
+    chars = characters or [int(m) for m in _SHOT_CHAR_RE.findall(shot_txt)] or None
+    head = traits_header(bible, chars, names)
+    head = f"{head}\n\n" if head else ""
+    return f"{head}{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}\n{image_suffix(style)}"
 
 
 def _third_party_names(dialogues: list[str]) -> list[str]:
@@ -1914,7 +2083,24 @@ def _scrub_third_party(text: str, names: list[str]) -> str:
 
 # Photos de référence lues par Claude pour écrire la bible (vision). « visage » (anciennes pubs)
 # = personnage 1 ; « visage1 ».. « visage4 » = personnages 1..4 ; « produit » = produit du client.
-BIBLE_PHOTO_KINDS = ("visage", *config_app.OMNI_FACE_KINDS, "produit")
+# « planche1 ».. « planche4 » = PLANCHE PERSONNAGE (character sheet : vues, poses, expressions)
+# du personnage N — lue comme le visage pour la bible, passée en réf à chaque keyframe où il est.
+PLANCHE_KINDS = tuple(f"planche{i}" for i in range(1, config_app.OMNI_MAX_CHARACTERS + 1))
+BIBLE_PHOTO_KINDS = ("visage", *config_app.OMNI_FACE_KINDS, *PLANCHE_KINDS, "produit")
+
+
+def planche_index(kind: object) -> int:
+    """Numéro du personnage d'une réf « planche N » (« planche2 » → 2), 0 sinon."""
+    k = str(kind or "").strip().lower()
+    return int(k[7:]) if k in PLANCHE_KINDS else 0
+
+
+def planche_kind(n: int) -> str:
+    return f"planche{int(n)}"
+
+
+def _planche_mention(kind: str) -> str:
+    return f'matching the "{kind}" character sheet'
 
 
 def _photo_target(kind: str) -> tuple[str, str] | None:
@@ -1925,6 +2111,9 @@ def _photo_target(kind: str) -> tuple[str, str] | None:
     n = config_app.omni_face_index(k)
     if n:
         return f"character{n}", f'EXACTLY the person in the "{k}" reference photo'
+    n = planche_index(k)
+    if n:
+        return f"character{n}", f'EXACTLY the character in the "{k}" character sheet'
     return None
 
 
@@ -1932,6 +2121,10 @@ def _photo_label(kind: str) -> str:
     k = str(kind or "").strip().lower()
     if k == "produit":
         return 'Photo de référence "produit" = PRODUIT DU CLIENT :'
+    n = planche_index(k)
+    if n:
+        return (f'Photo de référence "{k}" = PLANCHE PERSONNAGE du PERSONNAGE {n} / character sheet '
+                "(vues, poses et expressions du MÊME personnage) :")
     return f'Photo de référence "{k}" = PERSONNAGE {config_app.omni_face_index(k)} :'
 
 
@@ -1985,16 +2178,30 @@ def _hints_text(hints: dict[str, str]) -> str:
 def enforce_photo_prefixes(bible: dict[str, str], photo_kinds: list[str]) -> dict[str, str]:
     """Une photo de ce type existe → la description commence par « EXACTLY the … in the "<type>"
     reference photo » (imposé par le CODE, même si Claude l'a oublié). Une seule photo par champ
-    (la première : « visage » et « visage1 » visent tous deux le personnage 1)."""
+    (la première : « visage » et « visage1 » visent tous deux le personnage 1). Une PLANCHE
+    personnage N : avec une photo visage N, elle est mentionnée juste après le préfixe visage
+    (« …reference photo, matching the "plancheN" character sheet ») ; sans visage, c'est elle qui
+    fixe le préfixe (« EXACTLY the character in the "plancheN" character sheet »)."""
     out = dict(bible)
     done: set[str] = set()
-    for kind in dict.fromkeys(photo_kinds):
+    kinds = [str(k or "").strip().lower() for k in dict.fromkeys(photo_kinds)]
+    # Visages / produit d'abord (préfixe principal), puis les planches.
+    for kind in sorted(kinds, key=lambda k: bool(planche_index(k))):
         target = _photo_target(kind)
-        if target is None or target[0] in done:
+        if target is None:
             continue
         key, prefix = target
-        done.add(key)
         cur = (out.get(key) or "").strip()
+        if planche_index(kind) and key in done:
+            mention = _planche_mention(kind)
+            if mention not in cur:
+                anchor = ' reference photo' if ' reference photo' in cur else ' character sheet'
+                head, sep, tail = cur.partition(anchor)
+                out[key] = (f"{head}{sep}, {mention}{tail}" if sep else f"{cur}, {mention}")
+            continue
+        if key in done:
+            continue
+        done.add(key)
         if not cur.startswith(prefix):
             out[key] = prefix + (f" — {cur}" if cur else "")
     return out
@@ -2002,8 +2209,13 @@ def enforce_photo_prefixes(bible: dict[str, str], photo_kinds: list[str]) -> dic
 
 def _apply_bible_style(bible: dict[str, str], style: str) -> dict[str, str]:
     """Style 3D : la phrase de style ouvre le décor (donc chaque prompt image) ; aucun nom de
-    studio dans aucun champ (scrub_brand_names)."""
+    studio dans aucun champ (scrub_brand_names). Traits clés manquants → dérivés de la
+    description du personnage (toujours stockés dans la bible)."""
     out = {k: scrub_brand_names(v) if v else v for k, v in bible.items()}
+    for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
+        key = f"character{n}_traits"
+        if not out.get(key):
+            out[key] = derive_traits(out.get(f"character{n}", "")) if out.get(f"character{n}") else ""
     if config_app.normalize_omni_style(style) == "3d" and config_app.OMNI_3D_STYLE not in out.get("set", ""):
         out["set"] = f"{config_app.OMNI_3D_STYLE}. {out.get('set', '')}".strip()
     return out
@@ -2046,7 +2258,7 @@ def generate_client_bible(
     style: str = config_app.DEFAULT_OMNI_STYLE,
 ) -> dict[str, str]:
     """Bible visuelle EN (UNE fois par pub). Claude VOIT les photos « visage1..4 » (ou « visage »,
-    « visage2 ») et « produit » (vision) et lit les DIALOGUES : rien d'inventé ni de
+    « visage2 »), les planches personnage « planche1..4 » et « produit » (vision) et lit les DIALOGUES : rien d'inventé ni de
     contradictoire. Simulation → bible déterministe (champs, indices du script, préfixes des
     photos présentes). Style 3D : phrase de style dans le décor, jamais de nom de studio."""
     photos = [ph for ph in (photos or []) if str(ph.get("kind") or "").lower() in BIBLE_PHOTO_KINDS]
@@ -2120,7 +2332,8 @@ def _call_claude_client_visuals(
         )
     correction = (
         "\n\n[RAPPEL] Un objet par plan, dans l'ordre ; les \"text\" des tours sont des tranches "
-        "EXACTES du dialogue ; un seul speaker par tour. JSON strict. Traduis la direction, "
+        "EXACTES du dialogue ; un seul speaker par tour ; \"shot\" = image fixe, \"video\" = "
+        "mouvement + qui parle seulement. JSON strict. Traduis la direction, "
         "n'invente rien." if attempt > 0 else ""
     )
     user = (
@@ -2138,7 +2351,7 @@ def _call_claude_client_visuals(
     n_words = sum(config_app.spoken_word_count(p["dialogue"]) for p in plans)
     return _call_claude_json(
         cfg, system=system, user=user,
-        max_tokens=min(16000, 2000 + 500 * len(plans) + 40 * n_words), result_key="shots",
+        max_tokens=min(16000, 2000 + 600 * len(plans) + 40 * n_words), result_key="shots",
         empty_msg="visuels du découpage client manquants",
     )
 
@@ -2152,6 +2365,97 @@ def _client_canned_turns(plan: dict[str, Any], speaker: int = 1) -> tuple[str, l
     turns = [{"text": plan["dialogue"], "speaker": speaker, "pendant": ""}]
     refs = [config_app.omni_face_kind(n) for n in plan.get("faces") or [1]]
     return shot, turns, refs
+
+
+# ---------- Prompt VIDÉO (Omni image-to-video) : MOUVEMENT + QUI PARLE, jamais décor/apparence ----
+_VIDEO_CAMERA = {
+    "realiste": "Static handheld smartphone framing with a slight natural sway.",
+    "3d": "Smooth, slow animated camera push-in.",
+}
+_VIDEO_MAX_CHARS = 700
+
+
+def _video_who(n: int, names: dict[int, str] | None) -> str:
+    name = (names or {}).get(int(n or 1), "")
+    return f"Character {int(n or 1)}" + (f" ({name})" if name else "")
+
+
+def _speaks_phrase(who: str, style: str) -> str:
+    if config_app.normalize_omni_style(style) == "3d":
+        return f"{who} speaks, mouth and eyes animating in sync with the line"
+    return f"{who} speaks to the camera with natural lip-sync"
+
+
+def clean_video_prompt(video: str, dialogues: list[str]) -> str:
+    """Prompt vidéo nettoyé : sans marques, sans les répliques recopiées (elles partent VERBATIM à
+    part), espaces normalisés, longueur bornée."""
+    out = scrub_brand_names(str(video or ""))
+    for d in sorted({str(x).strip() for x in dialogues if str(x).strip()}, key=len, reverse=True):
+        if len(d) >= 12:
+            out = out.replace(d, "")
+    out = re.sub(r"«\s*»|\"\s*\"|“\s*”", "", out)
+    out = " ".join(out.split())
+    return out[:_VIDEO_MAX_CHARS].rstrip()
+
+
+def build_video_prompt(
+    turns: list[dict[str, Any]], *, style: str = config_app.DEFAULT_OMNI_STYLE,
+    names: dict[int, str] | None = None, direction: str = "", others_in_frame: bool = False,
+) -> str:
+    """Prompt vidéo de REPLI (Claude ne l'a pas écrit, ou simulation) : caméra + pour chaque tour
+    QUI parle et ses gestes (« avant / pendant / apres ») ; `direction` (mise en scène du client,
+    FR) remplace les gestes quand les tours n'en portent pas. Jamais de décor ni d'apparence (rien
+    n'est lu dans la bible), jamais la réplique ni la voix."""
+    style = config_app.normalize_omni_style(style)
+    parts = [_VIDEO_CAMERA[style]]
+    last_who = ""
+    for t in turns:
+        gestures = [str(t.get(k) or "").strip() for k in ("avant", "pendant", "apres")]
+        gestures = [g for g in gestures if g]
+        if t.get("mute"):
+            if gestures:
+                parts.append(f"Silent beat: {'; '.join(gestures)}.")
+            continue
+        who = _video_who(int(t.get("speaker") or 1), names)
+        if who == last_who and not gestures:
+            continue   # même locuteur, rien de neuf : pas de phrase répétée
+        sentence = _speaks_phrase(who, style) if who != last_who else f"{who} goes on speaking"
+        last_who = who
+        parts.append(f"{sentence}" + (f": {'; '.join(gestures)}." if gestures else "."))
+    if direction.strip():
+        parts.append(f"Follow the client staging in order (French, movement only): {direction.strip()}")
+    if others_in_frame:
+        parts.append("Characters who are not speaking stay silent and react naturally.")
+    if len(parts) == 1:
+        parts.append(_speaks_phrase(_video_who(1, names), style) + ".")
+    return clean_video_prompt(" ".join(parts), [str(t.get("text") or "") for t in turns])
+
+
+def _legacy_video_prompt(motion: str, style: str) -> str:
+    """Modes manuel / ancien auto (une personne face caméra) : caméra + « Character 1 parle » +
+    le mouvement du plan (prompt_motion, déjà sans décor ni dialogue)."""
+    style = config_app.normalize_omni_style(style)
+    who = _speaks_phrase(_video_who(1, None), style)
+    motion = " ".join(str(motion or "").split())
+    return clean_video_prompt(f"{_VIDEO_CAMERA[style]} {who}." + (f" {motion}" if motion else ""), [])
+
+
+def _shot_with_ref_mentions(shot: str, refs: list[str], uploaded: Any = None) -> str:
+    """Prompt image d'un plan : les réfs « decor » / « style » envoyées sont citées par leur type
+    (visages, planches et produit le sont déjà par les préfixes de la bible). `uploaded` = types
+    de photos réellement fournis (None = inconnu, ancien comportement) : une photo absente n'est
+    JAMAIS citée."""
+    out = shot.strip()
+    ok = None if uploaded is None else {config_app.normalize_omni_ref_kind(k) for k in uploaded}
+    if "decor" in refs and '"decor"' not in out and (ok is None or "decor" in ok):
+        out += ' Set exactly as in the "decor" reference photo.'
+    if "style" in refs and '"style"' not in out and (ok is None or "style" in ok):
+        out += ' Rendering style of the "style" reference photo.'
+    return out.strip()
+
+
+def _character_names(personas: Any) -> dict[int, str]:
+    return {c["n"]: c["name"] for c in characters_of(personas) if c.get("name")}
 
 
 def _canned_pendant(i: int, k: int, direction: str) -> str:
@@ -2212,6 +2516,7 @@ def bible_shows_product(bible: dict[str, str]) -> bool:
 def client_refs(
     refs: list[str], bible: dict[str, str], direction: str, product: str = "",
     has_third_party: bool = False, *, speakers: list[int] | None = None, first_speaker: int = 1,
+    planches: Any = None, uploaded: Any = None,
 ) -> list[str]:
     """Réfs d'un plan client, imposées par le CODE (Claude peut en oublier). Visages en
     « visage1 ».. « visage4 » (« visage » / « visage2 » d'anciennes réponses acceptés) :
@@ -2222,9 +2527,18 @@ def client_refs(
       direction le mentionne (ou nomme le produit) — sauf si le bloc cite une marque tierce et
       que la direction met un flacon en main sans nommer le produit du client (ce flacon est
       alors le produit concurrent : la photo du produit du client serait fausse).
-    Les autres réfs (décor, style) proposées par Claude sont gardées."""
+    - « plancheN » juste après « visageN » pour chaque personnage N à l'image dont la planche
+      personnage existe (`planches` = numéros des planches fournies ; None = on garde les
+      planches demandées par Claude pour les personnages à l'image) ;
+    Les autres réfs (décor, style) proposées par Claude sont gardées.
+    `uploaded` (types de photos RÉELLEMENT fournis ; None = inconnu → ancien comportement) : un
+    « visageN » / « produit » / « decor » / « style » sans photo n'est plus ajouté (un personnage à
+    l'image sans aucune photo garde « visageN » comme simple repère, jamais cité dans le texte)."""
     rn = [config_app.normalize_omni_ref_kind(r) for r in refs]
-    out = [r for r in rn if r not in config_app.OMNI_FACE_KINDS and r != "produit"]
+    out = [r for r in rn if r not in config_app.OMNI_FACE_KINDS and r != "produit"
+           and not planche_index(r)]
+    sheet_ok = ({int(n) for n in planches} if planches is not None
+                else {planche_index(r) for r in rn if planche_index(r)})
     d = direction or ""
     solo = bool(_CLIENT_SOLO_RE.search(d))
     spk = set(speakers or [])
@@ -2249,7 +2563,17 @@ def client_refs(
     else:
         wants_product = (names_product or bottle_in_direction or bible_shows_product(bible)
                          or ("produit" in rn and not has_third_party))
-    heads = [config_app.omni_face_kind(n) for n in faces]
+    up = None if uploaded is None else {config_app.normalize_omni_ref_kind(k) for k in uploaded}
+    heads: list[str] = []
+    for n in faces:
+        mine = [config_app.omni_face_kind(n)] + ([planche_kind(n)] if n in sheet_ok else [])
+        if up is not None:
+            mine = [k for k in (config_app.omni_face_kind(n), planche_kind(n)) if k in up] or [
+                config_app.omni_face_kind(n)]
+        heads.extend(mine)
+    if up is not None:
+        wants_product = wants_product and "produit" in up
+        out = [r for r in out if r not in ("decor", "style") or r in up]
     return heads + (["produit"] if wants_product else []) + out
 
 
@@ -2352,6 +2676,9 @@ def generate_avatar_omni_client_plan(
     names = _third_party_names([b["dialogue"] for b in blocks])
     bible = {k: _scrub_third_party(v, names) if v else v for k, v in bible.items()}
     faces = [n for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1) if bible.get(f"character{n}")]
+    planches = {planche_index(ph.get("kind")) for ph in photos or []} - {0}
+    uploaded = _uploaded_kinds(photos)
+    char_names = _character_names(personas)
     plans = [{
         "dialogue": b["dialogue"], "block_n": b["block_n"], "block_sub": 1, "block_count": 1,
         "block_title": b["title"], "timecode": b["timecode"], "direction": b["direction"],
@@ -2405,13 +2732,30 @@ def generate_avatar_omni_client_plan(
         refs = client_refs(rn if rn is not None else c_refs, bible, p["direction"], product,
                            has_third_party=bool(_third_party_names([p["dialogue"]])),
                            speakers=sorted(set(spoken_by)),
-                           first_speaker=spoken_by[0] if spoken_by else speakers[0])
+                           first_speaker=spoken_by[0] if spoken_by else speakers[0],
+                           planches=planches, uploaded=uploaded)
         total = sum(int(t["seconds"]) for t in timed)
         first_motion = next((t["pendant"] for t in timed if t["pendant"]), "")
+        if uploaded is not None:
+            shot = strip_photo_mentions(shot, uploaded)
+        shot = _shot_with_ref_mentions(shot, refs, uploaded)
+        spoken_texts = [p["dialogue"], *(t["text"] for t in timed)]
+        video = clean_video_prompt(_scrub_third_party(str(v.get("video") or "").strip(), names),
+                                   spoken_texts) if v else ""
+        if not video:
+            # Repli : gestes des tours de Claude ; sinon (simulation / IA indisponible) la
+            # direction du client UNE fois (les « pendant » canned la répètent par tour).
+            fb_turns = timed if not canned else [
+                {**t, "avant": "", "pendant": "", "apres": ""} for t in timed]
+            video = build_video_prompt(
+                fb_turns, style=style, names=char_names,
+                direction=p["direction"] if canned else "",
+                others_in_frame=sum(r in config_app.OMNI_FACE_KINDS for r in refs) > 1)
         shots.append({
             "n": i + 1, "shot_prompt": shot,
-            "prompt_image": compose_client_prompt_image(bible, shot, style),
+            "prompt_image": compose_client_prompt_image(bible, shot, style, names=char_names),
             "prompt_motion": first_motion,
+            "video_prompt": video,
             "refs_needed": refs,
             "dialogue": p["dialogue"], "segments": timed, "duration_s": total,
             **{k: p[k] for k in ("block_n", "block_sub", "block_count", "block_title",
@@ -2498,21 +2842,26 @@ def client_retime(
     return time_turns(rebuilt, wps_for=wps_for, max_spoken=max_spoken) if rebuilt else []
 
 
-def _director_doc(blocks: list[dict[str, str]]) -> str:
-    """Blocs {title, dialogue, direction} → document au format du découpage client :
+def _director_doc(blocks: list[dict[str, Any]], names: dict[int, str] | None = None) -> str:
+    """Blocs {title, dialogue, direction, speaker?} → document au format du découpage client :
     « BLOC N · — TITRE » / dialogue VERBATIM (ligne suivante : jamais confondu avec le titre) /
-    « 🎬 direction »."""
+    « 🗣️ Personnage N (nom) » (qui parle, si connu — v2) / « 🎬 direction »."""
     parts = []
     for i, b in enumerate(blocks, 1):
         title = " ".join(str(b.get("title") or "").replace("—", " ").upper().split())
-        title = re.sub(r"[🎬\[\]]", "", title).strip() or f"IDÉE {i}"
+        title = re.sub(r"[🎬🗣\[\]]", "", title).strip() or f"IDÉE {i}"
         direction = " ".join(str(b.get("direction") or "").replace(_CLIENT_DIRECTION_MARK, " ").split())
-        parts.append(f"BLOC {i} · — {title}\n{str(b['dialogue']).strip()}\n"
+        sp = b.get("speaker")
+        who = ""
+        if isinstance(sp, int) and 1 <= sp <= config_app.OMNI_MAX_CHARACTERS:
+            name = (names or {}).get(sp, "")
+            who = f"{_CLIENT_SPEAKER_MARK}️ Personnage {sp}" + (f" ({name})" if name else "") + "\n"
+        parts.append(f"BLOC {i} · — {title}\n{str(b['dialogue']).strip()}\n{who}"
                      f"{_CLIENT_DIRECTION_MARK} {direction or 'Le personnage 1 parle face caméra, gestes sobres.'}")
     return "\n\n".join(parts) + "\n"
 
 
-def _simulated_director_blocks(script: str, personas: Any, product: str) -> list[dict[str, str]]:
+def _simulated_director_blocks(script: str, personas: Any, product: str) -> list[dict[str, Any]]:
     """Découpage réalisateur DÉTERMINISTE (simulation) : hook = 1re phrase, puis blocs de 2
     phrases, dernier bloc « CTA » ; directions génériques FR. Dialogues = tranches exactes."""
     sentences = omni_timing.split_sentences(script)
@@ -2535,7 +2884,7 @@ def _simulated_director_blocks(script: str, personas: Any, product: str) -> list
             title = "CTA"
         else:
             title = f"IDÉE {i + 1}"
-        out.append({"title": title, "dialogue": d,
+        out.append({"title": title, "dialogue": d, "speaker": speaker["n"] if speaker else 1,
                     "direction": f"{who} parle face caméra, gestes sobres.{react}{prod}"})
     return out
 
@@ -2595,8 +2944,11 @@ def generate_avatar_omni_auto_doc(
             if aligned is None:
                 verbatim_fail = True
                 continue
+            valid = _speaking_numbers(personas)
             blocks = [{"title": str(it.get("title") or ""), "dialogue": d,
-                       "direction": str(it.get("direction") or "")}
+                       "direction": str(it.get("direction") or ""),
+                       "speaker": _int_or_none(it.get("speaker")) if _int_or_none(
+                           it.get("speaker")) in valid else None}
                       for it, d in zip(items, aligned, strict=True)]
             break
         if not blocks:
@@ -2612,7 +2964,7 @@ def generate_avatar_omni_auto_doc(
         raise BrainError("Le découpage automatique n'a produit aucun bloc.")
     if len(blocks) > config_app.OBJET_MAX_SHOTS:
         raise BrainError(f"{len(blocks)} blocs (> {config_app.OBJET_MAX_SHOTS}). Raccourcis le script.")
-    doc = _director_doc(blocks)
+    doc = _director_doc(blocks, _character_names(personas))
     parsed = parse_client_doc(doc)
     if realign_to_script(script, [b["dialogue"] for b in parsed]) is None:
         raise BrainVerbatimError("Document généré non conforme au script (texte altéré) — relance.")
@@ -2621,6 +2973,664 @@ def generate_avatar_omni_auto_doc(
     if bw:
         warnings.append(bw)
     return {"doc": doc, "blocks": len(parsed), "warnings": warnings}
+
+
+# ============================================================ PROMPTS IMAGE — PHOTOS & FILTRE GOOGLE
+def strip_photo_mentions(text: str, keep_kinds: Any = None) -> str:
+    """Retire les renvois aux photos de référence d'un prompt (« EXACTLY the person in the
+    "visage2" reference photo » → « the person », « ("visage2" photo, "planche2" sheet) »,
+    « Set exactly as in the "decor" reference photo »…). `keep_kinds` = types de photos
+    RÉELLEMENT fournis / envoyés (leurs renvois restent) ; None = tout retirer."""
+    keep = None if keep_kinds is None else {
+        config_app.normalize_omni_ref_kind(k) for k in keep_kinds if str(k or "").strip()}
+
+    def gone(kind: str) -> bool:
+        return keep is None or config_app.normalize_omni_ref_kind(kind) not in keep
+
+    def drop(m: re.Match[str]) -> str:
+        return "" if gone(m.group(1)) else m.group(0)
+
+    out = str(text or "")
+    out = re.sub(r'EXACTLY the (person|character|product) in the "([\w-]+)" '
+                 r'(?:reference photo|character sheet)',
+                 lambda m: f"the {m.group(1)}" if gone(m.group(2)) else m.group(0), out, flags=re.I)
+    out = re.sub(r',?\s*matching the "([\w-]+)" character sheet', drop, out, flags=re.I)
+    out = re.sub(r'\s*(?:Set exactly as in|Rendering style of) the "([\w-]+)" reference photo\.?',
+                 drop, out, flags=re.I)
+
+    def paren(m: re.Match[str]) -> str:
+        if keep is None:
+            return ""
+        items = [p.strip() for p in m.group(1).split(",") if p.strip()]
+        kept = [p for p in items
+                if not (km := re.match(r'"([\w-]+)"', p)) or not gone(km.group(1))]
+        if kept == items:
+            return m.group(0)
+        return f" ({', '.join(kept)})" if kept else ""
+
+    out = re.sub(r'\s*\(\s*("[\w-]+"[^)]*)\)', paren, out)
+    out = re.sub(r'\s*\b(?:in|from|as in) the "([\w-]+)" (?:reference photo|character sheet|photo|sheet)',
+                 drop, out, flags=re.I)
+    return out.strip()
+
+
+# Mots qui déclenchent le filtre de sécurité Google (Nano Banana) → reformulations neutres.
+# Ordre important : formes composées / plurielles d'abord. Insensible à la casse.
+_SAFE_WORDS: tuple[tuple[str, str], ...] = (
+    (r"\bpus[- ]?heads\b", "raised yellow bumps"),
+    (r"\bpus[- ]?head\b", "raised yellow bump"),
+    (r"\bpus[- ]filled\b", "yellow-tipped"),
+    (r"\bpustules\b", "raised yellow bumps"),
+    (r"\bpustule\b", "raised yellow bump"),
+    (r"\bpus\b", "yellow tint"),
+    (r"\b(?:white|black)heads\b", "tiny dots"),
+    (r"\b(?:white|black)head\b", "tiny dot"),
+    (r"\bblemishes\b", "small red dots"),
+    (r"\bblemished\b", "dotted"),
+    (r"\bblemish\b", "small red dot"),
+    (r"\bacne[- ]prone\b", "shiny"),
+    (r"\bacn[eé]\b", "bumpy texture"),
+    (r"\bpimples\b|\bzits\b", "bumps"),
+    (r"\bpimple\b|\bzit\b", "bump"),
+    (r"\bpimply\b", "bumpy"),
+    (r"\bskin (?:diseases?|conditions?|disorders?|infections?)\b", "uneven skin texture"),
+    (r"\bdiseases?\b|\bdiseased\b", "concern"),
+    (r"\binfections\b", "irritations"),
+    (r"\binfection\b", "irritation"),
+    (r"\binfected\b", "irritated"),
+    (r"\bwounds\b", "marks"),
+    (r"\bwounded\b|\bwound\b", "mark"),
+    (r"\blesions\b", "small red dots"),
+    (r"\blesion\b", "small red dot"),
+    (r"\brashes\b|\brash\b", "redness"),
+    (r"\bbloody\b|\bbleeding\b", "reddish"),
+    (r"\bblood\b", "red"),
+    (r"\bscabs\b", "dry spots"),
+    (r"\bscab\b", "dry spot"),
+    (r"\binflamed\b", "reddish"),
+    (r"\binflammation\b", "redness"),
+    (r"\boozing\b", "glossy"),
+    (r"\bgory\b|\bgore\b", ""),
+)
+# Reformulation STRICTE (2e essai après un refus du filtre) : plus de gros plan extrême de peau,
+# plus de texture de peau détaillée, ton cartoon et sage.
+_SAFE_STRICT: tuple[tuple[str, str], ...] = (
+    (r"\b(?:extreme|ultra|very tight|tight|macro)[- ]close[- ]?ups?\b", "close-up"),
+    (r"\bmacro(?: shot| lens| photo)?\b", "close-up"),
+    (r"\b(?:realistic |detailed |visible |natural )?skin texture\b", "smooth stylized skin"),
+    (r"\bpores\b", "skin"),
+    (r"\bsebum\b", "shine"),
+    (r"\boily\b|\bgreasy\b", "shiny"),
+    (r"\braised yellow bumps?\b", "tiny yellow dots"),
+    (r"\bbumpy texture\b", "slightly uneven texture"),
+    (r"\b(?:naked|nude|topless|bare-chested)\b", "fully clothed"),
+    (r"\bdisgust(?:ed|ing)?\b|\bgross\b", "surprised"),
+    (r"\bfurious\b|\benraged\b|\brage\b", "grumpy"),
+    (r"\bsqueez\w*", "touching"),
+)
+_SAFE_SUFFIX_3D = "Family-friendly 3D animated feature film look."
+_SAFE_SUFFIX_REAL = "Family-friendly, tasteful."
+_SAFE_STRICT_LINE = "Clean, non-graphic, wholesome depiction; nothing medical."
+_SAFE_3D_STYLES = {"3d", "objet", "objet_anime", "animated"}
+
+
+def google_safe_prompt(text: str, style: str = "", strict: bool = False) -> str:
+    """Prompt image « sûr » pour le filtre de sécurité Google (Nano Banana) : remplace les mots
+    filtrés (pus, pustule, blemish, acne, pimple, zit, whitehead, skin disease, infection, wound,
+    lesion, rash, blood…, pluriels compris, insensible à la casse) par des reformulations
+    (« raised yellow bumps », « bumpy texture », « small red dots »…) et ajoute UNE fois le
+    suffixe « family-friendly » (3D animé pour le style 3D / l'objet animé, sinon « tasteful »).
+    `strict` (2e essai après un refus) reformule plus fort : plus de gros plan extrême de peau,
+    plus de texture de peau détaillée, ton sage. Idempotent."""
+    out = str(text or "")
+    for pat, rep in _SAFE_WORDS:
+        out = re.sub(pat, rep, out, flags=re.IGNORECASE)
+    if strict:
+        for pat, rep in _SAFE_STRICT:
+            out = re.sub(pat, rep, out, flags=re.IGNORECASE)
+    out = re.sub(r"[ \t]{2,}", " ", out).strip()
+    st = str(style or "").strip().lower()
+    suffix = _SAFE_SUFFIX_3D if st in _SAFE_3D_STYLES else _SAFE_SUFFIX_REAL
+    low = out.lower()
+    adds = [s for s in ([suffix] + ([_SAFE_STRICT_LINE] if strict else []))
+            if s.lower().rstrip(".") not in low]
+    return (out + ("\n" + " ".join(adds) if adds else "")).strip()
+
+
+# ============================================================ AVATAR IA v2 — « AUDIO D'ABORD »
+# 1 BLOC = la réplique complète d'UN personnage (≤ 10 s estimées, sinon coupée à la ponctuation
+# par omni_timing.split_replica_blocks) = 1 keyframe = 1 voix ElevenLabs = 1 vidéo. Plus de tours.
+AVATAR_V2_SYSTEM_PROMPT = """\
+Tu es directeur photo de pubs vidéo verticales 9:16 (pipeline « audio d'abord »). Le découpage est
+DÉJÀ fait : pour chaque BLOC tu reçois son DIALOGUE (verbatim), sa DIRECTION DE MISE EN SCÈNE (🎬,
+en français, parfois vide) et QUI PARLE (déduit par le code). RÈGLE DU PIPELINE : 1 RÉPLIQUE = la
+réplique complète d'UN SEUL personnage = UNE image de départ (keyframe) = UNE vidéo de 10 s maximum
+où ce personnage dit sa réplique (le CODE coupe lui-même les répliques trop longues à la
+ponctuation). Une BIBLE VISUELLE (traits clés, personnages, décor, produit, positions) est ajoutée
+AUTOMATIQUEMENT en tête de chaque image : tu ne la recopies PAS. Tu TRADUIS la direction, tu
+n'INVENTES PAS de mise en scène.
+
+RÈGLES :
+- "replicas" : le dialogue du bloc en RÉPLIQUES, dans l'ordre. Normalement UNE SEULE (un bloc = un
+  personnage qui parle). Plusieurs SEULEMENT si le locuteur CHANGE dans le bloc (une par prise de
+  parole). Ne coupe JAMAIS la réplique d'un même personnage : « Non ! Pas celui-là ! Il est
+  bourré… » = UNE réplique.
+  • "text" : tranche EXACTE et CONTIGUË du dialogue, copiée MOT POUR MOT (mêmes [crochets], même
+    ponctuation) ; la concaténation des "text" = le dialogue COMPLET du bloc.
+  • "speaker" : numéro du personnage qui DIT ce texte (seuls les personnages qui « parlent »).
+  • "shot" = PROMPT IMAGE (Nano Banana Pro) de la keyframe, UNE image FIXE, en anglais, 60 mots
+    maximum : cadrage vertical 9:16, QUELS personnages sont à l'image (« Character N »), leur pose
+    et leur EXPRESSION au début de la réplique, objets en main, état de continuité. Le personnage
+    qui parle est bien visible, bouche visible. AUCUN mouvement, AUCUNE réplique, ne répète pas la
+    bible. Ne cite une photo de référence QUE parmi les PHOTOS FOURNIES (liste dans la demande) :
+    jamais « "visage2" photo » si seule la planche « planche2 » existe ; aucune photo fournie →
+    aucune citation de photo.
+  • "video" = PROMPT VIDÉO, en anglais : UN SEUL geste en 5 mots maximum + une expression courte
+    (ex. « points at the shelf, annoyed frown », « small nod, warm smile »). JAMAIS le décor, la
+    lumière, l'apparence des personnages, la réplique ni la voix (le CODE ajoute le reste).
+  • "refs_needed" : photos utiles parmi les PHOTOS FOURNIES : "plancheN" (réf principale du
+    personnage N) / "visageN" des personnages À L'IMAGE, "produit" si le produit est à l'image,
+    "decor", "style" ; [] si aucune.
+- PRODUIT ≠ PERSONNAGE-PRODUIT : la photo « produit » est un OBJET NEUTRE — ne lui donne JAMAIS de
+  visage, d'yeux ni de bouche. Un produit qui parle (ex. une gourde qui parle) est un PERSONNAGE
+  fourni en « planche perso N » : il n'a un visage QUE dans les répliques où ce personnage parle ou
+  est explicitement présent ; ailleurs, le produit apparaît comme un objet neutre (ou pas du tout).
+- LA DIRECTION DU CLIENT PRIME (gestes, regards, objets en main) : n'ajoute rien qu'elle ne demande
+  pas. CONTINUITÉ : un changement d'état reste vrai dans les blocs suivants tant que la direction ne
+  l'annule pas ; écris l'état à la fin du bloc dans "state_after" (anglais, court).
+- Images grand public (filtre Google) : pas de très gros plan de peau, pas de sang, de plaie, de
+  pus ni de mot médical (« small red bumps », « bumpy texture » plutôt que « pimples », « acne »).
+  Aucune marque tierce (un produit concurrent devient « a generic bottle »), aucun texte incrusté,
+  aucun nom de studio d'animation.
+
+EXEMPLE — 3D animée : personnage 1 = « Bouton » (un petit bouton rouge qui parle, planche1),
+personnage 2 = Lea (muette, planche2). Photos fournies : planche1, planche2, produit.
+  Dialogue : Non ! Pas celui-là ! Il est bourré d'huile, de beurre et de silicone !
+  🎬 Le Bouton, perché sur la joue de Lea, parle en agitant les bras ; Lea tient un pot de crème.
+  {"replicas":[{"text":"Non ! Pas celui-là ! Il est bourré d'huile, de beurre et de silicone !",
+    "speaker":1,
+    "shot":"Close-up on Lea's cheek, vertical 9:16, eye level. Character 1 (\\"planche1\\" sheet) stands on her left cheek, arms raised, angry frown, mouth open. Character 2 (\\"planche2\\" sheet) holds a cream jar, wide surprised eyes.",
+    "video":"waves both arms, angry frown","refs_needed":["planche1","planche2"]}],
+   "state_after":"Lea holds the cream jar"}
+
+Réponds UNIQUEMENT avec le JSON, EXACTEMENT UN objet par bloc, dans l'ORDRE :
+  {"shots":[{"replicas":[{"text":"...","speaker":1,"shot":"...","video":"...",
+  "refs_needed":["planche1"]}],"state_after":"..."}]}
+"""
+
+
+def _int_or_none(v: Any) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fold(text: str) -> str:
+    """Minuscules sans accents (« Léa » == « Lea ») pour comparer des noms."""
+    nfd = unicodedata.normalize("NFD", str(text or ""))
+    return "".join(ch for ch in nfd if not unicodedata.combining(ch)).lower()
+
+
+_SPEAK_VERB_RE = re.compile(
+    r"\b(?:parl\w*|dit|disent|repond\w*|crie\w*|s'exclame\w*|hurle\w*|interpelle\w*|"
+    r"raconte\w*|explique\w*|speaks?|says?|talks?|shouts?)\b")
+_NEG_BEFORE_RE = re.compile(r"(?:\bne|\bn'|\bsans|\bjamais)\s*$")
+
+
+def _character_mentions(text: str, personas: Any) -> list[tuple[int, int]]:
+    """[(position, n)] des personnages cités dans `text` (déjà replié par _fold) : nom,
+    « personnage N », « perso N », « character N »."""
+    by_n = {c["n"]: c for c in characters_of(personas)}
+    out: list[tuple[int, int]] = []
+    for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
+        pats = [rf"\bpersonnage\s*{n}\b", rf"\bperso\s*{n}\b", rf"\bcharacter\s*{n}\b"]
+        name = _fold((by_n.get(n) or {}).get("name") or "").strip()
+        if len(name) >= 2:
+            pats.append(rf"\b{re.escape(name)}\b")
+        for p in pats:
+            out += [(m.start(), n) for m in re.finditer(p, text)]
+    return sorted(out)
+
+
+_SUBJECT_PRONOUN_RE = re.compile(r"\bc\s*['’]?\s*est (?:lui|elle) qui\b")
+
+
+def resolve_block_speaker(hint: str, direction: str, personas: Any, speakers: list[int]) -> int:
+    """QUI PARLE dans un bloc : ligne « 🗣 » du document, sinon la direction (personnage cité
+    juste avant — ou juste après — un verbe de parole non nié : « c'est lui qui parle »,
+    « Lea répond », « le Bouton parle »), sinon le 1er personnage qui parle."""
+    valid = speakers or [1]
+    if hint:
+        h = _fold(hint)
+        for _, n in _character_mentions(h, personas):
+            if n in valid:
+                return n
+        digits = [int(x) for x in re.findall(r"\b([1-4])\b", h)]
+        if digits and digits[0] in valid:
+            return digits[0]
+    # 1er passage : sujet cité AVANT le verbe (« Gourdy parle ») ; 2e : cité après (« Parle :
+    # Marc ») — le 2e seulement si aucun sujet n'a été trouvé (« interpelle Julie » = objet).
+    sentences = [_fold(s) for s in re.split(r"(?<=[.!?;])\s+", direction or "")]
+    for after_ok in (False, True):
+        for t in sentences:
+            ms = _character_mentions(t, personas)
+            for vm in _SPEAK_VERB_RE.finditer(t):
+                if _NEG_BEFORE_RE.search(t[: vm.start()]):
+                    continue
+                before = [n for p, n in ms if p < vm.start() and n in valid]
+                after = [n for p, n in ms if p > vm.start() and n in valid]
+                if before and not after_ok:
+                    # Pronom sujet juste avant le verbe (« … sur la joue de Léa et c'est LUI qui
+                    # parle », « il parle ») : il renvoie au SUJET de la phrase (1er perso cité),
+                    # pas au dernier nom (souvent un complément).
+                    last_pos = max(p for p, n in ms if p < vm.start() and n in valid)
+                    if _SUBJECT_PRONOUN_RE.search(t[last_pos: vm.start()]):
+                        return before[0]
+                    return before[-1]
+                if after and after_ok:
+                    return after[0]
+    return valid[0]
+
+
+_MANUAL_SPEAKER_RE = re.compile(r"^\s*([^:\n]{1,40}?)\s*:\s+(?=\S)")
+
+
+def _manual_speaker_prefix(segment: str, personas: Any) -> tuple[int | None, str]:
+    """Mode manuel : « Lea : texte » / « Personnage 2 : texte » → (2, « texte ») ; sinon
+    (None, segment). Le préfixe n'est retiré que s'il désigne EXACTEMENT un personnage connu."""
+    m = _MANUAL_SPEAKER_RE.match(segment)
+    if not m:
+        return None, segment
+    label = _fold(m.group(1)).strip()
+    ms = _character_mentions(label, personas)
+    if len(ms) == 1 and ms[0][0] == 0 and len(label.split()) <= 3:
+        return ms[0][1], segment[m.end():]
+    return None, segment
+
+
+_PRODUCT_WORDS_RE = re.compile(
+    r"\b(?:bottles?|gourdes?|flacons?|jars?|pots?|tubs?|tubes?|cans?|canettes?|bouteilles?|"
+    r"packag\w*|products?|produits?|boxes|box|boites?|sachets?|sticks?|cremes?|creams?|masques?)\b")
+_LIVING_RE = re.compile(
+    r"\b(?:talking|anthropomorphic|mascot|personified|personnifi\w*|qui parle|vivante?s?|living|"
+    r"cartoon)\b")
+
+
+def product_characters(personas: Any, bible: Any, product: str = "") -> set[int]:
+    """Personnages qui SONT le produit personnifié (ex. « la gourde qui parle ») : leur
+    description cite un contenant / le produit ET les dit vivants (talking, mascot,
+    personnifié…). Ils n'ont un visage que dans les blocs où ils parlent ou sont présents."""
+    b = normalize_bible(bible)
+    by_n = {c["n"]: c for c in characters_of(personas)}
+    pwords = re.findall(r"\w{4,}", _fold(product))
+    out: set[int] = set()
+    for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
+        c = by_n.get(n) or {}
+        t = _fold(" ".join([str(c.get("name") or ""), str(c.get("en") or ""), str(c.get("fr") or ""),
+                            _TRAIT_PREFIX_RE.sub("", b.get(f"character{n}", ""))]))
+        if not t.strip() or not _LIVING_RE.search(t):
+            continue
+        if _PRODUCT_WORDS_RE.search(t) or any(re.search(rf"\b{re.escape(w)}\b", t) for w in pwords):
+            out.add(n)
+    return out
+
+
+_V2_VIDEO_MAX_WORDS = 12
+_CANNED_V2_VIDEO = {
+    "realiste": ("small nod, warm smile", "open hand gesture, confident look",
+                 "leans in slightly, raised eyebrows", "slight head tilt, sincere smile"),
+    "3d": ("bounces slightly, cheeky grin", "waves both arms, wide eyes",
+           "points forward, playful frown", "leans in, big smile"),
+}
+_CANNED_V2_FRAMING = ("Medium close-up", "Medium shot", "Close-up")
+
+
+_VIDEO_DECOR_RE = re.compile(
+    r"\b(?:camera|push-?in|pan|pans|zoom\w*|dolly|framing|frame|shot|handheld|light\w*|set|"
+    r"background|room|bathroom|kitchen|salon|decor|scene|mirror|counter|desk)\b", re.IGNORECASE)
+
+
+def short_video_prompt(video: str, dialogues: list[str]) -> str:
+    """Prompt vidéo v2 : geste + expression SEULEMENT (≤ 12 mots), sans réplique, sans
+    « Character N speaks » (ajouté par le code de l'animation), sans caméra ni décor (les
+    morceaux qui en parlent sont retirés), sans marque."""
+    out = clean_video_prompt(video, dialogues)
+    out = re.sub(r"\bCharacter\s+\d+(?:\s*\([^)]*\))?\s+(?:speaks|talks|says)(?:\s+to\s+[^,.;]*)?"
+                 r"(?:\s*,?\s*(?:and|then)\s+)?", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bCharacter\s+\d+(?:\s*\([^)]*\))?\s*", "", out, flags=re.IGNORECASE)
+    clauses = [" ".join(c.split()) for c in re.split(r"[.;,!?]|\bthen\b|\bwhile\b", out)]
+    kept = [c for c in clauses if c and not _VIDEO_DECOR_RE.search(c)]
+    words: list[str] = []
+    parts: list[str] = []
+    for c in kept:
+        w = c.split()
+        if words and len(words) + len(w) > _V2_VIDEO_MAX_WORDS:
+            break
+        words += w
+        parts.append(" ".join(w[:_V2_VIDEO_MAX_WORDS]))
+    return ", ".join(parts).strip(" ,;:.")
+
+
+def _uploaded_kinds(photos: list[dict[str, str]] | None) -> set[str] | None:
+    """Types des photos de réf réellement fournies au plan (visages, planches, produit) ; None si
+    aucune n'a été transmise (inconnu : rien n'est filtré au plan, le pipeline image nettoie)."""
+    kinds = {config_app.normalize_omni_ref_kind(ph.get("kind")) for ph in photos or []
+             if str(ph.get("kind") or "").strip()}
+    return kinds or None
+
+
+def _photos_text(uploaded: set[str] | None) -> str:
+    if uploaded is None:
+        return "(non transmises — ne cite AUCUNE photo dans \"shot\" ; refs_needed reste utile)"
+    return ", ".join(f'"{k}"' for k in sorted(uploaded)) + ' (+ éventuellement "decor", "style")'
+
+
+def audio_plan_refs(
+    raw: list[str] | None, *, speaker: int, in_frame: list[int], uploaded: set[str] | None,
+    wants_product: bool,
+) -> list[str]:
+    """Réfs d'un bloc v2 : pour chaque personnage à l'image (celui qui parle d'abord) sa PLANCHE
+    (réf principale) puis son visage — seulement les types RÉELLEMENT fournis (un personnage
+    sans aucune photo garde « visageN » comme repère, jamais cité dans le texte) ; « produit » si
+    à l'image (et fourni) ; « decor » / « style » demandés gardés (filtrés à l'envoi)."""
+    chars = [speaker] + sorted(n for n in set(in_frame) if n != speaker)
+    req = {config_app.normalize_omni_ref_kind(r) for r in raw or []}
+    out: list[str] = []
+    for n in chars:
+        sheet, face = planche_kind(n), config_app.omni_face_kind(n)
+        if uploaded is None:
+            out += ([sheet] if sheet in req else []) + [face]
+        else:
+            out += [k for k in (sheet, face) if k in uploaded] or [face]
+    if wants_product and (uploaded is None or "produit" in uploaded):
+        out.append("produit")
+    out += [r for r in ("decor", "style") if r in req]
+    return list(dict.fromkeys(out))
+
+
+def _canned_v2_shot(i: int, speaker: int, others: list[int], direction: str) -> str:
+    """Prompt image déterministe d'un bloc (simulation / IA indisponible) : le personnage qui
+    parle bien visible, bouche visible ; les autres à l'image se taisent ; direction du client
+    reprise telle quelle (rien d'inventé)."""
+    framing = _CANNED_V2_FRAMING[i % len(_CANNED_V2_FRAMING)]
+    parts = [f"{framing}, vertical 9:16, eye level. Character {speaker} faces the camera, "
+             "speaking, face and mouth clearly visible, expressive."]
+    if others:
+        who = ", ".join(f"Character {n}" for n in others)
+        parts.append(f"{who} {'is' if len(others) == 1 else 'are'} also in frame, silent, reacting.")
+    if direction.strip():
+        parts.append(f"Client staging (French, follow it exactly): {direction.strip()}")
+    return " ".join(parts)
+
+
+def _call_claude_audio_visuals(
+    cfg: ProviderConfig, product_name: str, ambiance: str, plans: list[dict[str, Any]],
+    persona: str = "", attempt: int = 0, *, bible: dict[str, str] | None = None,
+    state_before: str = "", personas: Any = None, style: str = config_app.DEFAULT_OMNI_STYLE,
+    uploaded: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    names = _character_names(personas)
+    lines = []
+    for p in plans:
+        title = f" — {p['block_title']}" if p.get("block_title") else ""
+        sp = p["speaker"]
+        who = f"Personnage {sp}" + (f" ({names[sp]})" if names.get(sp) else "")
+        lines.append(
+            f"[Bloc {p['label']}]{title}\n"
+            f"  Qui parle (déduit par le code ; à corriger seulement si le dialogue change de "
+            f"locuteur) : {who}\n"
+            f"  Direction du client (FR) : {p['direction'] or '(aucune — cadrage sobre face caméra)'}\n"
+            f"  Dialogue (VERBATIM) :\n    {p['dialogue']}"
+        )
+    correction = (
+        "\n\n[RAPPEL] Un objet par bloc, dans l'ordre ; les \"text\" sont des tranches EXACTES du "
+        "dialogue ; un seul speaker par réplique ; \"video\" = un geste de 5 mots max + une "
+        "expression. JSON strict." if attempt > 0 else ""
+    )
+    user = (
+        f"{bible_text(bible)}\n\n"
+        f"STYLE : {_style_text(style)}\n"
+        f"PERSONNAGES :\n{_characters_text(personas)}\n"
+        f"PHOTOS FOURNIES : {_photos_text(uploaded)}\n"
+        f"ÉTAT DE CONTINUITÉ AVANT CE LOT : {state_before or '(début de la vidéo)'}\n"
+        f"PRODUIT (visuel seulement, objet neutre) : {product_name.strip() or '(voir la bible)'}\n"
+        f"AMBIANCE / DÉCOR : {ambiance or '(voir la bible)'}\n\n"
+        "BLOCS :\n" + "\n".join(lines) + f"\n\nÉcris UNIQUEMENT le JSON (un objet par bloc).{correction}"
+    )
+    n_words = sum(config_app.spoken_word_count(p["dialogue"]) for p in plans)
+    return _call_claude_json(
+        cfg, system=AVATAR_V2_SYSTEM_PROMPT, user=user,
+        max_tokens=min(16000, 2000 + 500 * len(plans) + 30 * n_words), result_key="shots",
+        empty_msg="visuels des blocs manquants",
+    )
+
+
+def _replicas_from_claude(
+    v: dict[str, Any], dialogue: str, speakers: list[int],
+) -> list[dict[str, Any]] | None:
+    """Répliques renvoyées par Claude pour un bloc → [{text, speaker, shot, video, refs}] dont
+    les textes sont des tranches EXACTES du dialogue (realign_to_script). Forme courte acceptée
+    ({shot, video, speaker, refs_needed} = une seule réplique). None si texte modifié. Deux
+    répliques consécutives du MÊME personnage sont recollées (une réplique n'est jamais coupée
+    ici : seule la durée la coupe, à la ponctuation)."""
+    raw = v.get("replicas")
+    if not isinstance(raw, list) or not raw:
+        if not (v.get("shot") or v.get("video")):
+            return None
+        raw = [{**v, "text": dialogue}]
+    items = [r for r in raw if isinstance(r, dict) and str(r.get("text") or "").strip()]
+    if not items:
+        return None
+    aligned = realign_to_script(dialogue, [str(r["text"]) for r in items])
+    if aligned is None:
+        return None
+    merged: list[dict[str, Any]] = []
+    for r, txt in zip(items, aligned, strict=True):
+        sp = _int_or_none(r.get("speaker"))
+        rep = {"text": txt, "speaker": sp if sp in speakers else None,
+               "shot": str(r.get("shot") or "").strip(), "video": str(r.get("video") or "").strip(),
+               "refs": _norm_refs_needed(r.get("refs_needed"))}
+        if merged and rep["speaker"] is not None and rep["speaker"] == merged[-1]["speaker"]:
+            merged[-1]["text"] = f"{merged[-1]['text']} {rep['text']}"
+            continue
+        merged.append(rep)
+    return merged if realign_to_script(dialogue, [r["text"] for r in merged]) is not None else None
+
+
+def _split_replica(text: str, wps: float) -> list[str]:
+    """Réplique > AVATAR_MAX_BLOCK_S s estimées → blocs coupés à la ponctuation
+    (omni_timing.split_replica_blocks). Verbatim vérifié ; sinon la réplique reste entière."""
+    try:
+        pieces = [str(p) for p in omni_timing.split_replica_blocks(text, wps) if str(p).strip()]
+    except Exception:  # noqa: BLE001 - jamais bloquant : bloc trop long signalé plutôt que perdu
+        return [text]
+    aligned = realign_to_script(text, pieces) if pieces else None
+    return aligned or [text]
+
+
+def _replica_seconds(text: str, wps: float) -> float:
+    return float(omni_timing.replica_seconds(text, wps))
+
+
+def generate_avatar_audio_plan(
+    cfg: ProviderConfig, text: str, *, mode: str = "client", personas: Any = None,
+    product: str = "", ambiance: str = "", words_per_sec: float | None = None,
+    photos: list[dict[str, str]] | None = None, voice_profiles: Any = None,
+    style: str = config_app.DEFAULT_OMNI_STYLE,
+) -> dict[str, Any]:
+    """Plan Avatar IA v2 « audio d'abord » (modes client, auto validé = client, manuel).
+
+    1 BLOC = la réplique complète d'UN personnage (speaker) ; > AVATAR_MAX_BLOCK_S s estimées
+    (débit de la fiche voix du speaker) → coupée à la ponctuation (omni_timing.
+    split_replica_blocks). Dialogue VERBATIM (realign_to_script), `segments` = [] (plus de
+    tours). Bible visuelle (3 traits clés par personnage, répétés EN TÊTE de chaque prompt
+    image) ; seules les photos réellement fournies sont citées ; le produit reste un objet neutre
+    hors des blocs où le personnage-produit parle. `mode` : "client" (document BLOC N / 🗣 / 🎬)
+    ou "manual" (blocs séparés par une ligne vide, préfixe « Nom : » facultatif).
+    Renvoie {"ad", "shots", "warnings", "alerts", "max_words", "style", "blocks", "bible",
+    "pipeline_version": 2}. Shot : {n, speaker, dialogue, prompt_image, shot_prompt,
+    video_prompt, prompt_motion (= video_prompt), refs_needed, block_n, block_sub, block_count,
+    block_title, timecode, direction, duration_s, est_seconds, label, segments: []}."""
+    if not (text or "").strip():
+        raise BrainError("Script vide : écris ce que tes personnages doivent dire.")
+    if len(text) > MAX_SCRIPT_CHARS:
+        raise BrainError(
+            f"Document trop long ({len(text)} caractères, max {MAX_SCRIPT_CHARS}). "
+            "Découpe-le en plusieurs pubs."
+        )
+    style = config_app.normalize_omni_style(style)
+    speakers = _speaking_numbers(personas)
+    if mode == "manual":
+        segments = _split_script_manual(text)
+        if not segments:
+            raise BrainError(
+                "Découpage manuel vide : sépare tes blocs par une ligne vide (ou une ligne « --- »)."
+            )
+        blocks: list[dict[str, Any]] = []
+        for i, seg in enumerate(segments, 1):
+            sp, dialogue = _manual_speaker_prefix(seg, personas)
+            blocks.append({"block_n": i, "timecode": "", "title": "", "dialogue": dialogue,
+                           "direction": "", "speaker_hint": f"Personnage {sp}" if sp else ""})
+    else:
+        blocks = parse_client_doc(text)
+    if len(blocks) > config_app.OBJET_MAX_SHOTS:
+        raise BrainError(f"{len(blocks)} blocs (> {config_app.OBJET_MAX_SHOTS}). Réduis le texte "
+                         "ou fais plusieurs pubs.")
+    wps_for = _wps_resolver(voice_profiles, words_per_sec)
+    max_s = float(config_app.AVATAR_MAX_BLOCK_S)
+    bible = generate_client_bible(cfg, blocks, personas, product, ambiance, photos, style=style)
+    tp_names = _third_party_names([b["dialogue"] for b in blocks])
+    bible = {k: _scrub_third_party(v, tp_names) if v else v for k, v in bible.items()}
+    uploaded = _uploaded_kinds(photos)
+    char_names = _character_names(personas)
+    pchars = product_characters(personas, bible, product)
+    described = [n for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1) if bible.get(f"character{n}")]
+    plans = [{
+        "dialogue": b["dialogue"], "block_n": b["block_n"], "block_title": b["title"],
+        "timecode": b["timecode"], "direction": b["direction"], "label": str(b["block_n"]),
+        "speaker": resolve_block_speaker(str(b.get("speaker_hint") or ""), b["direction"],
+                                         personas, speakers),
+    } for b in blocks]
+    alerts: list[str] = []
+    warnings: list[str] = []
+    visuals: list[dict[str, Any]] = []
+    if not cfg.dry_run:
+        if not _brain_ready(cfg):
+            raise BrainError("Clé Anthropic manquante (Réglages).")
+        state = ""
+        for batch in _batches(plans, config_app.BRAIN_SHOTS_PER_BATCH):
+            call = functools.partial(_call_claude_audio_visuals, bible=bible, state_before=state,
+                                     personas=personas, style=style, uploaded=uploaded)
+            try:
+                got = _one_visuals_batch_with_retry(
+                    cfg, product, ambiance, batch, "", _BRAIN_MAX_ATTEMPTS, call=call,  # type: ignore[arg-type]
+                )
+            except _BrainRetryable:
+                got = []
+            got = [g for g in got if isinstance(g, dict)][: len(batch)]
+            if len(got) < len(batch):
+                labels = ", ".join(p["label"] for p in batch[len(got):])
+                alerts.append(
+                    f"Mise en scène non traduite (IA indisponible) pour le(s) bloc(s) {labels} : "
+                    "la direction du client est envoyée telle quelle — régénère plus tard."
+                )
+            if got and str(got[-1].get("state_after") or "").strip():
+                state = str(got[-1]["state_after"]).strip()
+            visuals.extend(got + [{}] * (len(batch) - len(got)))
+
+    shots: list[dict[str, Any]] = []
+    for i, p in enumerate(plans):
+        v = visuals[i] if i < len(visuals) else {}
+        reps = _replicas_from_claude(v, p["dialogue"], speakers) if v else None
+        if reps is None:
+            if v:
+                alerts.append(f"Bloc {p['label']} : répliques non conformes au dialogue (texte "
+                              "modifié) — mise en scène du client appliquée telle quelle.")
+            reps = [{"text": p["dialogue"], "speaker": p["speaker"], "shot": "", "video": "",
+                     "refs": None}]
+        pieces: list[tuple[dict[str, Any], str]] = []
+        for r in reps:
+            r["speaker"] = r["speaker"] or p["speaker"]
+            wps = wps_for(r["speaker"])
+            split = _split_replica(r["text"], wps) if _replica_seconds(r["text"], wps) > max_s else [r["text"]]
+            pieces += [(r, piece) for piece in split]
+        p["pieces"] = [piece for _, piece in pieces]
+        d = p["direction"] or ""
+        has_tp = bool(_third_party_names([p["dialogue"]]))
+        names_product = bool(product.strip()) and product.strip().lower() in d.lower()
+        bottle = bool(_CLIENT_BOTTLE_RE.search(d))
+        mentioned = {n for _, n in _character_mentions(_fold(d), personas)}
+        for k, (r, piece) in enumerate(pieces, 1):
+            sp = int(r["speaker"])
+            canned = not r["shot"]
+            if canned:
+                if _CLIENT_SOLO_RE.search(d):
+                    in_frame = {sp}
+                else:   # personnage-produit muet : à l'image seulement si la direction le cite
+                    in_frame = {n for n in described if n not in pchars or n in mentioned} | {sp}
+            else:
+                in_frame = ({config_app.omni_character_index(x) for x in r["refs"] or []}
+                            | {int(m) for m in _SHOT_CHAR_RE.findall(r["shot"])} | {sp}) - {0}
+            in_frame = {n for n in in_frame if n == sp or n in described}
+            if has_tp and bottle and not names_product:
+                wants_product = False   # flacon en main = le produit concurrent cité
+            elif canned:
+                wants_product = names_product or bottle or bible_shows_product(bible)
+            else:
+                wants_product = "produit" in (r["refs"] or []) or names_product
+            refs = audio_plan_refs(r["refs"], speaker=sp, in_frame=sorted(in_frame),
+                                   uploaded=uploaded, wants_product=wants_product)
+            others = sorted(n for n in in_frame if n != sp)
+            shot = (_scrub_third_party(r["shot"], tp_names) if r["shot"]
+                    else _canned_v2_shot(len(shots), sp, others, d))
+            if uploaded is not None:
+                shot = strip_photo_mentions(shot, uploaded)
+            shot = _shot_with_ref_mentions(shot, refs, uploaded)
+            talking_products = sorted(pchars & in_frame)
+            if talking_products:
+                who = ", ".join(f"Character {n}" for n in talking_products)
+                shot += (f" Only {who} (the talking product, exactly as on its character sheet) "
+                         "has a face; any other copy of the product is a plain inanimate object.")
+            elif "produit" in refs or pchars:
+                shot += " The product is a plain inanimate object: no face, no eyes, no mouth."
+            video = short_video_prompt(_scrub_third_party(r["video"], tp_names), [piece, p["dialogue"]])
+            if not video:
+                pool = _CANNED_V2_VIDEO[style]
+                video = pool[len(shots) % len(pool)]
+            est = _replica_seconds(piece, wps_for(sp))
+            label = p["label"] if len(pieces) == 1 else f"{p['label']}.{k}"
+            if est > max_s:
+                warnings.append(
+                    f"Plan {label} : ~{est:.0f} s estimées (max {max_s:.0f} s) — aucune ponctuation "
+                    "pour couper : raccourcis la réplique ou ajoute une virgule.")
+            shots.append({
+                "n": len(shots) + 1, "speaker": sp, "dialogue": piece,
+                "shot_prompt": shot,
+                "prompt_image": compose_client_prompt_image(
+                    bible, shot, style, names=char_names, characters=[sp, *others]),
+                "video_prompt": video, "prompt_motion": video,
+                "refs_needed": refs, "segments": [],
+                "block_n": p["block_n"], "block_sub": k, "block_count": len(pieces),
+                "block_title": p["block_title"], "timecode": p["timecode"], "direction": d,
+                "duration_s": config_app.avatar_block_clip_seconds(
+                    piece, est, cfg.avatar_video_model, config_app.DEFAULT_VOICE_MODE),
+                "est_seconds": round(est, 1), "label": label,
+            })
+    if len(shots) > config_app.OBJET_MAX_SHOTS:
+        raise BrainError(f"{len(shots)} blocs après découpage (> {config_app.OBJET_MAX_SHOTS}). "
+                         "Raccourcis le texte ou fais plusieurs pubs.")
+    # Garde-fou VERBATIM : les répliques reconstituent les dialogues des blocs, dans l'ordre.
+    for p in plans:
+        if realign_to_script(p["dialogue"], p["pieces"]) is None:
+            raise BrainVerbatimError(f"Bloc {p['label']} : découpage non conforme au dialogue.")
+    bw = bracket_values_warning([s["dialogue"] for s in shots])
+    if bw:
+        alerts.append(bw)
+    head = blocks[0]["title"] or blocks[0]["dialogue"]
+    return {"ad": _slug(head), "shots": shots, "warnings": warnings, "alerts": alerts,
+            "max_words": int(max_s * wps_for(speakers[0])), "style": style,
+            "blocks": len(blocks), "bible": bible, "pipeline_version": 2}
 
 
 _BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
@@ -3081,6 +4091,9 @@ def _renumber_shots(
         # → défaut « produit » si le plan n'en précise pas (corrigeable par plan dans la galerie).
         rn = _norm_refs_needed(s.get("refs_needed"))
         shot["refs_needed"] = rn if rn is not None else list(default)
+        video = str(s.get("video_prompt") or s.get("video") or "").strip()
+        if video:   # Avatar IA : prompt vidéo écrit par le modèle (sinon repli par l'appelant)
+            shot["video_prompt"] = scrub_brand_names(video)
         out.append(shot)
     return out
 

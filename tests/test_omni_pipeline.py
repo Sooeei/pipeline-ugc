@@ -65,7 +65,9 @@ def _ad(tmp_path, turns, *, personas=None, profiles=None, bible=None, style="rea
     img = media.make_placeholder_image(tmp_path / f"plan_{ad_id}.png", "x")
     dialogue = " ".join(t["text"] for t in turns if t.get("text"))
     cid = db.create_clip(ad_id, 1, dialogue, "m", prompt_image="p")
-    db.update_clip(cid, image_path=img, status="valide", block_n=1, segments=json.dumps(turns))
+    db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1, block_n=1,
+                   segments=json.dumps(turns))
+    db.set_ad_keyframes_ok(ad_id, True)   # « Valider les keyframes »
     return ad_id, cid
 
 
@@ -151,9 +153,13 @@ _TYPED4 = [{"path": "prod.png", "kind": "produit"}, {"path": "v4.png", "kind": "
 
 def test_four_faces_speaker_first_cap_and_warning():
     need = ["visage1", "visage2", "visage3", "visage4", "produit"]
+    # Cap par défaut relevé à 6 (Nano Banana Pro) : 4 visages + produit + ancre passent tous.
     sel = pipeline.select_omni_refs(need, _TYPED4, "anchor.png", first_speaker=3)
+    assert [r["path"] for r in sel] == ["v3.png", "v1.png", "v2.png", "v4.png", "prod.png", "anchor.png"]
+    assert pipeline.omni_refs_overflow_warning(need, _TYPED4, "anchor.png", first_speaker=3) == ""
+    sel = pipeline.select_omni_refs(need, _TYPED4, "anchor.png", first_speaker=3, cap=4)
     assert [r["path"] for r in sel] == ["v3.png", "v1.png", "v2.png", "v4.png"]
-    w = pipeline.omni_refs_overflow_warning(need, _TYPED4, "anchor.png", first_speaker=3, label="2")
+    w = pipeline.omni_refs_overflow_warning(need, _TYPED4, "anchor.png", first_speaker=3, label="2", cap=4)
     assert "trop de personnages à l'image pour ce plan" in w and w.startswith("Plan 2")
     two = pipeline.select_omni_refs(["visage1", "visage2", "produit"], _TYPED4, "anchor.png", first_speaker=2)
     assert [r["path"] for r in two] == ["v2.png", "v1.png", "prod.png", "anchor.png"]
@@ -219,8 +225,9 @@ def test_old_ad_visage_single_voice_text_motion_still_works(fake_google, tmp_pat
     img = media.make_placeholder_image(tmp_path / "old.png", "x")
     texts = ["Voici le premier segment.", "Et voici le second segment."]
     cid = db.create_clip(ad_id, 1, " ".join(texts), "m", prompt_image="p")
-    db.update_clip(cid, image_path=img, status="valide", block_n=1,
+    db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1, block_n=1,
                    segments=json.dumps([{"text": t, "motion": f"motion {i}"} for i, t in enumerate(texts)]))
+    db.set_ad_keyframes_ok(ad_id, True)
     db.add_ref_image(ad_id, "v.png", "visage")
     with TestClient(app) as c:
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
@@ -241,7 +248,8 @@ def test_old_single_clip_ad_unchanged_path(fake_google, tmp_path):
     db.set_ad_voice_profile(ad_id, json.dumps({"pace": "naturel"}))
     img = media.make_placeholder_image(tmp_path / "solo.png", "x")
     cid = db.create_clip(ad_id, 1, "Une phrase toute simple.", "smile", prompt_image="p")
-    db.update_clip(cid, image_path=img, status="valide")
+    db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1)
+    db.set_ad_keyframes_ok(ad_id, True)
     pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "solo")
     b = fake_google["bodies"][0]
     secs = config_app.omni_clip_seconds("Une phrase toute simple.", 2.5)
@@ -290,6 +298,23 @@ def _canned_client_plan(cfg, doc, personas=None, product="", ambiance="", words_
             "max_spoken": max_spoken, "style": style}
 
 
+def _canned_audio_plan(cfg, text, *, mode="client", personas=None, product="", ambiance="",
+                       words_per_sec=None, photos=None, voice_profiles=None, style="realiste"):
+    """Plan v2 factice : 1 bloc = 1 réplique, speaker 1 puis 3, pas de tours."""
+    blocks = brain.parse_client_doc(text) if mode == "client" else [
+        {"block_n": 1, "title": "", "dialogue": text, "direction": "", "timecode": ""}]
+    shots = [{"n": i, "speaker": 1 if i == 1 else 3, "dialogue": b["dialogue"],
+              "prompt_image": f"img {i}", "shot_prompt": f"shot {i}", "video_prompt": "small nod",
+              "prompt_motion": "small nod", "refs_needed": ["visage1"], "segments": [],
+              "block_n": b["block_n"], "block_sub": 1, "block_count": 1, "block_title": b["title"],
+              "timecode": b["timecode"], "direction": b["direction"], "duration_s": 6,
+              "est_seconds": 4.0, "label": str(b["block_n"])}
+             for i, b in enumerate(blocks, 1)]
+    return {"ad": "doc", "shots": shots, "warnings": [], "alerts": [], "max_words": 25,
+            "blocks": len(blocks), "bible": {"character1": P1, "set": "a salon"}, "style": style,
+            "pipeline_version": 2}
+
+
 DOC = ("BLOC 1 · [0:00–0:05] — HOOK Première phrase du hook ici. Deuxième phrase du hook.\n"
        "🎬 Il parle face caméra.\n"
        "BLOC 2 · — CTA Le lien est en bas.\n🎬 Il pointe vers le bas.")
@@ -312,9 +337,14 @@ def stub_brain(monkeypatch):
         seen["client_kw"] = kw
         return _canned_client_plan(*a, **kw)
 
+    def audio_plan(*a, **kw):
+        seen["audio_kw"] = kw
+        return _canned_audio_plan(*a, **kw)
+
     monkeypatch.setattr(brain, "generate_avatar_omni_auto_doc", auto_doc, raising=False)
     monkeypatch.setattr(brain, "translate_personas", translate)
     monkeypatch.setattr(brain, "generate_avatar_omni_client_plan", client_plan)
+    monkeypatch.setattr(brain, "generate_avatar_audio_plan", audio_plan)
     return seen
 
 
@@ -339,10 +369,10 @@ def test_auto_mode_returns_doc_for_review_then_validate_runs_client_pipeline(stu
         assert r.status_code == 200, r.text
         plan = r.json()
     assert plan["mode"] == "client" and len(plan["shots"]) == 2
-    kw = stub_brain["client_kw"]
-    assert kw["style"] == "3d" and kw["max_spoken"] == 8 and set(kw["voice_profiles"]) == {"1", "3"}
-    for s in plan["shots"]:
-        assert s["duration_s"] == sum(t["seconds"] for t in s["segments"])
+    # Document validé → découpage v2 (1 bloc = 1 réplique, sans tours)
+    kw = stub_brain["audio_kw"]
+    assert kw["mode"] == "client" and kw["style"] == "3d" and set(kw["voice_profiles"]) == {"1", "3"}
+    assert all(s["segments"] == [] and s["speaker"] in (1, 3) for s in plan["shots"])
     assert plan["estimate"]["seconds_total"] == sum(s["duration_s"] for s in plan["shots"])
     with TestClient(app) as c:
         assert c.post("/api/avatar-omni/validate-doc", json={**body, "doc": "  "}).status_code == 400
@@ -370,29 +400,27 @@ def test_generate_images_stores_style_personas_voices_and_turns(stub_brain):
     assert [c2["n"] for c2 in ad["personas"]["characters"]] == [1, 3]
     assert set(ad["voice_sheets"]) == {"1", "3"} and ad["voice_locked"] == {"1": False, "3": False}
     assert sorted(r["kind"] for r in db.list_ref_images_typed(ad_id)) == ["visage1", "visage3"]
-    seg = ad["shots"][0]["segments"]
-    assert seg and all(set(s) >= {"speaker", "seconds", "max_words", "mute"} for s in seg)
+    # v2 : plus de tours ; le speaker de chaque bloc est stocké sur le clip, pub en pipeline 2
+    assert ad["shots"][0]["segments"] == []
+    assert [int(cl["speaker"]) for cl in db.clips_for_ad(ad_id)] == [1, 3]
+    assert row["pipeline_version"] == 2
     assert ad["max_spoken"] == 8
 
 
 def test_manual_mode_passes_new_kwargs(monkeypatch):
     seen = {}
 
-    def manual(cfg, script, persona="", product="", ambiance="", manual=False, words_per_sec=None, *,
-               voice_profiles=None, style="realiste", max_spoken=8):
-        seen.update(manual=manual, style=style, max_spoken=max_spoken, vp=voice_profiles)
-        turns = omni_timing.split_turns([{"text": script, "speaker": 1}],
-                                        wps_for=lambda n: 2.5, max_spoken=max_spoken)
-        return {"ad": "m", "shots": [{"n": 1, "prompt_image": "i", "prompt_motion": "m", "dialogue": script,
-                                      "segments": turns}], "warnings": [], "max_words": 17}
+    def manual(cfg, text, **kw):
+        seen.update(mode=kw["mode"], style=kw["style"], vp=kw["voice_profiles"])
+        return _canned_audio_plan(cfg, text, **kw)
 
-    monkeypatch.setattr(brain, "generate_avatar_omni_plan", manual)
+    monkeypatch.setattr(brain, "generate_avatar_audio_plan", manual)
     with TestClient(app) as c:
         c.post("/api/settings", json={"dry_run": True, "omni_max_spoken_clip_seconds": 6})
         r = c.post("/api/avatar-omni/plan", json={"script": "Une phrase. Deux phrases.", "mode": "manual",
                                                   "voice_profile": {"pace": "naturel"}}).json()
         c.post("/api/settings", json={"dry_run": True, "omni_max_spoken_clip_seconds": 8})
-    assert seen == {"manual": True, "style": "realiste", "max_spoken": 6, "vp": {"1": config_app.normalize_voice_profile({"pace": "naturel"})}}
+    assert seen == {"mode": "manual", "style": "realiste", "vp": {"1": config_app.normalize_voice_profile({"pace": "naturel"})}}
     assert r["mode"] == "manual" and r["max_spoken"] == 6 and r["shots"][0]["duration_s"] > 0
 
 
@@ -432,26 +460,29 @@ def test_e2e_auto_doc_validate_images_animate_dry_run():
         plan = c.post("/api/avatar-omni/validate-doc", json={**body, "doc": auto["doc"]})
         assert plan.status_code == 200, plan.text
         plan = plan.json()
-        spoken = [t["text"] for s in plan["shots"] for t in s["segments"] if t["text"]]
+        # v2 : 1 bloc = 1 réplique d'UN personnage, ≤ 10 s estimées, sans tours
+        spoken = [s["dialogue"] for s in plan["shots"]]
         assert brain.realign_to_script(script, spoken) is not None            # verbatim de bout en bout
-        assert all(t["seconds"] <= 8 for s in plan["shots"] for t in s["segments"] if t["text"])
+        assert all(s["segments"] == [] and s["speaker"] == 1 for s in plan["shots"])
+        assert all(s["est_seconds"] <= config_app.AVATAR_MAX_BLOCK_S for s in plan["shots"])
         r = c.post("/api/avatar-omni/generate-images", data={
             "ad_name": "e2e", "shots_json": json.dumps(plan["shots"]), "confirm": "true",
             "voice_profiles": json.dumps({"1": VP_MALE}), "personas": json.dumps(plan["personas"])})
         assert r.status_code == 200, r.text
         ad_id = r.json()["ad_id"]
         _wait(c, r.json()["job_id"])
+        assert db.get_ad(ad_id)["pipeline_version"] == 2
+        # L'animation v2 (voix ElevenLabs + vidéo) est couverte par les tests des agents Audio /
+        # Vidéo ; ici on vérifie que l'ANCIEN pipeline accepte encore ces plans (pub v1).
+        db.set_ad_fields(ad_id, pipeline_version=1)
         for cl in db.clips_for_ad(ad_id):
             if not cl.get("image_path"):
                 db.update_clip(int(cl["id"]), image_path=str(media.make_placeholder_image(
                     config_app.MEDIA_DIR / f"e2e_{cl['id']}.png", "x")))
-            db.update_clip(int(cl["id"]), status="valide")
+        assert c.post(f"/api/avatar-omni/keyframes/validate-all/{ad_id}").status_code == 200
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True}).json()
-        assert r["requests"] == sum(len(s["segments"]) for s in plan["shots"])
+        assert r["requests"] == len(plan["shots"])                            # 1 requête par bloc
         assert _wait(c, r["job_id"])["state"] != "echec"
-        dlg = c.post(f"/api/avatar-omni/dialogue/{db.clips_for_ad(ad_id)[0]['id']}",
-                     json={"text": "Une phrase. " * 12})
-        assert dlg.status_code == 200 and dlg.json()["warning"] == ""
 
 
 @pytest.mark.skipif(not _HAS_BRAIN, reason="TODO : fonctions cerveau de l'agent 4 pas encore là")
@@ -482,7 +513,8 @@ def test_e2e_four_characters_real_brain_dry_run():
         _wait(c, r.json()["job_id"])
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
     assert ad["style"] == "3d" and set(ad["voice_sheets"]) == {"1", "2", "4"}
-    assert len(json.loads(db.get_clip(ad["shots"][0]["clip_id"])["refs_sent"])) <= 4
+    assert len(json.loads(db.get_clip(ad["shots"][0]["clip_id"])["refs_sent"])) <= \
+        config_app.MAX_REFS_PER_IMAGE_CALL_OMNI
 
 
 def _wait(c, job_id, tries=400):

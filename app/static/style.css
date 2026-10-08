@@ -477,3 +477,81 @@ mark.ao-val { background: color-mix(in srgb, var(--warn) 25%, transparent); colo
 .engine-box { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .engine-box legend { padding: 0 6px; font-weight: 600; }
 label.check.disabled { opacity: .45; cursor: not-allowed; }
+
+/* Avatar IA : étape Keyframes (image de départ validée avant toute vidéo) */
+.obj-shot .kf-thumb { position: relative; }
+.obj-shot .kf-src {
+  position: absolute; left: 8px; top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(0, 0, 0, .65); color: #fff; border: 1px solid var(--line);
+}
+.obj-shot .kf-src.up { border-color: var(--warn); color: var(--warn); }
+.obj-shot.kf-missing { border-color: var(--err); }
+.obj-shot .kf-mode-lbl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.obj-shot .kf-mode-lbl select { flex: 1 1 140px; min-width: 0; font-size: 12px; margin: 0; }
+.obj-shot .kf-corr { width: 100%; font-size: 12px; box-sizing: border-box; }
+.obj-shot .kf-full summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.obj-shot .kf-full .pi-ro { margin-top: 4px; }
+.obj-shot .btn[disabled] { opacity: .45; cursor: not-allowed; }
+.ao-res { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.ao-res select { margin: 0; }
+#aoAnimateBtn[disabled] { opacity: .45; cursor: not-allowed; }
+.ao-kf-gate { margin: 6px 0; color: var(--warn); font-size: 13px; }
+/* Bibliothèque Avatar IA : keyframe à côté de la vidéo */
+.clip-grid.ao-lib-grid { grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); }
+.ao-lib-media { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #000; }
+.ao-lib-media figure { margin: 0; display: flex; flex-direction: column; min-width: 0; }
+.ao-lib-media img, .ao-lib-media video { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; display: block; background: #000; }
+.ao-lib-media figcaption { font-size: 11px; color: #ccc; text-align: center; padding: 2px 0; }
+.ao-lib-empty { aspect-ratio: 9 / 16; display: flex; align-items: center; justify-content: center; text-align: center; padding: 6px; font-size: 12px; color: var(--muted); }
+.ao-lib-empty.err { color: var(--err); }
+.ao-lib-prompts { padding: 0 10px 6px; font-size: 12px; }
+.ao-lib-prompts summary { cursor: pointer; color: var(--muted); }
+.ao-lib-prompts .lbl { color: var(--muted); margin-top: 6px; }
+.ao-lib-prompts .pi-ro { color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; max-height: 220px; overflow-y: auto; }
+.ao-lib-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 10px 10px; }
+
+/* ---------- Avatar IA v2 « audio-first » ---------- */
+/* Presets client + bibliothèque de personnages */
+.ao-presets { margin: 10px 0 14px; }
+.ao-presets .row { align-items: center; flex-wrap: wrap; gap: 6px; }
+.ao-presets select { margin: 0; min-width: 200px; }
+.ao-charlib summary { cursor: pointer; font-size: 13px; margin-top: 6px; }
+.ao-charlib-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: 10px; margin-top: 8px; }
+.ao-charlib-card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--panel); }
+.ao-charlib-card img, .ao-charlib-card .thumb.empty { width: 100%; aspect-ratio: 1; object-fit: contain; background: #000; border-radius: 6px; }
+.ao-charlib-card .thumb.empty { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.ao-charlib-info { display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.ao-charlib-card .row { gap: 4px; flex-wrap: wrap; align-items: center; }
+.ao-charlib-card select { margin: 0; font-size: 12px; }
+/* Voice ID ElevenLabs dans les fiches voix */
+.ao-elv { grid-column: 1 / -1; }
+.ao-elv-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+.ao-elv-row select, .ao-elv-row input { flex: 1 1 160px; min-width: 0; margin: 0; }
+/* Étape 4b : voix par bloc */
+.ao-voices-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.ao-voice-row { border: 2px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel); display: flex; flex-direction: column; gap: 6px; }
+.ao-voice-row.valide { border-color: var(--ok); }
+.ao-voice-row.kf-missing { border-color: var(--err); }
+.ao-voice-row.busy { opacity: .55; pointer-events: none; }
+.ao-vr-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ao-vr-text { font-size: 13px; }
+.ao-vr-player audio { width: 100%; max-width: 420px; height: 34px; }
+.ao-voice-row .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ao-voice-row .badge, .lib-ad-head .badge, .clip .meta .badge {
+  font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted);
+}
+.ao-voice-row .badge.ok { color: #0c1a10; background: var(--ok); font-weight: 600; }
+.clip .meta .badge.ko { color: #1a0c0c; background: var(--err); font-weight: 600; }
+.lib-ad-head .badge.ao-old-pipe { border: 1px solid var(--warn); color: var(--warn); font-weight: 400; font-size: 11px; vertical-align: middle; }
+/* Keyframes v2 : planche perso à côté du keyframe du Plan 1 */
+.obj-shot .ao-planche-cmp { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; background: var(--panel-2); }
+.obj-shot .ao-planche { margin: 0; flex: 1 1 45%; min-width: 0; }
+.obj-shot .ao-planche img, .obj-shot .ao-planche .thumb.empty { width: 100%; aspect-ratio: 1; object-fit: contain; background: #000; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); }
+.obj-shot .ao-planche figcaption { font-size: 11px; color: var(--muted); text-align: center; }
+.obj-shot .ao-planche-tip { flex-basis: 100%; font-size: 12px; color: var(--warn); }
+/* Vidéo v2 : options + assemblage ; bibliothèque : keyframe | frame 0 | vidéo */
+#aoV2Options { gap: 14px; flex-wrap: wrap; }
+#aoFinalBox { margin: 12px 0; }
+#aoFinalLinks { gap: 8px; flex-wrap: wrap; }
+.ao-lib-media.v2 { grid-template-columns: 1fr 1fr 1fr; }
+.ao-lib-final { gap: 8px; margin: 4px 0 8px; }

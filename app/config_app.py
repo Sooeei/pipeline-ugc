@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -165,8 +166,9 @@ def normalize_claude_code_model(value: object) -> str:
     return v if v in CLAUDE_CODE_MODELS else DEFAULT_CLAUDE_CODE_MODEL
 
 
-# Avatar IA (Omni) : 4 réfs max, dans cet ordre de priorité : visage > visage2 > produit > ancre.
-MAX_REFS_PER_IMAGE_CALL_OMNI = 4
+# Avatar IA (Omni) : 6 réfs max (Nano Banana Pro accepte beaucoup d'images) — ordre de priorité :
+# visage (+ sa planche personnage) de chaque personnage à l'image > produit > ancre > le reste.
+MAX_REFS_PER_IMAGE_CALL_OMNI = 6
 OMNI_REF_PRIORITY = ("visage", "visage2", "produit")
 
 # Garde-fou budget : si le coût ESTIMÉ d'une génération dépasse ce plafond ($), on bloque et on
@@ -178,6 +180,7 @@ SPEND_CAP_USD_DEFAULT = 25.0
 COST_USD_PER_IMAGE: dict[str, float] = {
     "google/gemini-2.5-flash-image": 0.04,
     "google/gemini-3.1-flash-image": 0.045,
+    "google/gemini-3-pro-image-preview": 0.134,   # Nano Banana Pro (keyframes Avatar IA)
 }
 COST_USD_PER_IMAGE_DEFAULT = 0.04
 NANO_BANANA_COST_PER_IMAGE_USD = 0.04   # repli / estimation d'avance (voir COST_USD_PER_IMAGE)
@@ -302,15 +305,23 @@ class ImageModelCfg(TypedDict):
 
 OBJET_IMAGE_MODELS: dict[str, ImageModelCfg] = {
     "nano_banana_2": {
-        "label": "Nano Banana 2 (défaut) — google/gemini-3.1-flash-image",
+        "label": "Nano Banana 2 (moins cher) — google/gemini-3.1-flash-image",
         "model": "google/gemini-3.1-flash-image",
+    },
+    "nano_banana_pro": {
+        "label": "Nano Banana Pro (défaut, qualité max) — google/gemini-3-pro-image-preview",
+        "model": "google/gemini-3-pro-image-preview",
     },
     "nano_banana_legacy": {
         "label": "Nano Banana legacy (moins cher) — google/gemini-2.5-flash-image",
         "model": "google/gemini-2.5-flash-image",
     },
 }
-DEFAULT_OBJET_IMAGE_MODEL = "nano_banana_2"
+# Objet animé passe en Pro (v2) ; les réglages restés à nano_banana_2 sont migrés UNE fois
+# (db._migrate_objet_image_model).
+DEFAULT_OBJET_IMAGE_MODEL = "nano_banana_pro"
+# Keyframes Avatar IA (Omni) : TOUJOURS Nano Banana Pro, quel que soit le réglage global.
+OMNI_KEYFRAME_IMAGE_MODEL = "nano_banana_pro"
 
 
 # Modèle VIDÉO « Objet animé » (Grok Imagine / xAI) — CHOISI DANS LES RÉGLAGES.
@@ -462,7 +473,11 @@ OMNI_INTRO_SECONDS = 1                 # respiration muette avant la 1re répliq
 OMNI_SILENT_CLIP_SECONDS = 4           # durée d'un plan sans dialogue
 OMNI_COST_PER_SECOND_USD = 0.10        # 720p (vidéo + voix)
 OMNI_MAX_PARALLEL = 2
-OMNI_RESOLUTION = "720p"
+OMNI_RESOLUTION = "720p"               # résolution par défaut (ads.omni_resolution)
+OMNI_RESOLUTIONS = ("720p", "1080p")
+# Étape Keyframes : start_frame = keyframe validé en 1re image ; texte_seul = Omni sans image.
+OMNI_KEYFRAME_MODES = ("start_frame", "texte_seul")
+DEFAULT_OMNI_KEYFRAME_MODE = "start_frame"
 OMNI_REQUEST_TIMEOUT = 600             # s — appel direct synchrone (pas de mode background)
 OMNI_POLL_EVERY = 5                    # s — sondage du fichier vidéo (livraison par URI)
 OMNI_POLL_TIMEOUT = 600
@@ -518,6 +533,115 @@ OMNI_MAX_SPOKEN_CLIP_SECONDS = 8
 OMNI_MAX_MUTE_CLIP_SECONDS = 10
 OMNI_BEATS_TO_MUTE_TURN_S = 3.0        # Σ gestes ≥ 3 s → sortis dans un tour muet séparé
 
+# ---------- Avatar IA v2 « audio-first » (voix ElevenLabs + 1 appel vidéo par bloc) ----------
+class AvatarVideoModelCfg(TypedDict):
+    label: str
+    model: str                     # id fournisseur (xAI / OpenRouter / Google)
+    durations: tuple[int, ...]     # durées entières acceptées (s), croissantes
+    cost_per_second_usd: float     # tarif vidéo estimé ($/s)
+    cost_per_input_image_usd: float  # coût de l'image de départ (0 si inclus)
+
+
+AVATAR_VIDEO_MODELS: dict[str, AvatarVideoModelCfg] = {
+    "grok": {
+        "label": "Grok Imagine (xAI, défaut)", "model": "grok-imagine-video-1.5",
+        "durations": tuple(range(GROK_MIN_CLIP_SECONDS, GROK_MAX_CLIP_SECONDS + 1)),
+        "cost_per_second_usd": GROK_COST_PER_SECOND_USD,
+        "cost_per_input_image_usd": GROK_COST_USD_PER_INPUT_IMAGE,
+    },
+    "kling": {
+        "label": "Kling 3.0 (OpenRouter)", "model": MASHUP_VIDEO_MODELS["kling_pro"]["model"],
+        "durations": tuple(range(3, 16)),
+        "cost_per_second_usd": MASHUP_VIDEO_MODELS["kling_pro"]["cost_per_second_usd"],
+        "cost_per_input_image_usd": 0.0,
+    },
+    "omni": {
+        "label": "Google Omni", "model": OMNI_MODEL,
+        "durations": tuple(range(OMNI_MIN_CLIP_SECONDS, OMNI_MAX_CLIP_SECONDS + 1)),
+        "cost_per_second_usd": OMNI_COST_PER_SECOND_USD,
+        "cost_per_input_image_usd": 0.0,
+    },
+}
+DEFAULT_AVATAR_VIDEO_MODEL = "grok"
+AVATAR_CLIP_MARGIN_S = 0.5             # marge après la fin de l'audio (s)
+AVATAR_MAX_BLOCK_S = 10                # durée estimée max d'un bloc (au-delà : coupe à la ponctuation)
+DRIFT_THRESHOLD_DEFAULT = 0.80         # score de similarité frame 0 / keyframe sous lequel = dérive
+ELEVENLABS_API_BASE = "https://api.elevenlabs.io"
+ELEVENLABS_MODEL_ID = "eleven_v3"
+ELEVENLABS_COST_PER_1K_CHARS_USD = 0.30  # estimation, à vérifier selon l'abonnement
+VOICE_MODES = ("elevenlabs", "native")
+# Modes voix ACTIFS. « elevenlabs » (piste maître) est DÉSACTIVÉ pour l'instant : la voix est
+# toujours générée nativement par le modèle vidéo. Le code ElevenLabs reste en place ; pour le
+# réactiver : remettre "elevenlabs" ici (et AO_ELEVENLABS_ENABLED dans app.js).
+ACTIVE_VOICE_MODES = ("native",)
+DEFAULT_VOICE_MODE = "native"
+# Mode « native » : durée du clip estimée depuis le TEXTE de la réplique (pas d'audio mesuré).
+AVATAR_NATIVE_WORDS_PER_SEC = 2.5      # débit moyen FR
+AVATAR_NATIVE_MARGIN_S = 1.0           # marge après la réplique (s)
+
+
+def normalize_avatar_video_model(value: object) -> str:
+    """Modèle vidéo Avatar IA v2 : « grok » | « kling » | « omni » ; inconnu/vide → grok."""
+    v = str(value or "").strip().lower()
+    return v if v in AVATAR_VIDEO_MODELS else DEFAULT_AVATAR_VIDEO_MODEL
+
+
+def normalize_voice_mode(value: object) -> str:
+    """Mode voix Avatar IA v2 EFFECTIF : un mode inactif (ex. « elevenlabs », désactivé),
+    inconnu ou vide → DEFAULT_VOICE_MODE (« native »)."""
+    v = str(value or "").strip().lower()
+    return v if v in ACTIVE_VOICE_MODES else DEFAULT_VOICE_MODE
+
+
+def normalize_drift_threshold(value: object) -> float:
+    """Seuil de dérive borné à [0, 1] ; invalide → DRIFT_THRESHOLD_DEFAULT."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DRIFT_THRESHOLD_DEFAULT
+    if v != v:   # NaN
+        return DRIFT_THRESHOLD_DEFAULT
+    return max(0.0, min(1.0, v))
+
+
+def avatar_clip_seconds(wav_seconds: float, model: str) -> int:
+    """Durée du clip vidéo pour un audio de `wav_seconds` : plus petite durée ACCEPTÉE par le
+    modèle ≥ ceil(wav + AVATAR_CLIP_MARGIN_S), bornée au max du modèle (et au min)."""
+    import math
+
+    durations = sorted(AVATAR_VIDEO_MODELS[normalize_avatar_video_model(model)]["durations"])
+    try:
+        wav = max(0.0, float(wav_seconds or 0))
+    except (TypeError, ValueError):
+        wav = 0.0
+    target = math.ceil(round(wav + AVATAR_CLIP_MARGIN_S, 6))
+    for d in durations:
+        if d >= target:
+            return d
+    return durations[-1]
+
+
+def avatar_native_clip_seconds(text: str, model: str) -> int:
+    """Durée du clip en mode voix « native » (aucun audio mesuré) : mots / 2,5 mots/s + 1 s de
+    marge, arrondie à la plus petite durée ACCEPTÉE par le modèle, plafonnée à son max."""
+    import math
+
+    durations = sorted(AVATAR_VIDEO_MODELS[normalize_avatar_video_model(model)]["durations"])
+    words = len(re.sub(r"\[([^\]]*)\]", r"\1", str(text or "")).split())
+    target = math.ceil(round(words / AVATAR_NATIVE_WORDS_PER_SEC + AVATAR_NATIVE_MARGIN_S, 6))
+    for d in durations:
+        if d >= target:
+            return d
+    return durations[-1]
+
+
+def avatar_block_clip_seconds(text: str, wav_seconds: float, model: str, voice_mode: str) -> int:
+    """Durée d'un bloc selon le mode voix : « native » → depuis le texte ; sinon → audio + 0,5 s."""
+    if normalize_voice_mode(voice_mode) == "native":
+        return avatar_native_clip_seconds(text, model)
+    return avatar_clip_seconds(wav_seconds, model)
+
+
 # ---------- Style d'une pub Avatar IA (ads.style) ----------
 OMNI_3D_STYLE = ("3D animated feature film style, stylized characters, soft skin shading, big "
                  "expressive eyes, cinematic lighting")
@@ -534,6 +658,21 @@ OMNI_MAX_CHARACTERS = 4
 # visage1 ; « visage2 » inchangé. Le type STOCKÉ reste celui reçu ; toute comparaison passe par
 # normalize_omni_ref_kind (ne pas changer normalize_refs_needed : partagé avec Objet / Mashup).
 OMNI_FACE_KINDS = tuple(f"visage{i}" for i in range(1, OMNI_MAX_CHARACTERS + 1))
+# Planches personnage (character sheet) : planche1..planche4 = personnage N, passée en réf Nano
+# Banana juste après le visage du même personnage, à chaque keyframe où il apparaît.
+OMNI_SHEET_KINDS = tuple(f"planche{i}" for i in range(1, OMNI_MAX_CHARACTERS + 1))
+
+
+def normalize_omni_resolution(value: object) -> str:
+    """Résolution Omni : « 720p » | « 1080p » ; inconnue/vide → OMNI_RESOLUTION."""
+    v = str(value or "").strip().lower()
+    return v if v in OMNI_RESOLUTIONS else OMNI_RESOLUTION
+
+
+def normalize_keyframe_mode(value: object) -> str:
+    """Mode keyframe d'un plan : « start_frame » (défaut) | « texte_seul »."""
+    v = str(value or "").strip().lower()
+    return v if v in OMNI_KEYFRAME_MODES else DEFAULT_OMNI_KEYFRAME_MODE
 
 
 def normalize_omni_style(value: object) -> str:
@@ -556,6 +695,22 @@ def omni_face_index(kind: object) -> int:
     """Numéro de personnage d'un type de réf visage (« visage » → 1, « visage3 » → 3), 0 sinon."""
     k = normalize_omni_ref_kind(kind)
     return int(k[6:]) if k in OMNI_FACE_KINDS else 0
+
+
+def omni_sheet_kind(n: int) -> str:
+    """Type de réf de la planche personnage du personnage n (1..4)."""
+    return f"planche{int(n)}"
+
+
+def omni_sheet_index(kind: object) -> int:
+    """Numéro de personnage d'une planche personnage (« planche2 » → 2), 0 sinon."""
+    k = normalize_omni_ref_kind(kind)
+    return int(k[7:]) if k in OMNI_SHEET_KINDS else 0
+
+
+def omni_character_index(kind: object) -> int:
+    """Numéro de personnage d'une réf visage OU planche, 0 sinon."""
+    return omni_face_index(kind) or omni_sheet_index(kind)
 
 
 def clamp_omni_max_spoken(value: object) -> int:
@@ -644,7 +799,16 @@ def normalize_voice_profile(raw: Any) -> dict[str, str]:
         "tone": tone if tone in GROK_VOICE_STYLES else DEFAULT_GROK_VOICE_STYLE,
         "pace": pace if pace in GROK_VOICE_PACES else DEFAULT_GROK_VOICE_PACE,
         "extra": _voice_text(data.get("extra")),
+        # Voix ElevenLabs du perso (pipeline v2). Identifiant technique : JAMAIS dans un prompt
+        # (voice_sheet ne le lit pas).
+        "voice_id": _voice_id(data.get("voice_id")),
     }
+
+
+def _voice_id(value: Any) -> str:
+    """voice_id ElevenLabs nettoyé : alphanumérique (+ « _ » / « - »), ≤ 64 car."""
+    s = "".join(ch for ch in str(value or "").strip() if ch.isalnum() or ch in "_-")
+    return s[:64]
 
 
 def voice_words_per_sec(profile: Any) -> float:

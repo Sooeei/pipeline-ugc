@@ -97,8 +97,9 @@ def test_dashboard():
         r = c.get("/api/dashboard")
         assert r.status_code == 200
         body = r.json()
-        assert "gradium_credits" in body
-        assert "heygen_quota" in body
+        # v2 : Gradium / HeyGen retirés ; soldes OpenRouter / xAI / ElevenLabs.
+        assert "gradium_credits" not in body and "heygen_quota" not in body
+        assert {"openrouter", "xai", "elevenlabs"} <= set(body)
         assert "total_videos" in body
 
 

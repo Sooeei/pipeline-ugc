@@ -25,6 +25,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (
     __version__,
+    avatar_video,
+    avatar_voices,
     bootstrap,
     brain,
     claude_code,
@@ -34,6 +36,7 @@ from . import (
     jobs,
     media,
     pipeline,
+    presets,
 )
 from . import providers as prov
 from .settings_service import load_provider_config
@@ -63,6 +66,11 @@ def create_app() -> FastAPI:
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
+
+    # Avatar IA v2 « audio-first » : endpoints dans leurs modules (voix, vidéo, presets/persos).
+    app.include_router(avatar_voices.router)
+    app.include_router(avatar_video.router)
+    app.include_router(presets.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -115,6 +123,7 @@ def create_app() -> FastAPI:
             "openrouter_api_key_set": bool(s.get("openrouter_api_key", "").strip()),
             "xai_api_key_set": bool(s.get("xai_api_key", "").strip()),
             "gemini_api_key_set": bool(s.get("gemini_api_key", "").strip()),
+            "elevenlabs_api_key_set": bool(s.get("elevenlabs_api_key", "").strip()),
             "anthropic_api_key_set": bool(s.get("anthropic_api_key", "").strip()),
             "gradium_model": s.get("gradium_model", config_app.DEFAULT_GRADIUM_MODEL),
             "heygen_voice_id": s.get("heygen_voice_id", ""),
@@ -169,6 +178,14 @@ def create_app() -> FastAPI:
             "spend_cap_usd": _spend_cap_usd(),
             "omni_daily_request_limit": _omni_daily_limit(),
             "omni_max_spoken_clip_seconds": _omni_max_spoken(),
+            # Avatar IA v2 : modèle vidéo par défaut des nouvelles pubs + seuil de dérive.
+            "avatar_video_model": config_app.normalize_avatar_video_model(s.get("avatar_video_model")),
+            "avatar_video_models": [
+                {"key": k, "label": m["label"]} for k, m in config_app.AVATAR_VIDEO_MODELS.items()
+            ],
+            "drift_threshold": config_app.normalize_drift_threshold(
+                s.get("drift_threshold", config_app.DRIFT_THRESHOLD_DEFAULT)
+            ),
             "dry_run": s.get("dry_run", "1") == "1",
             "avatars": db.list_avatars(),
             "voices": db.list_voices(),
@@ -192,6 +209,10 @@ def create_app() -> FastAPI:
         gemini_key = prov._clean_key(body.gemini_api_key)
         if gemini_key:
             db.set_setting("gemini_api_key", gemini_key)
+        # Avatar IA v2 : clé ElevenLabs (voix des blocs), nettoyée (vide = garder).
+        elevenlabs_key = prov._clean_key(body.elevenlabs_api_key)
+        if elevenlabs_key:
+            db.set_setting("elevenlabs_api_key", elevenlabs_key)
         if body.anthropic_api_key.strip():
             db.set_setting("anthropic_api_key", body.anthropic_api_key.strip())
         cc_token = prov._clean_key(body.claude_code_token)
@@ -212,10 +233,12 @@ def create_app() -> FastAPI:
             f"openrouter={_m(body.openrouter_api_key)} xai={_m(body.xai_api_key)} "
             f"gradium={_m(body.gradium_api_key)} heygen={_m(body.heygen_api_key)} "
             f"anthropic={_m(body.anthropic_api_key)} gemini={_m(body.gemini_api_key)} "
-            f"claude_code_token={_m(body.claude_code_token)} | "
+            f"claude_code_token={_m(body.claude_code_token)} "
+            f"elevenlabs={_m(body.elevenlabs_api_key)} | "
             f"écrit: openrouter={'OUI' if openrouter_key else 'NON (gardé)'} "
             f"xai={'OUI' if xai_key else 'NON (gardé)'} "
-            f"gemini={'OUI' if gemini_key else 'NON (gardé)'} | "
+            f"gemini={'OUI' if gemini_key else 'NON (gardé)'} "
+            f"elevenlabs={'OUI' if elevenlabs_key else 'NON (gardé)'} | "
             f"DB après: openrouter_set={bool((db.get_setting('openrouter_api_key') or '').strip())} "
             f"xai_set={bool((db.get_setting('xai_api_key') or '').strip())} "
             f"gemini_set={bool((db.get_setting('gemini_api_key') or '').strip())}",
@@ -265,6 +288,12 @@ def create_app() -> FastAPI:
         if body.omni_max_spoken_clip_seconds is not None:
             db.set_setting("omni_max_spoken_clip_seconds",
                            str(config_app.clamp_omni_max_spoken(body.omni_max_spoken_clip_seconds)))
+        if body.avatar_video_model:   # "" = ne pas changer
+            db.set_setting("avatar_video_model",
+                           config_app.normalize_avatar_video_model(body.avatar_video_model))
+        if body.drift_threshold is not None:
+            db.set_setting("drift_threshold",
+                           str(config_app.normalize_drift_threshold(body.drift_threshold)))
         db.set_setting("dry_run", "1" if body.dry_run else "0")
         db.log_activity("reglages", "Réglages enregistrés.")
         return {"ok": True}
@@ -488,10 +517,29 @@ def create_app() -> FastAPI:
     @app.get("/api/dashboard")
     def dashboard() -> dict[str, Any]:
         cfg = load_provider_config()
+
+        def _safe(fn: Callable[[], Any]) -> dict[str, Any]:
+            # Tableau de bord : un fournisseur en panne ne doit JAMAIS faire échouer la page.
+            try:
+                res = fn()
+                return res if isinstance(res, dict) else {}
+            except Exception as exc:  # noqa: BLE001
+                prov._log_detail(f"dashboard : {exc!r}")
+                return {}
+
+        def _elevenlabs() -> dict[str, Any]:
+            if cfg.dry_run:
+                return {"simulation": True}
+            from . import elevenlabs  # agent Audio : import paresseux, {} si absent
+
+            fn = getattr(elevenlabs, "subscription", None)
+            return fn(cfg) if callable(fn) else {}
+
         return {
             "dry_run": cfg.dry_run,
-            "gradium_credits": prov.gradium_credits(cfg),
-            "heygen_quota": prov.heygen_quota(cfg),
+            "openrouter": _safe(lambda: prov.openrouter_balance(cfg)),
+            "xai": _safe(lambda: prov.xai_balance(cfg)),
+            "elevenlabs": _safe(_elevenlabs),
             "total_videos": db.count_clips("pret"),
             "activity": db.recent_activity(15),
         }
@@ -819,13 +867,19 @@ def create_app() -> FastAPI:
             db.set_ad_style(aid, style_v)
             if bible_json:
                 db.set_ad_bible(aid, bible_json)
+            # Toute NOUVELLE pub Avatar IA suit le pipeline v2 « audio d'abord ».
+            db.set_ad_fields(aid, pipeline_version=2)
 
         def _on_clip(clip_id: int, s: dict[str, Any]) -> None:
             fields: dict[str, Any] = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
+            if s.get("speaker"):
+                fields["speaker"] = int(s["speaker"])   # v2 : qui dit la réplique du bloc
             if s.get("segments"):
                 fields["segments"] = _json(s["segments"])
             if s.get("shot_prompt"):
                 fields["shot_prompt"] = s["shot_prompt"]
+            if s.get("video_prompt"):
+                fields["video_prompt"] = s["video_prompt"]
             if fields:
                 db.update_clip(clip_id, **fields)
 
@@ -837,26 +891,109 @@ def create_app() -> FastAPI:
 
     @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
     def avatar_omni_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
+        """Régénère le KEYFRAME d'un plan (toujours Nano Banana Pro). `correction` = consigne libre
+        ajoutée au prompt image (« CORRECTION: … », non mémorisée). Le keyframe repart à valider
+        (keyframe_ok=0) et « Valider les keyframes » est à refaire (ads.keyframes_ok=0)."""
         clip = db.get_clip(clip_id)
+        correction = body.correction
         if clip is not None and clip.get("shot_prompt") is not None:
             # Découpage client : le texte édité = CE QUI CHANGE dans ce plan ; la bible est
             # ajoutée par le code. Nouvelle image → la chaîne de tours repart de zéro.
             ad = db.get_ad(int(clip["ad_id"])) or {}
             shot = body.prompt_image.strip() or str(clip.get("shot_prompt") or "")
+            # Traits clés des personnages à l'image EN TÊTE (celui qui parle d'abord).
+            sp = int(clip.get("speaker") or 0)
+            in_frame = pipeline.clip_characters_in_frame(clip, ad)
+            chars = ([sp] if sp else []) + [n for n in in_frame if n != sp]
             body = RegenerateIn(
-                prompt_image=brain.compose_client_prompt_image(pipeline.ad_bible(ad), shot,
-                                                               style=pipeline.ad_style(ad)),
+                prompt_image=brain.compose_client_prompt_image(
+                    pipeline.ad_bible(ad), shot, style=pipeline.ad_style(ad),
+                    names=pipeline.ad_character_names(ad), characters=chars or None),
                 confirm=body.confirm,
             )
             db.update_clip(clip_id, shot_prompt=shot, segments=_json(
                 pipeline.reset_segments_progress(pipeline.clip_segments(clip))))
-        return _regenerate_image(
+        res = _regenerate_image(
             clip_id, body, "avatar_omni", "un « Avatar IA »", allow_prompt_edit=True,
+            correction=correction,
         )
+        _reset_keyframe(clip_id)
+        return res
+
+    @app.post("/api/avatar-omni/keyframe/upload/{clip_id}")
+    async def avatar_omni_keyframe_upload(clip_id: int, file: UploadFile = File(...)) -> dict[str, Any]:
+        """Remplace le keyframe d'un plan par une image fournie (png/jpg/webp) — AUCUN appel Nano
+        Banana. Le keyframe repart à valider ; « Valider les keyframes » est à refaire."""
+        clip, ad = _omni_clip_or_404(clip_id)
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(400, "Fichier vide.")
+        if len(raw) > _KEYFRAME_MAX_BYTES:
+            raise HTTPException(400, "Image trop lourde (max 25 Mo).")
+        dest = _save_keyframe_upload(raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
+                                     int(clip["scene_n"]))
+        db.update_clip(clip_id, image_path=str(dest), keyframe_source="upload",
+                       status="image_pret", error=None)
+        _reset_keyframe(clip_id)
+        return {"ok": True, "clip_id": clip_id, "image_url": _media_url_v(str(dest))}
+
+    @app.post("/api/avatar-omni/keyframe/mode/{clip_id}")
+    def avatar_omni_keyframe_mode(clip_id: int, body: KeyframeModeIn) -> dict[str, Any]:
+        """Mode du plan : « start_frame » (keyframe en 1re image Omni) | « texte_seul » (sans image)."""
+        _omni_clip_or_404(clip_id)
+        if body.mode not in config_app.OMNI_KEYFRAME_MODES:
+            raise HTTPException(400, "Mode inconnu (start_frame | texte_seul).")
+        db.update_clip(clip_id, keyframe_mode=body.mode)
+        clip = db.get_clip(clip_id) or {}
+        db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
+        return {"ok": True, "mode": body.mode}
 
     @app.post("/api/avatar-omni/validate/{clip_id}")
     def avatar_omni_validate(clip_id: int, body: ValidateIn) -> dict[str, Any]:
-        return _set_clip_validation(clip_id, body.valide)
+        """Valide (keyframe_ok=1, « valide ») ou dévalide (keyframe_ok=0, « Valider les keyframes »
+        à refaire) le keyframe d'un plan. Mode texte_seul : validable sans image."""
+        clip, _ad = _omni_clip_or_404(clip_id)
+        text_only = pipeline.clip_text_only(clip)
+        if body.valide:
+            if not text_only and not clip.get("image_path"):
+                raise HTTPException(409, "Ce plan n'a pas encore de keyframe à valider.")
+            status = "pret" if clip.get("status") == "pret" else "valide"
+            db.update_clip(clip_id, status=status, keyframe_ok=1)
+            return {"ok": True, "status": status, "keyframe_ok": True}
+        status = "image_pret" if clip.get("image_path") else "en_attente"
+        if clip.get("status") == "pret":
+            status = "pret"   # la vidéo reste ; seul le keyframe est à revalider
+        db.update_clip(clip_id, status=status)
+        _reset_keyframe(clip_id)
+        return {"ok": True, "status": status, "keyframe_ok": False}
+
+    @app.post("/api/avatar-omni/keyframes/validate-all/{ad_id}")
+    def avatar_omni_validate_all(ad_id: int) -> Any:
+        """Bouton global « Valider les keyframes » : 409 (avec `missing`) si un plan start_frame n'a
+        pas d'image ; sinon tous les plans → keyframe_ok=1 (« valide » sauf « pret ») et
+        ads.keyframes_ok=1 (l'animation globale devient possible)."""
+        from fastapi.responses import JSONResponse
+
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(404, "Avatar IA introuvable.")
+        clips = db.clips_for_ad(ad_id)
+        if not clips:
+            raise HTTPException(400, "Aucun plan dans cette pub.")
+        missing = [int(c["scene_n"]) for c in clips
+                   if not pipeline.clip_text_only(c) and not c.get("image_path")]
+        if missing:
+            plans = ", ".join(str(n) for n in missing)
+            return JSONResponse(status_code=409, content={
+                "detail": f"Keyframe manquant pour le(s) plan(s) {plans} : génère ou importe une "
+                          "image, ou passe ces plans en « texte seul ».",
+                "missing": missing,
+            })
+        for c in clips:
+            status = "pret" if c.get("status") == "pret" else "valide"
+            db.update_clip(int(c["id"]), status=status, keyframe_ok=1)
+        db.set_ad_keyframes_ok(ad_id, True)
+        return {"ok": True, "validated": len(clips)}
 
     @app.post("/api/avatar-omni/dialogue/{clip_id}")
     def avatar_omni_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
@@ -870,6 +1007,9 @@ def create_app() -> FastAPI:
         _check_voiceover_len(body.text, what="Texte", hint="")
         db.update_clip(clip_id, script=body.text)
         ad = db.get_ad(int(clip["ad_id"])) or {}
+        if int(ad.get("pipeline_version") or 1) == 2 and body.text != (clip.get("script") or ""):
+            # v2 audio-first : la réplique a changé → son audio ElevenLabs est à refaire.
+            avatar_voices.invalidate_clip_voices(int(clip["ad_id"]), [clip_id])
         wps_for, max_spoken = pipeline.ad_wps_for(ad), pipeline.omni_max_spoken()
         if pipeline.clip_segments(clip) and body.text.strip():
             # Plan à tours : nouveaux tours chronométrés (speaker et gestes gardés par position),
@@ -910,6 +1050,7 @@ def create_app() -> FastAPI:
         max_words = _plain_max_words(wps_for(1), max_spoken)
         personas = config_app.normalize_personas(ad.get("personas"))
         names = {int(c["n"]): c["name"] for c in personas["characters"] if c.get("name")}
+        clips_by_id_img = {int(c["id"]): c for c in db.clips_for_ad(ad_id)}
         resp = _ad_shots_response(
             ad_id,
             lambda c: {
@@ -920,8 +1061,11 @@ def create_app() -> FastAPI:
                 "segments": _segments_view(c, wps_for, max_spoken, names),
                 "shot_prompt": c.get("shot_prompt") or "",
                 "refs_sent": _refs_sent(c),
+                **_keyframe_fields(c),
             },
         )
+        for s in resp["shots"]:   # cache-buster : un keyframe remplacé garde parfois son nom
+            s["image_url"] = _media_url_v((clips_by_id_img.get(int(s["clip_id"])) or {}).get("image_path"))
         clips = db.clips_for_ad(ad_id)
         clips_by_id = {int(c["id"]): c for c in clips}
         resp["warnings"] = [
@@ -938,6 +1082,8 @@ def create_app() -> FastAPI:
         resp["alerts"].extend(_omni_refs_alerts(ad_id, clips))
         resp["personas"] = personas
         resp["style"] = pipeline.ad_style(ad)
+        resp["keyframes_ok"] = bool(int(ad.get("keyframes_ok") or 0))
+        resp["omni_resolution"] = config_app.normalize_omni_resolution(ad.get("omni_resolution"))
         bible = pipeline.ad_bible(ad)
         resp["bible"] = bible
         resp["bible_text"] = brain.bible_text(bible) if bible else ""
@@ -958,6 +1104,10 @@ def create_app() -> FastAPI:
         # Rétrocompat (personnage 1) : fiche unique et sa consigne.
         resp["voice_profile"] = profile
         resp["voice_sheet"] = config_app.voice_sheet(profile)
+        # Avatar IA v2 (audio-first) : champs voix / vidéo / dérive par bloc + options de la pub.
+        for s in resp["shots"]:
+            s.update(avatar_video.clip_v2_fields(clips_by_id.get(int(s["clip_id"])) or {}))
+        resp.update(avatar_video.ad_v2_fields(ad))
         return resp
 
     @app.patch("/api/avatar-omni/bible/{ad_id}")
@@ -999,6 +1149,9 @@ def create_app() -> FastAPI:
             )
         profile = config_app.normalize_voice_profile(body.voice_profile)
         profiles = pipeline.ad_voice_profiles(ad)
+        if int(ad.get("pipeline_version") or 1) == 2 and profiles.get(str(speaker)) != profile:
+            # v2 audio-first : voix (voice_id ou fiche) changée → audio des blocs de ce perso à refaire.
+            avatar_voices.invalidate_speaker_voices(ad_id, speaker)
         profiles[str(speaker)] = profile
         db.set_ad_voice_profiles(ad_id, _json(dict(sorted(profiles.items()))))
         if speaker == 1:
@@ -1018,31 +1171,59 @@ def create_app() -> FastAPI:
     @app.post("/api/avatar-omni/animate/{ad_id}")
     def avatar_omni_animate(ad_id: int, body: AvatarOmniAnimateIn) -> dict[str, Any]:
         """Anime les plans validés via Google Omni (vidéo + VOIX + lip-sync). `clip_id` optionnel
-        → n'anime QUE ce plan (« Tester ce plan »). Confirmation de coût avant un run réel."""
+        → n'anime QUE ce plan (« Tester ce plan » ; plan « pret » = RELANCE VIDÉO SEULE, même
+        keyframe, aucun appel Nano Banana). Confirmation de coût avant un run réel.
+        GARDE-FOUS : global → 409 sans « Valider les keyframes » (ads.keyframes_ok) ; un plan →
+        409 si son keyframe n'est pas validé (keyframe_ok) ou s'il n'a pas d'image (start_frame).
+        `resolution` (720p | 1080p) : mémorisée sur la pub si fournie."""
         cfg = load_provider_config()
         ad = db.get_ad(ad_id)
         if ad is None or ad.get("kind") != "avatar_omni":
             raise HTTPException(400, "Avatar IA introuvable.")
+        if int(ad.get("pipeline_version") or 1) == 2:
+            raise HTTPException(409, "Pub « audio-first » (v2) : utilise /api/avatar-omni/video/animate.")
+        if body.resolution.strip():
+            if body.resolution.strip().lower() not in config_app.OMNI_RESOLUTIONS:
+                raise HTTPException(400, "Résolution inconnue (720p | 1080p).")
+            db.set_ad_omni_resolution(ad_id, body.resolution)
         clips = db.clips_for_ad(ad_id)
+        relaunch: dict[str, Any] | None = None
         if body.clip_id is not None:
-            candidates = [
-                c for c in clips
-                if int(c["id"]) == int(body.clip_id)
-                and c.get("image_path")
-                and c.get("status") in ("valide", "echec", "pret")
-            ]
-            if not candidates:
-                raise HTTPException(400, "Valide ce plan avant de le tester.")
+            clip = next((c for c in clips if int(c["id"]) == int(body.clip_id)), None)
+            if clip is None:
+                raise HTTPException(404, "Plan introuvable.")
+            if not int(clip.get("keyframe_ok") or 0):
+                raise HTTPException(409, "Valide d'abord le keyframe de ce plan.")
+            if not pipeline.omni_clip_animatable(clip):
+                raise HTTPException(409, "Ce plan n'a pas de keyframe (image) : génère-le ou passe-le "
+                                         "en « texte seul ».")
+            if clip.get("status") not in ("valide", "echec", "pret"):
+                raise HTTPException(409, "Valide ce plan avant de le tester.")
+            relaunch = clip if clip.get("status") == "pret" else None
+            if relaunch is not None and pipeline.clip_segments(clip):
+                # Relance : tous les tours sont refaits → estimation / quota sur les tours remis à zéro.
+                clip = {**clip, "segments": _json(
+                    pipeline.reset_segments_progress(pipeline.clip_segments(clip)))}
+            candidates = [clip]
         else:
-            candidates = _animatable_clips(clips)
+            if not int(ad.get("keyframes_ok") or 0):
+                raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») "
+                                         "avant de générer les vidéos.")
+            candidates = _omni_animatable(clips)
             if not candidates:
-                raise HTTPException(400, "Aucun plan validé à animer (valide d'abord les images).")
+                raise HTTPException(400, "Aucun plan validé à animer (valide d'abord les keyframes).")
         if not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise avant d'animer (coût Google Omni).")
         if not cfg.dry_run and not (cfg.gemini_api_key or "").strip():
             raise HTTPException(400, "Clé API Google (Gemini) manquante (Réglages).")
         est = _omni_clips_estimate(ad, candidates)
         _check_spend_cap(cfg, est["usd_video"], body.confirm_over_cap)
+        if relaunch is not None:
+            # RELANCE VIDÉO SEULE : même keyframe (image_path inchangé), tours et mp4 remis à zéro.
+            db.update_clip(int(relaunch["id"]), status="valide", mp4_path=None, error=None,
+                           omni_prompt="", interaction_id="", segments=_json(
+                               pipeline.reset_segments_progress(pipeline.clip_segments(relaunch)))
+                           if pipeline.clip_segments(relaunch) else relaunch.get("segments"))
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
         job = jobs.manager.start(
             cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="avatar_omni_animate",
@@ -1050,6 +1231,9 @@ def create_app() -> FastAPI:
         )
         return {
             "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
+            "relaunch_video_only": relaunch is not None,
+            "resolution": config_app.normalize_omni_resolution(
+                (db.get_ad(ad_id) or {}).get("omni_resolution")),
             "n_plans": len(candidates), "usd_video": est["usd_video"],
             "seconds_total": est["seconds_total"], "tier1_warning": est["tier1_warning"],
             **_omni_quota_info(candidates),
@@ -1259,8 +1443,17 @@ def create_app() -> FastAPI:
             and not (a.get("kind") in ("objet", "mashup", "avatar_omni") and not _has_video(a))
         ]
         for ad in ads:
+            ad["pipeline_version"] = int(ad.get("pipeline_version") or 1)
             for clip in ad["clips"]:
                 clip["media_url"] = _media_url(clip.get("mp4_path"))
+                if ad.get("kind") == "avatar_omni":
+                    # Keyframe + vidéo sur la même ligne clip (liaison naturelle).
+                    clip["image_url"] = _media_url_v(clip.get("image_path"))
+                    clip["prompt_image"] = clip.get("prompt_image") or ""
+                    clip.update(_keyframe_fields(clip))
+                    clip.update(avatar_video.clip_v2_fields(clip))   # v2 : voix / dérive / mp4
+            if ad.get("kind") == "avatar_omni":
+                ad.update(avatar_video.ad_v2_fields(ad))
         return {"ads": ads}
 
     @app.get("/api/photos")
@@ -1459,6 +1652,7 @@ class SettingsIn(BaseModel):
     openrouter_api_key: str = ""
     xai_api_key: str = ""
     gemini_api_key: str = ""   # Avatar IA (Omni) — clé Google AI Studio
+    elevenlabs_api_key: str = ""   # Avatar IA v2 — voix ElevenLabs ; vide = garder
     gradium_model: str = ""
     heygen_voice_id: str = ""
     anthropic_api_key: str = ""
@@ -1477,6 +1671,8 @@ class SettingsIn(BaseModel):
     spend_cap_usd: float | None = None   # plafond de dépense ($) ; None = ne pas changer
     omni_daily_request_limit: int | None = None   # quota Google Omni (requêtes/jour) ; None = idem
     omni_max_spoken_clip_seconds: int | None = None   # max d'un tour Omni PARLÉ (3..10 s) ; None = idem
+    avatar_video_model: str = ""   # Avatar IA v2 : grok | kling | omni ; "" = ne pas changer
+    drift_threshold: float | None = None   # seuil de dérive 0..1 ; None = ne pas changer
     dry_run: bool = True
     # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices (comme les avatars).
 
@@ -1564,6 +1760,11 @@ class CurrencyIn(BaseModel):
 class RegenerateIn(BaseModel):
     prompt_image: str = ""
     confirm: bool = False
+    correction: str = ""     # Avatar IA : correction libre → « CORRECTION: … » ajoutée au prompt
+
+
+class KeyframeModeIn(BaseModel):
+    mode: str = "start_frame"   # "start_frame" | "texte_seul"
 
 
 class ValidateIn(BaseModel):
@@ -1642,6 +1843,7 @@ class AvatarOmniAnimateIn(BaseModel):
     confirm: bool = False
     confirm_over_cap: bool = False   # confirmation explicite du dépassement du plafond de dépense
     clip_id: int | None = None   # None = tous les plans validés ; sinon « Tester ce plan »
+    resolution: str = ""         # "720p" | "1080p" ; vide = valeur de la pub (720p par défaut)
 
 
 # ------------------------------------------------------------------ util
@@ -1764,10 +1966,22 @@ def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
         lambda n, pi, pm, s: _with_refs_needed({
             "n": n, "prompt_image": pi, "prompt_motion": pm,
             "dialogue": str(s.get("dialogue", "")).strip(),
+            # Prompt VIDÉO Omni (mouvement + qui parle) écrit par le cerveau (étape Keyframes).
+            "video_prompt": str(s.get("video_prompt") or "").strip()[:4000],
             **_block_fields(s),
             **_segment_fields(s),
+            **_speaker_field(s),
         }, s),
     )
+
+
+def _speaker_field(s: dict[str, Any]) -> dict[str, Any]:
+    """v2 : numéro du personnage qui dit la réplique du bloc (1..4), absent sinon."""
+    try:
+        n = int(s.get("speaker") or 0)
+    except (TypeError, ValueError):
+        return {}
+    return {"speaker": n} if 1 <= n <= config_app.OMNI_MAX_CHARACTERS else {}
 
 
 _TURN_TEXT_KEYS = ("avant", "pendant", "apres", "motion")
@@ -1984,27 +2198,34 @@ def _omni_plan_context(cfg: Any, body: AvatarOmniPlanIn) -> dict[str, Any]:
 def _omni_plan_response(
     cfg: Any, body: AvatarOmniPlanIn, ctx: dict[str, Any], mode: str, text: str,
 ) -> dict[str, Any]:
-    """Plan (mode client / manuel) : tours chronométrés + estimation sur la SOMME des tours."""
+    """Plan v2 « audio d'abord » (modes client — dont l'auto validé — et manuel) : 1 bloc = la
+    réplique d'UN personnage (speaker), ≤ 10 s estimées, `segments` = [] ; estimation v2
+    (keyframes + vidéo au modèle choisi + voix ElevenLabs)."""
     wps_for = ctx["wps_for"]
     try:
-        if mode == "client":
-            result = brain.generate_avatar_omni_client_plan(
-                cfg, text, personas=ctx["personas"], product=body.product,
-                ambiance=body.ambiance, words_per_sec=wps_for(1),
-                photos=_bible_photos(body.ref_photos), voice_profiles=ctx["profiles"],
-                style=ctx["style"], max_spoken=ctx["max_spoken"],
-            )
-        else:
-            result = brain.generate_avatar_omni_plan(
-                cfg, text, persona=brain.personas_brief(body.persona, ctx["personas"]),
-                product=body.product, ambiance=body.ambiance, manual=(mode == "manual"),
-                words_per_sec=wps_for(1), voice_profiles=ctx["profiles"], style=ctx["style"],
-                max_spoken=ctx["max_spoken"],
-            )
+        result = brain.generate_avatar_audio_plan(
+            cfg, text, mode="manual" if mode == "manual" else "client",
+            personas=ctx["personas"], product=body.product, ambiance=body.ambiance,
+            words_per_sec=wps_for(1), photos=_bible_photos(body.ref_photos),
+            voice_profiles=ctx["profiles"], style=ctx["style"],
+        )
     except brain.BrainProviderError as exc:
         raise HTTPException(502, str(exc)) from exc
     except brain.BrainError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if result.get("pipeline_version") == 2:
+        result["mode"] = mode
+        result["personas"] = ctx["personas"]
+        result["style"] = ctx["style"]
+        result["max_spoken"] = ctx["max_spoken"]
+        result.setdefault("alerts", [])
+        for a in ctx["alerts"]:
+            if a not in result["alerts"]:
+                result["alerts"].append(a)
+        result["estimate"] = _audio_plan_estimate(cfg, result["shots"])
+        result["dry_run"] = cfg.dry_run
+        db.log_activity("avatar_omni", f"Plan Avatar IA (v2) : {len(result['shots'])} bloc(s).")
+        return result
     result["mode"] = mode
     result["personas"] = ctx["personas"]
     result["style"] = ctx["style"]
@@ -2103,6 +2324,83 @@ def _with_refs_needed(shot: dict[str, Any], raw: dict[str, Any]) -> dict[str, An
     return shot
 
 
+def _omni_animatable(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Avatar IA : plans « valide »/« echec » dont le keyframe est VALIDÉ (keyframe_ok=1) avec une
+    image (start_frame) ou en mode texte_seul — la même sélection que le pipeline."""
+    return [c for c in clips
+            if pipeline.omni_clip_animatable(c) and c.get("status") in ("valide", "echec")]
+
+
+def _omni_clip_or_404(clip_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(clip, pub) d'un plan Avatar IA ; 404 si introuvable ou d'un autre type."""
+    clip = db.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(404, "Plan introuvable.")
+    ad = db.get_ad(int(clip["ad_id"]))
+    if ad is None or ad.get("kind") != "avatar_omni":
+        raise HTTPException(404, "Ce plan n'appartient pas à un « Avatar IA ».")
+    return clip, ad
+
+
+def _reset_keyframe(clip_id: int) -> None:
+    """Tout changement de keyframe (régénérer / importer / dévalider / mode) : keyframe_ok=0 sur
+    le plan et « Valider les keyframes » à refaire (ads.keyframes_ok=0)."""
+    clip = db.get_clip(clip_id)
+    if clip is None:
+        return
+    db.update_clip(clip_id, keyframe_ok=0)
+    db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
+
+
+_KEYFRAME_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _save_keyframe_upload(raw: bytes, folder: Path, n: int) -> Path:
+    """Écrit un keyframe importé sous `folder/{n}_upload.<ext>` : PNG/JPEG gardés tels quels,
+    tout autre format (webp…) converti en PNG (Pillow). 400 si ce n'est pas une image lisible."""
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            fmt = (im.format or "").upper()
+            im.load()
+            folder.mkdir(parents=True, exist_ok=True)
+            if fmt in ("PNG", "JPEG"):
+                dest = folder / f"{n}_upload.{'png' if fmt == 'PNG' else 'jpg'}"
+                dest.write_bytes(raw)
+            else:
+                dest = folder / f"{n}_upload.png"
+                (im if im.mode in ("RGB", "RGBA") else im.convert("RGBA")).save(dest, format="PNG")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(400, "Image illisible (formats acceptés : png, jpg, webp).") from exc
+    for other in folder.glob(f"{n}_upload.*"):   # un seul import par plan
+        if other != dest:
+            other.unlink(missing_ok=True)
+    return dest
+
+
+def _keyframe_fields(c: dict[str, Any]) -> dict[str, Any]:
+    """Champs « étape Keyframes » d'un plan Avatar IA (réponse /ad et bibliothèque)."""
+    return {
+        "video_prompt": c.get("video_prompt") or "",
+        "keyframe_mode": config_app.normalize_keyframe_mode(c.get("keyframe_mode")),
+        "keyframe_ok": bool(int(c.get("keyframe_ok") or 0)),
+        "keyframe_source": c.get("keyframe_source") or "",
+        "omni_prompt": pipeline.clip_omni_prompts(c),
+    }
+
+
+def _media_url_v(path: str | None) -> str | None:
+    """URL média + cache-buster (date de modif) : un keyframe remplacé s'affiche à jour."""
+    url = _media_url(path)
+    if not url or not path:
+        return url
+    try:
+        return f"{url}?v={int(Path(path).stat().st_mtime)}"
+    except OSError:
+        return url
+
+
 def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Plans qu'une animation (objet / avatar IA) va traiter : validés + échecs précédents, avec
     image — exactement la sélection des pipelines (les plans « pret » ne sont jamais réanimés)."""
@@ -2140,6 +2438,22 @@ def _omni_estimate(shots: list[dict[str, Any]], words_per_sec: Any, max_spoken: 
     """Estimation Avatar IA sur les VRAIES durées Omni de chaque plan (débit de la fiche voix du
     speaker de chaque tour) ; un plan à tours compte la SOMME de ses tours."""
     return cost.estimate_avatar_omni([_shot_omni_seconds(s, words_per_sec, max_spoken) for s in shots])
+
+
+def _audio_plan_estimate(cfg: Any, shots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimation d'un plan v2 (avant création de la pub) : vidéo (durée de clip de chaque bloc au
+    modèle vidéo du réglage) + voix ElevenLabs (caractères ; 0 en voix « native », mode par
+    défaut) + keyframes Nano Banana Pro. usd_total = images + vidéo + voix. Simulation → 0 $."""
+    secs = [int(s.get("duration_s") or 0) for s in shots]
+    native = config_app.normalize_voice_mode(config_app.DEFAULT_VOICE_MODE) == "native"
+    chars = 0 if native else sum(
+        len(brain.strip_brackets(str(s.get("dialogue") or "").strip())) for s in shots)
+    est = cost.estimate_avatar_v2(secs, getattr(cfg, "avatar_video_model", ""), chars,
+                                  dry_run=bool(cfg.dry_run))
+    usd_images = 0.0 if cfg.dry_run else round(len(shots) * cost.omni_keyframe_image_usd(), 2)
+    est.update({"usd_images": usd_images, "shots": len(shots),
+                "usd_total": round(est["usd_total"] + usd_images, 2)})
+    return est
 
 
 def _omni_clips_estimate(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2298,7 +2612,9 @@ async def _save_ref_images(
 
 
 # visage = visage1 (anciennes pubs) ; visage1..visage4 = personnages 1..4 (Avatar IA).
-_REF_KINDS = {"visage", "visage1", "visage2", "visage3", "visage4", "produit", "decor", "style"}
+# planche1..planche4 = planche personnage (character sheet) du personnage N (étape Keyframes).
+_REF_KINDS = {"visage", "visage1", "visage2", "visage3", "visage4", "produit", "decor", "style",
+              *config_app.OMNI_SHEET_KINDS}
 
 # Phrase type pour l'échantillon de voix (jalon 5) — courte, neutre, pour juger le timbre.
 _VOICE_SAMPLE_TEXT = "Bonjour, voici un aperçu de ma voix pour vos publicités."
@@ -2370,6 +2686,7 @@ def _ad_shots_response(
 
 def _regenerate_image(
     clip_id: int, body: RegenerateIn, kind: str, kind_label: str, *, allow_prompt_edit: bool,
+    correction: str = "",
 ) -> dict[str, Any]:
     """Régénère l'image d'UN plan (objet/mashup/avatar IA) : relance un job image sur ce seul clip.
 
@@ -2399,6 +2716,9 @@ def _regenerate_image(
         prompt_image = str(clip["prompt_image"] or "")
         db.update_clip(clip_id, status="en_attente", error=None)
 
+    fix = " ".join(str(correction or "").split())[:2000]
+    if fix:   # correction libre (non mémorisée) : consigne ajoutée au prompt de CETTE génération
+        prompt_image = f"{prompt_image}\n\nCORRECTION: {fix}"
     shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
             "refs_needed": clip.get("refs_needed")}
     job = jobs.manager.start(
@@ -2432,6 +2752,8 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
             raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
         est = cost.estimate_objet(len(img_fail))["usd_images"]
+        if kind == "avatar_omni":   # keyframes : toujours Nano Banana Pro
+            est = round(len(img_fail) * cost.omni_keyframe_image_usd(), 2)
         _check_spend_cap(cfg, est, body.confirm_over_cap)
         ref = _consistency_ref(clips)
         shots = [
@@ -2458,6 +2780,12 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         est = _grok_video_estimate(cfg, to_anim)["usd_video"]   # vraies durées Grok
         mode = "objet_animate"
     elif kind == "avatar_omni":
+        if not int(ad.get("keyframes_ok") or 0):
+            raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») "
+                                     "avant de réanimer.")
+        to_anim = _omni_animatable(clips)
+        if not to_anim:
+            raise HTTPException(400, "Aucun plan validé à réanimer.")
         if not cfg.dry_run and not (cfg.gemini_api_key or "").strip():
             raise HTTPException(400, "Clé API Google (Gemini) manquante (Réglages).")
         est = _omni_clips_estimate(ad, to_anim)["usd_video"]    # vraies durées Omni

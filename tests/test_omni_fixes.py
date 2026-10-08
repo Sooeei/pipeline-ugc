@@ -137,9 +137,13 @@ _TYPED = [{"path": "p1.png", "kind": "produit"}, {"path": "p2.png", "kind": "pro
 
 
 def test_select_omni_refs_order_and_cap():
+    # Cap relevé à 6 (Nano Banana Pro, étape Keyframes : visage + planche + produit + décor) :
+    # l'ordre de priorité est inchangé, les photos en plus (2e produit, décor) suivent l'ancre.
     sel = pipeline.select_omni_refs(["visage", "visage2", "produit", "decor"], _TYPED, "anchor.png")
+    assert [r["path"] for r in sel] == ["v1.png", "v2.png", "p1.png", "anchor.png", "p2.png", "d.png"]
+    assert config_app.MAX_REFS_PER_IMAGE_CALL_OMNI == 6
+    sel = pipeline.select_omni_refs(["visage", "visage2", "produit", "decor"], _TYPED, "anchor.png", cap=4)
     assert [r["path"] for r in sel] == ["v1.png", "v2.png", "p1.png", "anchor.png"]
-    assert len(sel) == config_app.MAX_REFS_PER_IMAGE_CALL_OMNI == 4
     assert pipeline.select_omni_refs([], _TYPED, "anchor.png") == []
     sel = pipeline.select_omni_refs(["visage"], _TYPED, "")
     assert [r["kind"] for r in sel] == ["visage"]
@@ -157,17 +161,20 @@ def test_omni_images_name_roles_and_record_refs_sent(monkeypatch):
     pipeline.generate_objet_images(ProviderConfig(dry_run=True), ad_id, "roles", shots,
                                    character_ref="anchor.png")
     prompt, refs = calls[-1]
-    assert refs == ["v1.png", "v2.png", "p1.png", "anchor.png"]
+    # refs_needed sans « decor » → décor exclu ; 2e photo produit envoyée (cap 6)
+    assert refs == ["v1.png", "v2.png", "p1.png", "anchor.png", "p2.png"]
     assert prompt.startswith("REFERENCE IMAGES (in order): reference image 1 = character 1's face")
     assert "reference image 2 = character 2's face" in prompt
     assert "reference image 3 = the client's product" in prompt
-    assert "reference image 4 = the validated previous shot" in prompt and prompt.endswith("SHOT")
+    assert "reference image 4 = the validated previous shot" in prompt
+    assert prompt.endswith("SHOT\nFamily-friendly, tasteful.")          # + suffixe filtre Google
     sent = json.loads(db.get_clip(cid)["refs_sent"])
     assert [(r["n"], r["kind"], r["path"]) for r in sent] == [
-        (1, "visage", "v1.png"), (2, "visage2", "v2.png"), (3, "produit", "p1.png"), (4, "ancre", "anchor.png")]
+        (1, "visage", "v1.png"), (2, "visage2", "v2.png"), (3, "produit", "p1.png"), (4, "ancre", "anchor.png"),
+        (5, "produit", "p2.png")]
     with TestClient(app) as c:
         shot = c.get(f"/api/avatar-omni/ad/{ad_id}").json()["shots"][0]
-    assert shot["refs_sent"] == ["visage", "visage2", "produit", "ancre"]
+    assert shot["refs_sent"] == ["visage", "visage2", "produit", "ancre", "produit"]
 
 
 # ============================================================ f) avertissements PAR TOUR
@@ -175,7 +182,8 @@ def _client_ad(segments, dialogue):
     ad_id = db.create_ad("tours", "", "[]", kind="avatar_omni")
     cid = db.create_clip(ad_id, 1, dialogue, "m", prompt_image="P")
     db.update_clip(cid, block_n=1, segments=json.dumps([{"text": t, "motion": ""} for t in segments]),
-                   image_path="fake/1.png", status="valide")
+                   image_path="fake/1.png", status="valide", keyframe_ok=1)
+    db.set_ad_keyframes_ok(ad_id, True)   # « Valider les keyframes »
     return ad_id, cid
 
 
@@ -253,7 +261,7 @@ def test_daily_limit_setting_and_animate_requests():
         segs[0]["interaction_id"] = "done"                        # tour déjà fait : non recompté
         db.update_clip(cid, segments=json.dumps(segs))
         c2 = db.create_clip(ad_id, 2, "Fin.", "m", prompt_image="P")
-        db.update_clip(c2, image_path="fake/2.png", status="valide")
+        db.update_clip(c2, image_path="fake/2.png", status="valide", keyframe_ok=1)
         assert c.get(f"/api/avatar-omni/ad/{ad_id}").json()["omni_daily_limit"] == 2
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 200, r.text

@@ -286,9 +286,9 @@ def test_grok_video_url_extraction():
 def test_objet_image_model_registry_is_nano_banana_openrouter():
     from app import config_app
 
-    assert config_app.DEFAULT_OBJET_IMAGE_MODEL == "nano_banana_2"
+    assert config_app.DEFAULT_OBJET_IMAGE_MODEL == "nano_banana_pro"   # v2 : Objet animé en Pro
     default = config_app.OBJET_IMAGE_MODELS[config_app.DEFAULT_OBJET_IMAGE_MODEL]
-    assert default["model"] == "google/gemini-3.1-flash-image"
+    assert default["model"] == "google/gemini-3-pro-image-preview"
     for m in config_app.OBJET_IMAGE_MODELS.values():
         assert m["model"].startswith("google/")  # id OpenRouter
 

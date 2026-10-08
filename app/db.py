@@ -82,6 +82,23 @@ CREATE TABLE IF NOT EXISTS cost_archives (
     ended_at   REAL NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS characters (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL DEFAULT '',
+    description   TEXT DEFAULT '',
+    planche_path  TEXT DEFAULT '',
+    voice_id      TEXT DEFAULT '',
+    voice_profile TEXT DEFAULT '',
+    bible         TEXT DEFAULT '',
+    created_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS presets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    data       TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT,
+    updated_at TEXT
+);
 CREATE TABLE IF NOT EXISTS voice_meta (
     uid        TEXT PRIMARY KEY,
     label      TEXT DEFAULT '',
@@ -105,6 +122,17 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         # JSON : fiches voix PAR personnage qui parle {"1": profil, "3": profil} ; absent →
         # repli sur voice_profile (= personnage 1, anciennes pubs).
         ("voice_profiles", "TEXT"),
+        # Étape Keyframes (Avatar IA) : 1 = bouton global « Valider les keyframes » cliqué.
+        ("keyframes_ok", "INTEGER DEFAULT 0"),
+        ("omni_resolution", "TEXT DEFAULT '720p'"),  # résolution Omni : 720p | 1080p
+        # Pipeline Avatar IA v2 « audio-first » : 1 = ancien pipeline Omni (pubs existantes),
+        # 2 = audio-first (toute NOUVELLE pub avatar_omni).
+        ("pipeline_version", "INTEGER DEFAULT 1"),
+        ("voice_mode", "TEXT DEFAULT 'native'"),  # native | elevenlabs (désactivé, cf. config_app)
+        ("video_model", "TEXT DEFAULT ''"),           # vide = réglage global avatar_video_model
+        ("voices_ok", "INTEGER DEFAULT 0"),           # 1 = étape Voix validée
+        ("final_path", "TEXT DEFAULT ''"),            # vidéo assemblée (final.mp4)
+        ("final_audio_path", "TEXT DEFAULT ''"),      # voix complète (voix_complete.mp3)
     ],
     "clips": [
         ("prompt_image", "TEXT"),
@@ -123,6 +151,21 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("segments", "TEXT"),    # JSON : segments du dialogue = tours Omni (texte, motion, durée, id…)
         ("shot_prompt", "TEXT"), # partie PROPRE au plan du prompt image (la bible est ajoutée à part)
         ("refs_sent", "TEXT"),   # JSON : réfs RÉELLEMENT envoyées à Nano Banana [{n, kind, path}] (audit)
+        # Étape Keyframes (Avatar IA / Omni)
+        ("video_prompt", "TEXT DEFAULT ''"),               # prompt VIDÉO Omni (mouvement + qui parle)
+        ("keyframe_mode", "TEXT DEFAULT 'start_frame'"),   # start_frame | texte_seul
+        ("keyframe_ok", "INTEGER DEFAULT 0"),              # 1 = keyframe validé pour CE plan
+        ("keyframe_source", "TEXT DEFAULT ''"),            # nano_banana_pro | upload
+        ("omni_prompt", "TEXT DEFAULT ''"),                # JSON list des prompts envoyés à Omni
+        # Pipeline v2 « audio-first » (1 bloc = 1 réplique d'UN perso = 1 clip)
+        ("speaker", "INTEGER DEFAULT 1"),        # personnage qui parle dans ce bloc
+        ("voice_ok", "INTEGER DEFAULT 0"),       # 1 = audio ElevenLabs validé
+        ("wav_seconds", "REAL DEFAULT 0"),       # durée réelle de l'audio (ffprobe)
+        ("clip_seconds", "INTEGER DEFAULT 0"),   # durée demandée au modèle vidéo
+        ("raw_mp4_path", "TEXT DEFAULT ''"),     # vidéo brute du modèle (avant remplacement audio)
+        ("frame0_path", "TEXT DEFAULT ''"),      # frame 0 extraite (contrôle de dérive)
+        ("drift_score", "REAL"),                 # NULL = pas mesuré ; score 0..1
+        ("drift_flag", "INTEGER DEFAULT 0"),     # 1 = dérive (score sous le seuil)
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
@@ -143,14 +186,54 @@ def init_db() -> None:
     try:
         con.executescript(_SCHEMA)
         # Migrations additives pour les bases créées avant l'ajout de « Objet animé ».
+        added: set[tuple[str, str]] = set()
         for table, columns in _MIGRATIONS.items():
             existing = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
             for col_name, col_def in columns:
                 if col_name not in existing:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                    added.add((table, col_name))
+        # Migration douce (une seule fois, quand la colonne apparaît) : les anciennes pubs
+        # Avatar IA dont les plans étaient déjà validés/prêts restent animables.
+        if ("clips", "keyframe_ok") in added:
+            con.execute(
+                "UPDATE clips SET keyframe_ok=1 WHERE status IN ('valide', 'pret') AND ad_id IN "
+                "(SELECT id FROM ads WHERE kind='avatar_omni')"
+            )
+        if ("ads", "keyframes_ok") in added:
+            con.execute(
+                "UPDATE ads SET keyframes_ok=1 WHERE kind='avatar_omni' "
+                "AND EXISTS (SELECT 1 FROM clips c WHERE c.ad_id=ads.id) "
+                "AND NOT EXISTS (SELECT 1 FROM clips c WHERE c.ad_id=ads.id "
+                "AND c.status NOT IN ('valide', 'pret'))"
+            )
+        _migrate_objet_image_model(con)
         con.commit()
     finally:
         con.close()
+
+
+_OBJET_IMAGE_MIGRATION_FLAG = "migration_objet_image_model_pro"
+
+
+def _migrate_objet_image_model(con: sqlite3.Connection) -> None:
+    """Migration UNIQUE (flag en setting) : Objet animé passe à Nano Banana Pro — un réglage
+    `objet_image_model` resté à « nano_banana_2 » devient « nano_banana_pro ». Une fois le flag
+    posé, un retour volontaire à nano_banana_2 dans Réglages est respecté."""
+    done = con.execute(
+        "SELECT value FROM settings WHERE key=?", (_OBJET_IMAGE_MIGRATION_FLAG,)
+    ).fetchone()
+    if done:
+        return
+    con.execute(
+        "UPDATE settings SET value='nano_banana_pro' WHERE key='objet_image_model' "
+        "AND value='nano_banana_2'"
+    )
+    con.execute(
+        "INSERT INTO settings(key, value) VALUES(?, '1') "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (_OBJET_IMAGE_MIGRATION_FLAG,),
+    )
 
 
 # ---------------------------------------------------------------- settings
@@ -392,6 +475,55 @@ def set_ad_personas(ad_id: int, personas_json: str) -> None:
         con.close()
 
 
+def set_ad_keyframes_ok(ad_id: int, ok: bool) -> None:
+    """Étape Keyframes (Avatar IA) : 1 = « Valider les keyframes » cliqué ; 0 = à revalider."""
+    con = connect()
+    try:
+        con.execute("UPDATE ads SET keyframes_ok=? WHERE id=?", (1 if ok else 0, ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def set_ad_omni_resolution(ad_id: int, resolution: str) -> None:
+    """Résolution Omni d'une pub Avatar IA (« 720p » | « 1080p », normalisée)."""
+    con = connect()
+    try:
+        con.execute(
+            "UPDATE ads SET omni_resolution=? WHERE id=?",
+            (config_app.normalize_omni_resolution(resolution), ad_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+# Colonnes ads modifiables via set_ad_fields (liste blanche : jamais de nom de colonne venu
+# d'une entrée utilisateur).
+_ALLOWED_AD_COLS = {
+    "name", "avatar_label", "scenes_json", "status", "kind",
+    "voice_profile", "personas", "bible", "style", "voice_profiles",
+    "keyframes_ok", "omni_resolution",
+    "pipeline_version", "voice_mode", "video_model", "voices_ok",
+    "final_path", "final_audio_path",
+}
+
+
+def set_ad_fields(ad_id: int, **fields: Any) -> None:
+    """Met à jour plusieurs colonnes d'une pub (liste blanche `_ALLOWED_AD_COLS` ; les clés
+    inconnues sont ignorées silencieusement)."""
+    fields = {k: v for k, v in fields.items() if k in _ALLOWED_AD_COLS}
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    con = connect()
+    try:
+        con.execute(f"UPDATE ads SET {cols} WHERE id=?", (*fields.values(), ad_id))
+        con.commit()
+    finally:
+        con.close()
+
+
 def get_ad(ad_id: int) -> dict[str, Any] | None:
     con = connect()
     try:
@@ -470,6 +602,9 @@ _ALLOWED_CLIP_COLS = {
     "refs_needed", "is_anchor", "interaction_id",
     "block_n", "block_sub", "block_count", "block_title", "timecode", "direction",
     "segments", "shot_prompt", "refs_sent",
+    "video_prompt", "keyframe_mode", "keyframe_ok", "keyframe_source", "omni_prompt",
+    "speaker", "voice_ok", "wav_seconds", "clip_seconds", "raw_mp4_path", "frame0_path",
+    "drift_score", "drift_flag",
 }
 
 
@@ -718,6 +853,118 @@ def count_clips(status: str | None = None) -> int:
         else:
             row = con.execute("SELECT COUNT(*) AS n FROM clips").fetchone()
         return int(row["n"])
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- personnages (bibliothèque)
+_CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible"}
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def create_character(
+    name: str, description: str = "", planche_path: str = "", voice_id: str = "",
+    voice_profile: str = "", bible: str = "",
+) -> int:
+    """Crée un personnage réutilisable. `voice_profile` = fiche voix en JSON (str)."""
+    con = connect()
+    try:
+        cur = con.execute(
+            "INSERT INTO characters(name, description, planche_path, voice_id, voice_profile, "
+            "bible, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (name, description, planche_path, voice_id, voice_profile, bible, _now_iso()),
+        )
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def update_character(character_id: int, **fields: Any) -> None:
+    """Met à jour un personnage (liste blanche `_CHARACTER_COLS`, clés inconnues ignorées)."""
+    fields = {k: v for k, v in fields.items() if k in _CHARACTER_COLS}
+    if not fields:
+        return
+    cols = ", ".join(f"{k}=?" for k in fields)
+    con = connect()
+    try:
+        con.execute(f"UPDATE characters SET {cols} WHERE id=?", (*fields.values(), character_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_character(character_id: int) -> dict[str, Any] | None:
+    con = connect()
+    try:
+        row = con.execute("SELECT * FROM characters WHERE id=?", (character_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def list_characters() -> list[dict[str, Any]]:
+    con = connect()
+    try:
+        rows = con.execute("SELECT * FROM characters ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def delete_character(character_id: int) -> None:
+    con = connect()
+    try:
+        con.execute("DELETE FROM characters WHERE id=?", (character_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- presets
+def save_preset(name: str, data: str) -> int:
+    """UPSERT par nom : `data` = JSON (str). Renvoie l'id du preset (inchangé si mise à jour)."""
+    now = _now_iso()
+    con = connect()
+    try:
+        con.execute(
+            "INSERT INTO presets(name, data, created_at, updated_at) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (name, data, now, now),
+        )
+        con.commit()
+        row = con.execute("SELECT id FROM presets WHERE name=?", (name,)).fetchone()
+        return int(row["id"]) if row else 0
+    finally:
+        con.close()
+
+
+def get_preset(preset_id: int) -> dict[str, Any] | None:
+    con = connect()
+    try:
+        row = con.execute("SELECT * FROM presets WHERE id=?", (preset_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def list_presets() -> list[dict[str, Any]]:
+    con = connect()
+    try:
+        rows = con.execute("SELECT * FROM presets ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def delete_preset(preset_id: int) -> None:
+    con = connect()
+    try:
+        con.execute("DELETE FROM presets WHERE id=?", (preset_id,))
+        con.commit()
     finally:
         con.close()
 

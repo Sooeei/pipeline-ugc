@@ -11,7 +11,7 @@ import anthropic
 import pytest
 from fastapi.testclient import TestClient
 
-from app import brain, config_app, db, pipeline
+from app import brain, config_app, cost, db, pipeline
 from app.main import app
 from app.providers import ProviderConfig
 
@@ -90,7 +90,9 @@ def test_bible_identical_in_all_ten_prompt_images():
     res = _sim_plan()
     text = brain.bible_text(res["bible"])
     assert P1_EN in text and P2_EN in text
-    assert all(s["prompt_image"].startswith(text) for s in res["shots"])   # mot pour mot
+    # mot pour mot, juste après les TRAITS CLÉS placés en tête (v2)
+    assert all(s["prompt_image"].startswith("KEY TRAITS") and f"\n\n{text}\n\nTHIS SHOT:" in s["prompt_image"]
+               for s in res["shots"])
     assert all(s["prompt_image"] == brain.compose_client_prompt_image(res["bible"], s["shot_prompt"])
                for s in res["shots"])
 
@@ -165,8 +167,9 @@ def _chain_ad(tmp_path, n_segments=3):
     texts = [f"Voici le segment numéro {i} de ce plan." for i in range(1, n_segments + 1)]
     img = media.make_placeholder_image(tmp_path / "plan.png", "x")
     cid = db.create_clip(ad_id, 1, " ".join(texts), "m", prompt_image="p")
-    db.update_clip(cid, image_path=img, status="valide", block_n=2,
+    db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1, block_n=2,
                    segments=json.dumps([{"text": t, "motion": f"motion {i}"} for i, t in enumerate(texts, 1)]))
+    db.set_ad_keyframes_ok(ad_id, True)   # « Valider les keyframes »
     return ad_id, cid
 
 
@@ -275,7 +278,16 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         })
         assert r.status_code == 200, r.text
         plan = r.json()
-        assert plan["mode"] == "client" and plan["blocks"] == 10 and len(plan["shots"]) == 10
+        # /plan renvoie désormais le découpage v2 (1 bloc = 1 réplique ≤ 10 s, sans tours)…
+        assert plan["mode"] == "client" and plan["blocks"] == 10 and len(plan["shots"]) > 10
+        assert all(s["segments"] == [] and s["speaker"] == 1 for s in plan["shots"])
+        # …ce test couvre l'ANCIEN pipeline (pubs v1 : chaîne de tours Omni) : plan v1 direct.
+        personas = plan["personas"]
+        plan = brain.generate_avatar_omni_client_plan(
+            ProviderConfig(dry_run=True), DOC, personas=personas, words_per_sec=2.5,
+            voice_profiles={"1": {"pace": "naturel"}})
+        plan["personas"] = personas
+        assert plan["blocks"] == 10 and len(plan["shots"]) == 10
         bible_en = {**plan["bible"], "character1": P1_EN, "character2": P2_EN}
         r = c.post("/api/avatar-omni/generate-images", data={
             "ad_name": "nuansa", "shots_json": json.dumps(plan["shots"]), "confirm": "true",
@@ -287,6 +299,7 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         assert r.status_code == 200, r.text
         ad_id = r.json()["ad_id"]
         _wait(c, r.json()["job_id"])
+        db.set_ad_fields(ad_id, pipeline_version=1)   # pub v1 (ancien pipeline Omni)
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
         assert len(ad["shots"]) == 10 and ad["bible_text"]
         b2 = ad["shots"][1]
@@ -313,8 +326,11 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         _wait(c, r.json()["job_id"])
         p, store = first_prompts[-1]
         assert store is True and "[97 %]" not in p and "97 % des femmes" in p
-        assert f"({P1_EN}) says" in p and f"({P2_EN}) remains silent" in p
-        assert P1_FR not in p and P2_FR not in p                            # jamais le FR brut
+        # Tour 1 + video_prompt (étape Keyframes) : le keyframe porte le visuel, les descriptions
+        # des personnages restent dans les tours d'extension.
+        every = " ".join([p, *(q for _, q in ext_prompts)])
+        assert f"({P1_EN}) says" in every and f"({P2_EN}) remains silent" in every
+        assert P1_FR not in every and P2_FR not in every                    # jamais le FR brut
         assert len(ext_prompts) == len(s9["segments"]) - 1
         assert all(prev.startswith("SIMU_OMNI") for prev, _ in ext_prompts)
         clip9 = db.get_clip(s9["clip_id"])
@@ -451,19 +467,22 @@ def _client_plan_via_api(c):
     return r.json()
 
 
-def test_plan_duration_and_estimate_are_sum_of_turns():
+def test_plan_duration_and_estimate_are_sum_of_blocks():
+    """v2 (voix native) : durée d'un bloc = durée de clip du modèle vidéo estimée depuis le texte
+    (2,5 mots/s + 1 s) ; estimation = Σ des blocs (vidéo seule, pas de part ElevenLabs), 0 $ en
+    simulation."""
     with _client() as c:
         plan = _client_plan_via_api(c)
-        sums = [sum(x["seconds"] for x in s["segments"]) for s in plan["shots"]]
-        assert [s["duration_s"] for s in plan["shots"]] == sums          # « ~X s » par plan
-        assert max(sums) > config_app.OMNI_MAX_CLIP_SECONDS               # plus de ~10 s fixe
+        model = config_app.normalize_avatar_video_model("")
+        secs = [config_app.avatar_native_clip_seconds(s["dialogue"], model) for s in plan["shots"]]
+        assert [s["duration_s"] for s in plan["shots"]] == secs          # « ~X s » par bloc
+        assert all(s["est_seconds"] <= config_app.AVATAR_MAX_BLOCK_S for s in plan["shots"])
         e = plan["estimate"]
-        assert e["seconds_total"] == sum(sums)                            # estimation globale
-        assert e["usd_video"] == round(sum(sums) * config_app.OMNI_COST_PER_SECOND_USD, 2)
-        assert e["tier1_warning"] == (e["usd_video"] > config_app.OMNI_TIER1_WINDOW_USD)
-        r = c.post("/api/avatar-omni/estimate",
-                   json={"shots": plan["shots"], "voice_profile": {"pace": "naturel"}})
-        assert r.json()["seconds_total"] == sum(sums)
+        assert e["seconds_total"] == sum(secs) and e["n_clips"] == len(secs)
+        assert e["usd_total"] == 0 and e["dry_run"] is True              # simulation → 0 $
+        assert e["voice_chars"] == 0                                     # voix native : 0 ElevenLabs
+        est = cost.estimate_avatar_v2(secs, model, e["voice_chars"])     # réel : tarif du modèle
+        assert est["usd_video"] > 0 and est["usd_voice"] == 0
 
 
 def test_spend_cap_uses_sum_of_turns(monkeypatch, tmp_path):
@@ -553,7 +572,8 @@ def test_animate_all_is_paced_with_visible_queue(monkeypatch, tmp_path):
     img = media.make_placeholder_image(tmp_path / "p.png", "x")
     for n in (1, 2, 3):
         cid = db.create_clip(ad_id, n, f"Voici la phrase du plan numéro {n}.", "m", prompt_image="p")
-        db.update_clip(cid, image_path=img, status="valide")
+        db.update_clip(cid, image_path=img, status="valide", keyframe_ok=1)
+    db.set_ad_keyframes_ok(ad_id, True)   # « Valider les keyframes »
     one = pipeline.clip_omni_seconds(db.clips_for_ad(ad_id)[0], None) * config_app.OMNI_COST_PER_SECOND_USD
     clk = _FakeClock()
     pacer = pipeline.Tier1Pacer(one * 1.5, 600, clock=clk.now, sleep=clk.sleep)   # 1 plan / fenêtre

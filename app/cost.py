@@ -112,12 +112,12 @@ def estimate_grok_video(
 
 
 def estimate_avatar_omni(seconds_list: list[int]) -> dict[str, Any]:
-    """Coût estimé « Avatar IA (Omni) » en DOLLARS : Nano Banana (1 image/plan) + Google Omni
-    (vidéo + voix, à la seconde). `seconds_list` = durée Omni RÉELLE de chaque plan."""
+    """Coût estimé « Avatar IA (Omni) » en DOLLARS : Nano Banana Pro (1 keyframe/plan) + Google
+    Omni (vidéo + voix, à la seconde). `seconds_list` = durée Omni RÉELLE de chaque plan."""
     secs = [max(0, int(s or 0)) for s in seconds_list or []]
     n = len(secs)
     seconds_total = sum(secs)
-    usd_images = round(n * config_app.NANO_BANANA_COST_PER_IMAGE_USD, 2)
+    usd_images = round(n * omni_keyframe_image_usd(), 2)
     usd_video = round(seconds_total * config_app.OMNI_COST_PER_SECOND_USD, 2)
     return {
         "shots": n,
@@ -131,6 +131,45 @@ def estimate_avatar_omni(seconds_list: list[int]) -> dict[str, Any]:
         "tier1_warning": usd_video > config_app.OMNI_TIER1_WINDOW_USD,
         "tier1_wait_min": tier1_wait_minutes(usd_video),
     }
+
+
+def estimate_avatar_v2(
+    seconds_list: list[int], video_model: str, voice_chars: int = 0, dry_run: bool = False,
+) -> dict[str, Any]:
+    """Coût estimé « Avatar IA » v2 (audio-first), en DOLLARS : vidéo = Σ(durée du clip × tarif/s
+    du modèle + image de départ) (AVATAR_VIDEO_MODELS) ; voix = caractères ElevenLabs encore à
+    générer × tarif / 1000. Lip-sync = 0 (aucun service dédié). Simulation → tout à 0 $."""
+    key = config_app.normalize_avatar_video_model(video_model)
+    spec = config_app.AVATAR_VIDEO_MODELS[key]
+    secs = [max(0, int(s or 0)) for s in seconds_list or []]
+    usd_video = sum(s * spec["cost_per_second_usd"] + spec["cost_per_input_image_usd"] for s in secs)
+    usd_voice = max(0, int(voice_chars or 0)) / 1000 * config_app.ELEVENLABS_COST_PER_1K_CHARS_USD
+    if dry_run:
+        usd_video = usd_voice = 0.0
+    return {
+        "usd_voice": round(usd_voice, 2),
+        "usd_video": round(usd_video, 2),
+        "usd_lipsync": 0.0,
+        "usd_total": round(usd_voice + usd_video, 2),
+        "seconds_total": sum(secs),
+        "n_clips": len(secs),
+        "voice_chars": max(0, int(voice_chars or 0)),
+        "video_model": key,
+        "dry_run": bool(dry_run),
+    }
+
+
+def image_model_usd(model_key: str) -> float:
+    """Tarif estimé ($/image) d'un modèle d'image (clé OBJET_IMAGE_MODELS)."""
+    cfg = config_app.OBJET_IMAGE_MODELS.get(model_key)
+    if cfg is None:
+        return config_app.NANO_BANANA_COST_PER_IMAGE_USD
+    return config_app.COST_USD_PER_IMAGE.get(cfg["model"], config_app.COST_USD_PER_IMAGE_DEFAULT)
+
+
+def omni_keyframe_image_usd() -> float:
+    """Tarif d'un keyframe Avatar IA (toujours Nano Banana Pro)."""
+    return image_model_usd(config_app.OMNI_KEYFRAME_IMAGE_MODEL)
 
 
 def tier1_wait_minutes(usd_video: float) -> int:
@@ -186,6 +225,14 @@ def record_gradium_tts(ad_id: int | None) -> None:
     db.add_cost_event("gradium", "generation", 1, ad_id=ad_id)
 
 
+def record_elevenlabs(ad_id: int | None, chars: int) -> None:
+    """1 synthèse ElevenLabs (voix d'un bloc Avatar IA v2) facturée au CARACTÈRE (estimation
+    ELEVENLABS_COST_PER_1K_CHARS_USD). JAMAIS en simulation."""
+    n = max(0, int(chars or 0))
+    usd = n / 1000 * config_app.ELEVENLABS_COST_PER_1K_CHARS_USD
+    db.add_cost_event("elevenlabs", "char", n, usd=usd, ad_id=ad_id, detail=config_app.ELEVENLABS_MODEL_ID)
+
+
 def record_anthropic_call(
     input_tokens: int = 0, output_tokens: int = 0, ad_id: int | None = None
 ) -> None:
@@ -211,11 +258,12 @@ _SERVICE_LABELS = {
     "gemini": "Google Gemini — Avatar IA Omni (vidéo + voix)",
     "heygen": "HeyGen — avatar (crédits)",
     "gradium": "Gradium — voix",
+    "elevenlabs": "ElevenLabs — voix Avatar IA",
     "anthropic": "Anthropic — cerveau",
     "claude_code": "Claude Code (quota abonnement)",
 }
-_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "anthropic",
-                  "claude_code"]
+_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "elevenlabs",
+                  "anthropic", "claude_code"]
 
 
 def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
@@ -237,6 +285,8 @@ def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
         return f"{n('credit')} clip(s) · {round(q('credit'))} crédits"
     if svc == "gradium":
         return f"{n('generation')} génération(s)"
+    if svc == "elevenlabs":
+        return f"{n('char')} voix · {round(q('char'))} caractères"
     if svc in ("anthropic", "claude_code"):
         return f"{n('call')} appel(s)"
     return ", ".join(f"{int(v.get('n', 0))} {k}" for k, v in units.items())

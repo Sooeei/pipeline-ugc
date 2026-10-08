@@ -117,6 +117,7 @@ async function loadSettings() {
   setKeyField("claudeCodeToken", s.claude_code_token_set);
   renderBrainEngine(s);
   if ($("geminiKey")) setKeyField("geminiKey", s.gemini_api_key_set);
+  if ($("elevenlabsKey")) setKeyField("elevenlabsKey", s.elevenlabs_api_key_set);
   $("gradiumModel").value = s.gradium_model || "default";
   $("heygenVoiceId").value = s.heygen_voice_id || "";
   $("brainModel").value = s.brain_model || "claude-sonnet-5";
@@ -175,6 +176,12 @@ async function loadSettings() {
   if ($("spendCap")) $("spendCap").value = s.spend_cap_usd ?? 25;
   if ($("omniDailyLimit")) $("omniDailyLimit").value = s.omni_daily_request_limit ?? 20;
   if ($("omniMaxSpoken")) $("omniMaxSpoken").value = s.omni_max_spoken_clip_seconds ?? 8;
+  if (s.avatar_video_models && s.avatar_video_models.length) {
+    fillSelect("avatarVideoModel", s.avatar_video_models, s.avatar_video_model);
+  } else if ($("avatarVideoModel")) {
+    $("avatarVideoModel").value = s.avatar_video_model || "grok";
+  }
+  if ($("driftThreshold")) $("driftThreshold").value = s.drift_threshold ?? 0.8;
   setModeBadge(!!s.dry_run);
   renderAvatars(s.avatars || []);
   renderVoices(s.voices || []);
@@ -306,6 +313,7 @@ $("saveSettings").addEventListener("click", async () => {
     claude_code_token: $("claudeCodeToken") ? $("claudeCodeToken").value.trim() : "",
     claude_code_model: ($("claudeCodeModel") && $("claudeCodeModel").value) || "",
     gemini_api_key: ($("geminiKey") && $("geminiKey").value.trim()) || "",   // vide = garder
+    elevenlabs_api_key: ($("elevenlabsKey") && $("elevenlabsKey").value.trim()) || "",   // vide = garder
     brain_model: $("brainModel").value.trim(),
     cost_mode: $("costModeDefault").value,
     objet_image_model: $("objetImageModel").value,
@@ -321,6 +329,9 @@ $("saveSettings").addEventListener("click", async () => {
       ? parseInt($("omniDailyLimit").value, 10) : null,
     omni_max_spoken_clip_seconds: ($("omniMaxSpoken") && $("omniMaxSpoken").value !== "")
       ? Math.min(10, Math.max(3, parseInt($("omniMaxSpoken").value, 10) || 8)) : null,
+    avatar_video_model: ($("avatarVideoModel") && $("avatarVideoModel").value) || "",
+    drift_threshold: ($("driftThreshold") && $("driftThreshold").value !== "")
+      ? Math.min(1, Math.max(0, parseFloat($("driftThreshold").value) || 0)) : null,
   };
   await api("/api/settings", {
     method: "POST",
@@ -634,8 +645,9 @@ $("testConn").addEventListener("click", async () => {
 async function loadDashboard() {
   const d = await api("/api/dashboard");
   setModeBadge(!!d.dry_run);
-  renderCredits($("gradiumCredits"), d.gradium_credits);
-  renderQuota($("heygenQuota"), d.heygen_quota);
+  renderOpenrouterTile($("dashOpenrouter"), d.openrouter);
+  renderXaiTile($("dashXai"), d.xai);
+  renderElevenlabsTile($("dashElevenlabs"), d.elevenlabs);
   $("totalVideos").textContent = d.total_videos ?? "0";
   const ul = $("activityList");
   ul.innerHTML = "";
@@ -665,38 +677,45 @@ function pickNum(obj, keys) {
   return null;
 }
 
-// Écrit dans la tuile : gros nombre + éventuellement « sur N » en dessous.
-function setTile(el, remaining, allocated) {
-  if (remaining == null && allocated == null) {
-    el.textContent = "—"; // rien d'exploitable -> on n'affiche JAMAIS le JSON brut
+// Tuile vide/absente/simulation → « — » (jamais d'erreur). Renvoie true si la tuile est traitée.
+function dashTileEmpty(el, o) {
+  if (!el) return true;
+  if (!o || typeof o !== "object" || !Object.keys(o).length) { el.textContent = "—"; return true; }
+  if (o.simulation) { el.innerHTML = '— <span class="card-sub">(simulation)</span>'; return true; }
+  return false;
+}
+
+// OpenRouter : {ok, balance_usd, usage_usd}
+function renderOpenrouterTile(el, o) {
+  if (dashTileEmpty(el, o)) return;
+  const bal = pickNum(o, ["balance_usd", "balance", "remaining_usd"]);
+  const use = pickNum(o, ["usage_usd", "usage"]);
+  if (bal == null && use == null) return void (el.textContent = o.ok ? "✓" : "—");
+  el.innerHTML = (bal != null ? esc(usd(bal)) : "—") +
+    (use != null ? `<div class="card-sub">utilisé ${esc(usd(use))}</div>` : "");
+}
+
+// xAI : {ok, ...} (contenu variable selon l'API — solde si fourni, sinon état de la clé)
+function renderXaiTile(el, o) {
+  if (dashTileEmpty(el, o)) return;
+  const bal = pickNum(o, ["balance_usd", "remaining_usd", "balance", "credits_usd"]);
+  const use = pickNum(o, ["usage_usd", "spent_usd", "usage"]);
+  if (bal == null && use == null) {
+    el.innerHTML = o.ok ? '✓ <span class="card-sub">clé valide</span>' : "—";
     return;
   }
-  const main = remaining != null ? frNum(remaining) : frNum(allocated);
-  const sub = remaining != null && allocated != null ? `sur ${frNum(allocated)}` : "";
-  el.innerHTML = esc(main) + (sub ? `<div class="card-sub">${esc(sub)}</div>` : "");
+  el.innerHTML = (bal != null ? esc(usd(bal)) : "—") +
+    (use != null ? `<div class="card-sub">utilisé ${esc(usd(use))}</div>` : "");
 }
 
-function renderCredits(el, c) {
-  // Gradium credits() -> {remaining_credits, allocated_credits, ...}
-  if (!c) return void (el.textContent = "—");
-  if (c.simulation) return void (el.innerHTML = '— <span class="card-sub">(simulation)</span>');
-  const remaining = pickNum(c, ["remaining_credits", "remaining", "credits", "balance"]);
-  const allocated = pickNum(c, ["allocated_credits", "allocated", "total"]);
-  setTile(el, remaining, allocated);
-}
-
-function renderQuota(el, q) {
-  // HeyGen quota -> {simulation} ou {remaining: <nombre|objet>}
-  if (!q) return void (el.textContent = "—");
-  if (q.simulation) return void (el.innerHTML = '— <span class="card-sub">(simulation)</span>');
-  let remaining = pickNum(q, ["remaining_quota", "remaining", "credits", "balance"]);
-  let allocated = pickNum(q, ["allocated_quota", "allocated", "total"]);
-  // HeyGen renvoie souvent {remaining: {...}} : on regarde à l'intérieur
-  if (remaining == null && q.remaining && typeof q.remaining === "object") {
-    remaining = pickNum(q.remaining, ["remaining_quota", "remaining", "credits", "balance"]);
-    allocated = allocated ?? pickNum(q.remaining, ["allocated_quota", "allocated", "total"]);
-  }
-  setTile(el, remaining, allocated);
+// ElevenLabs : {ok, characters_used, characters_limit}
+function renderElevenlabsTile(el, o) {
+  if (dashTileEmpty(el, o)) return;
+  const used = pickNum(o, ["characters_used", "character_count"]);
+  const lim = pickNum(o, ["characters_limit", "character_limit"]);
+  if (used == null && lim == null) return void (el.textContent = o.ok ? "✓" : "—");
+  el.innerHTML = esc(used != null ? frNum(used) : "—") +
+    (lim != null ? `<div class="card-sub">sur ${esc(frNum(lim))}</div>` : "");
 }
 
 // ------------------------------------------------ NOUVELLE PUB
@@ -1011,6 +1030,7 @@ const PHASE_LABEL = {
   en_attente: "en attente", voix: "voix off…", voix_ok: "voix ✓ (attente vidéo)",
   upload: "envoi audio…", rendu: "rendu vidéo…", image: "image…", animation: "animation…",
   clip: "clip ✓", pret: "prêt ✓", erreur: "échec", attente_tier1: "pause Tier 1",
+  keyframe: "keyframe…", omni: "vidéo Omni…", extension: "extension Omni…", assemblage: "assemblage…",
 };
 
 // Traduit une erreur brute (Gradium/HeyGen) en message court et lisible.
@@ -1130,6 +1150,10 @@ const AO_REF_KIND_OPTS = [
   { v: "visage2", t: "Visage perso 2" },
   { v: "visage3", t: "Visage perso 3" },
   { v: "visage4", t: "Visage perso 4" },
+  { v: "planche1", t: "Planche perso 1" },
+  { v: "planche2", t: "Planche perso 2" },
+  { v: "planche3", t: "Planche perso 3" },
+  { v: "planche4", t: "Planche perso 4" },
   { v: "produit", t: "Produit" },
   { v: "decor", t: "Décor" },
   { v: "style", t: "Style" },
@@ -1917,12 +1941,15 @@ function renderClipAds(root, ads, emptyMsg) {
     block.className = "lib-ad";
     const hasFiles = (ad.clips || []).some((c) => c.media_url && c.status === "pret");
     block.innerHTML = libAdHeader(ad, "video", hasFiles);
+    if (ad.kind === "avatar_omni") aoLibAdExtras(block, ad);
     const grid = document.createElement("div");
-    grid.className = "clip-grid";
+    grid.className = "clip-grid" + (ad.kind === "avatar_omni" ? " ao-lib-grid" : "");
     ad.clips.forEach((c) => {
       const div = document.createElement("div");
       div.className = "clip" + (c.status === "echec" ? " echec" : "");
-      if (c.media_url && c.status === "pret") {
+      if (ad.kind === "avatar_omni") {
+        aoLibClip(div, ad, c);
+      } else if (c.media_url && c.status === "pret") {
         div.innerHTML =
           `<video src="${esc(c.media_url)}" controls preload="metadata"></video>` +
           `<div class="meta"><span class="scene-n">#${c.scene_n}</span>` +
@@ -1937,6 +1964,100 @@ function renderClipAds(root, ads, emptyMsg) {
     block.appendChild(grid);
     root.appendChild(block);
   });
+}
+
+// prompts Omni envoyés : liste (contrat) ; tolère une chaîne JSON ou un texte brut.
+function aoPromptList(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    try { const l = JSON.parse(v); return Array.isArray(l) ? l : [String(l)]; } catch (_) { return [v]; }
+  }
+  return [];
+}
+
+// Clip Avatar IA en Bibliothèque : keyframe à côté de la vidéo + prompts + « Relancer la vidéo seule ».
+function aoLibClip(div, ad, c) {
+  const ok = c.media_url && c.status === "pret";
+  const bust = (u) => (u.includes("?") ? "&" : "?") + "t=" + Date.now();
+  const kf = c.image_url
+    ? `<figure class="ao-lib-kf"><img src="${esc(c.image_url)}${bust(c.image_url)}" alt="keyframe #${esc(c.scene_n)}" loading="lazy" />` +
+      `<figcaption>Keyframe${AO_KF_SOURCE[c.keyframe_source] ? " · " + esc(AO_KF_SOURCE[c.keyframe_source]) : ""}</figcaption></figure>`
+    : `<figure class="ao-lib-kf"><div class="ao-lib-empty">${c.keyframe_mode === "texte_seul" ? "Omni texte seul" : "pas de keyframe"}</div>` +
+      `<figcaption>Keyframe</figcaption></figure>`;
+  const vid = ok
+    ? `<figure class="ao-lib-vid"><video src="${esc(c.media_url)}" controls preload="metadata"></video><figcaption>Vidéo</figcaption></figure>`
+    : `<figure class="ao-lib-vid"><div class="ao-lib-empty err">${esc(c.error || "non généré")}</div><figcaption>Vidéo</figcaption></figure>`;
+  const v2 = Number(ad.pipeline_version) === 2;
+  // v2 : frame 0 de la vidéo à côté du keyframe + score de dérive (contrôle obligatoire).
+  const frame0 = v2
+    ? (c.frame0_url
+      ? `<figure class="ao-lib-kf"><img src="${esc(c.frame0_url)}${bust(c.frame0_url)}" alt="frame 0 #${esc(c.scene_n)}" loading="lazy" />` +
+        `<figcaption>Frame 0${aoDriftText(c)}</figcaption></figure>`
+      : `<figure class="ao-lib-kf"><div class="ao-lib-empty">pas de frame 0</div><figcaption>Frame 0</figcaption></figure>`)
+    : "";
+  const drift = v2 && Number(c.drift_flag) ? `<span class="badge ko ao-drift" title="Frame 0 trop éloignée du keyframe — relance conseillée">Dérive</span>` : "";
+  const omni = aoPromptList(c.omni_prompt);
+  const prompts =
+    `<details class="ao-lib-prompts"><summary>Prompts</summary>` +
+    `<div class="lbl">🖼️ Prompt image</div><div class="pi-ro">${esc(c.prompt_image || "—")}</div>` +
+    `<div class="lbl">🎥 Prompt vidéo</div><div class="pi-ro">${esc(c.video_prompt || "—")}</div>` +
+    `<div class="lbl">📤 Prompts envoyés à Omni${omni.length ? ` (${omni.length} tour${omni.length > 1 ? "s" : ""})` : ""}</div>` +
+    (omni.length
+      ? omni.map((t, i) => `<div class="pi-ro">${omni.length > 1 ? `<b>Tour ${i + 1}</b> — ` : ""}${esc(typeof t === "string" ? t : JSON.stringify(t))}</div>`).join("")
+      : `<div class="pi-ro">—</div>`) +
+    `</details>`;
+  div.innerHTML =
+    `<div class="ao-lib-media${v2 ? " v2" : ""}">${kf}${frame0}${vid}</div>` +
+    `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}` +
+    (ok ? `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a>` : "") + `</div>` +
+    prompts +
+    `<div class="ao-lib-actions"><button class="btn small btn-relaunch" type="button" ` +
+    (v2
+      ? `title="Refait uniquement la vidéo de ce bloc (même keyframe, même voix)">🔁 Relancer la vidéo</button>`
+      : `title="Refait uniquement la vidéo Omni avec le même keyframe (aucune nouvelle image)">🔁 Relancer la vidéo seule</button>`) +
+    `<span class="ao-lib-state muted small"></span></div>`;
+  const btn = div.querySelector(".btn-relaunch");
+  const state = div.querySelector(".ao-lib-state");
+  btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
+}
+
+// Relance la vidéo d'UN clip Avatar IA depuis la Bibliothèque (même keyframe, pas de Nano Banana).
+async function aoLibRelaunch(ad, c, btn, state) {
+  btn.disabled = true;
+  try {
+    // Durée + tours à jour (estimation de coût) ; la Bibliothèque ne les porte pas.
+    let shot = null;
+    try {
+      const r = await api(AO_API + "/ad/" + ad.id);
+      if (!aoOmniDailyLimit && r.omni_daily_limit) aoOmniDailyLimit = r.omni_daily_limit;
+      shot = (r.shots || []).find((x) => x.clip_id === c.id) || null;
+    } catch (_) { /* estimation approximative */ }
+    if (shot && !aoKfOk(shot)) {
+      toast("Ce keyframe n'est pas validé : valide-le dans le flux Avatar IA avant de relancer.");
+      return;
+    }
+    const v2 = Number(ad.pipeline_version) === 2;
+    if (v2 && shot && !aoVoiceOkShot(shot)) {
+      toast("La voix de ce bloc n'est pas validée : valide-la (étape 4b) avant de relancer.");
+      return;
+    }
+    const shots = [Object.assign({ status: "pret", duration_s: 0, segments: [] }, shot || {}, { status: "pret" })];
+    const res = await aoPostAnimate(ad.id, shots, c.id, { relaunch: true, v2 });
+    if (!res) return;
+    state.textContent = "⏳ Vidéo en cours…";
+    toast("Relance de la vidéo lancée…");
+    const j = await waitJobDone(res.job_id);
+    if (!j) state.textContent = "Suivi interrompu — rafraîchis la Bibliothèque.";
+    else if (j.state === "echec" || Number((j.summary || {}).echec || 0) > 0) {
+      state.textContent = "";
+      toast(prettyError((j.summary && j.summary.message) || "La relance a échoué."));
+    } else {
+      toast("Vidéo refaite ✓");
+    }
+    loadLibraryVideos().catch(() => {});
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Avatar (HeyGen) + Objet animé (Grok) partagent /api/library ; on filtre par ad.kind.
@@ -2932,11 +3053,30 @@ let aoLastEstimate = null;   // estimation du plan (cout_omni_par_seconde_usd, �
 let aoGalleryShots = [];     // derniers plans reçus de GET /ad (durées Omni réelles)
 let aoVoiceUnlockedBy = {}; // par personnage : déverrouillage explicite (→ force:true), 1 sauvegarde
 let aoOmniDailyLimit = null; // quota Google Omni (requêtes/jour) renvoyé par GET /ad
+let aoKeyframesOk = false;   // ads.keyframes_ok : « Valider les keyframes » cliqué (sinon pas de vidéo)
+// ---- Pipeline v2 « audio-first » (voix ElevenLabs → keyframes → 1 vidéo par bloc) ----
+let aoAdState = null;        // dernière réponse GET /ad (pipeline_version, voices_ok, final_url…)
+let aoVoicesOk = false;      // ads.voices_ok : « Valider les voix » cliqué
+let aoPresetBible = null;    // bible des persos chargés (preset / bibliothèque) {character1: …}
+let aoPresetOptions = null;  // {video_model, voice_mode} du preset chargé (appliqués à la nouvelle pub)
+let aoCharSlotIds = {};      // perso N → id du personnage de la bibliothèque (preset / « Utiliser »)
+let aoPresetPlanches = {};   // perso N → planche_url (bibliothèque)
+const aoRefObjUrls = new Map();   // File → objectURL (aperçu planche à côté du keyframe)
+const AO_EL_USD_PER_1K = 0.30;    // estimation ElevenLabs ($ / 1000 caractères) — même valeur que le backend
+const AO_VIDEO_MODEL_LABEL = { grok: "Grok Imagine", kling: "Kling 3.0", omni: "Omni (Google)" };
 const AO_API = "/api/avatar-omni";
+// Voix ElevenLabs « maître » : DÉSACTIVÉE (masquée, code conservé). La voix est toujours générée
+// nativement par le modèle vidéo. Pour réactiver : true ici + config_app.ACTIVE_VOICE_MODES.
+const AO_ELEVENLABS_ENABLED = false;
+// La pub utilise-t-elle les voix ElevenLabs (étape 4b + garde-fou « voix validées ») ?
+function aoUsesElVoices(ad) {
+  const a = ad || aoAdState || {};
+  return AO_ELEVENLABS_ENABLED && a.voice_mode === "elevenlabs";
+}
 const AO_DEFAULT_RATE = 0.10;        // $/s (720p) — même formule que le backend
 const AO_TIER1_USD = 10;             // quota Google Tier 1 : 10 $ / 10 min
 const AO_DEFAULT_ACCENT = "natural French accent from France";
-const AO_VOICE_FIELDS = ["Gender", "Age", "AccentRegion", "Accent", "Tone", "Pace", "Extra"];
+const AO_VOICE_FIELDS = ["Gender", "Age", "AccentRegion", "Accent", "Tone", "Pace", "Extra", "VoiceId", "VoiceSel"];
 
 function aoRate() {
   const r = aoLastEstimate && Number(aoLastEstimate.cout_omni_par_seconde_usd);
@@ -2966,7 +3106,94 @@ function aoFillVoiceSelects() {
     fill(p + "Tone", s.objet_voice_styles, ["douce", s.objet_voice_style]);
     fill(p + "Pace", s.objet_voice_paces, ["naturel", s.objet_voice_pace]);
   });
+  aoFillElSelects();
 }
+
+// ---- Voix ElevenLabs (pipeline v2) : voice ID par personnage, sauvé dans voice_profile.voice_id ----
+let aoElVoices = null;        // cache GET /api/elevenlabs/voices
+let aoElVoicesMsg = "";
+let aoElAudio = null;         // lecteur partagé des extraits
+
+function aoVoiceIdHtml(prefix) {
+  return `<label class="ao-elv">Voice ID ElevenLabs <span class="muted">(voix de ce perso, pipeline v2)</span>` +
+    `<span class="ao-elv-row"><select id="${prefix}VoiceSel" class="ao-el-sel" data-prefix="${prefix}">` +
+    `<option value="">— voix ElevenLabs —</option></select>` +
+    `<input type="text" id="${prefix}VoiceId" maxlength="64" placeholder="ou colle un voice ID" />` +
+    `<button type="button" class="btn small ao-el-play" data-prefix="${prefix}">▶ Écouter un extrait</button></span>` +
+    `<span class="muted small ao-el-hint"></span></label>`;
+}
+
+async function aoLoadElVoices(refresh) {
+  if (!AO_ELEVENLABS_ENABLED) return [];
+  if (aoElVoices && !refresh) return aoElVoices;
+  try {
+    const r = await api("/api/elevenlabs/voices");
+    aoElVoices = Array.isArray(r.voices) ? r.voices : [];
+    aoElVoicesMsg = r.message || (aoElVoices.length ? "" : "Aucune voix ElevenLabs (clé absente ou simulation) — colle un voice ID.");
+  } catch (e) {
+    aoElVoices = [];
+    aoElVoicesMsg = "Liste ElevenLabs indisponible : " + e.message;
+  }
+  aoFillElSelects();
+  return aoElVoices;
+}
+
+// Remplit tous les sélecteurs de voix ElevenLabs ; la sélection suit le voice ID saisi.
+function aoFillElSelects() {
+  document.querySelectorAll("select.ao-el-sel").forEach((sel) => {
+    const input = $(sel.dataset.prefix + "VoiceId");
+    const cur = input ? input.value.trim() : "";
+    const list = aoElVoices || [];
+    sel.innerHTML = `<option value="">— voix ElevenLabs —</option>` + list.map((v) => {
+      const lab = v.labels && typeof v.labels === "object"
+        ? Object.values(v.labels).filter((x) => typeof x === "string").slice(0, 3).join(", ") : "";
+      return `<option value="${esc(v.voice_id)}">${esc(v.name || v.voice_id)}${lab ? " — " + esc(lab) : ""}</option>`;
+    }).join("");
+    if (cur && !list.some((v) => v.voice_id === cur)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(cur)}">${esc(cur)} (saisi)</option>`);
+    }
+    sel.value = cur;
+    const hint = sel.closest(".ao-elv") && sel.closest(".ao-elv").querySelector(".ao-el-hint");
+    if (hint) hint.textContent = aoElVoicesMsg;
+  });
+}
+
+function aoPlayElPreview(voiceId) {
+  if (!voiceId) return toast("Choisis ou colle d'abord un voice ID ElevenLabs.");
+  if (!aoElAudio) aoElAudio = new Audio();
+  aoElAudio.pause();
+  aoElAudio.src = "/api/elevenlabs/preview/" + encodeURIComponent(voiceId);
+  aoElAudio.play().catch((e) => toast("Lecture impossible : " + e.message));
+}
+
+document.addEventListener("change", (ev) => {
+  const sel = ev.target;
+  if (!(sel instanceof HTMLSelectElement) || !sel.classList.contains("ao-el-sel")) return;
+  const input = $(sel.dataset.prefix + "VoiceId");
+  if (input && sel.value) input.value = sel.value;
+});
+document.addEventListener("input", (ev) => {
+  const el = ev.target;
+  if (!(el instanceof HTMLInputElement) || !/VoiceId$/.test(el.id || "")) return;
+  const sel = $(el.id.replace(/VoiceId$/, "VoiceSel"));
+  if (sel && [...sel.options].some((o) => o.value === el.value.trim())) sel.value = el.value.trim();
+});
+document.addEventListener("click", (ev) => {
+  const btn = ev.target instanceof Element ? ev.target.closest(".ao-el-play") : null;
+  if (!btn) return;
+  const input = $(btn.dataset.prefix + "VoiceId");
+  aoPlayElPreview(input ? input.value.trim() : "");
+});
+
+// Formulaires statiques (perso 1 avant génération : aoV* ; en galerie : aoEV*) → champ voice ID.
+(function initAoVoiceIdFields() {
+  if (!AO_ELEVENLABS_ENABLED) return;
+  ["aoV", "aoEV"].forEach((p) => {
+    const extra = $(p + "Extra");
+    const sheet = extra && extra.closest(".voice-sheet");
+    if (sheet && !$(p + "VoiceId")) sheet.insertAdjacentHTML("beforeend", aoVoiceIdHtml(p));
+  });
+})();
 
 // Formulaire de fiche voix (mêmes champs que aoV* / aoEV*) pour un préfixe d'ids donné.
 function aoVoiceFormHtml(prefix) {
@@ -2982,7 +3209,7 @@ function aoVoiceFormHtml(prefix) {
     `<label>Timbre <select id="${prefix}Tone"></select></label>` +
     `<label>Débit <select id="${prefix}Pace"></select></label>` +
     `<label>Précision libre <span class="muted">(optionnel, en anglais)</span>` +
-    `<input type="text" id="${prefix}Extra" maxlength="120" /></label></div>`;
+    `<input type="text" id="${prefix}Extra" maxlength="120" /></label>` + (AO_ELEVENLABS_ENABLED ? aoVoiceIdHtml(prefix) : "") + `</div>`;
 }
 
 // ---- Personnages 1..4 (nom court + description FR + parle/muet) ----
@@ -3023,7 +3250,7 @@ function aoCharName(n) {
 // Options de type de réf Avatar IA, avec le nom des personnages (« Visage perso 2 (Julie) »).
 function aoRefKindOpts() {
   return AO_REF_KIND_OPTS.map((o) => {
-    const m = /^visage(\d)$/.exec(o.v);
+    const m = /^(?:visage|planche)(\d)$/.exec(o.v);
     if (!m) return o;
     const nm = aoCharName(m[1]);
     return { v: o.v, t: nm.startsWith("Perso ") ? o.t : `${o.t} (${nm})` };
@@ -3101,6 +3328,9 @@ async function aoEnsureVoiceSelects() {
     if (!$("aoVTone").options.length) aoFillVoiceSelects();
     aoRenderVoiceForms();
   } catch (e) { toast(e.message); }
+  aoLoadElVoices();          // liste ElevenLabs (non bloquant)
+  aoLoadPresetList();        // presets client + bibliothèque de personnages
+  aoLoadCharLib();
 }
 
 function aoReadVoice(prefix) {
@@ -3113,6 +3343,7 @@ function aoReadVoice(prefix) {
     tone: v("Tone"),
     pace: v("Pace"),
     extra: v("Extra").trim(),
+    voice_id: v("VoiceId").trim(),   // ElevenLabs (v2) — jamais injecté dans un prompt
   };
 }
 
@@ -3132,6 +3363,9 @@ function aoWriteVoice(prefix, p) {
   if (p.tone) set("Tone", p.tone);
   if (p.pace) set("Pace", p.pace);
   set("Extra", p.extra || "");
+  set("VoiceId", p.voice_id || "");
+  const sel = $(prefix + "VoiceSel");
+  if (sel) aoFillElSelects();
 }
 
 // ---- Fiches voix en galerie : une par personnage qui parle (perso 1 = bloc aoEV* existant).
@@ -3516,13 +3750,13 @@ async function aoPhotoDataUrl(file, max = 1024) {
   } catch (_) { return url; }
 }
 
-// Une photo par type (visage1..visage4, produit) : celles que Claude regarde pour la bible.
+// Une photo par type (visage1..4, planche1..4, produit) : celles que Claude regarde pour la bible.
 async function aoBiblePhotos() {
   const out = [];
   const seen = new Set();
   for (let i = 0; i < aoRefsFiles.length; i++) {
     const kind = aoRefsKinds[i] === "visage" ? "visage1" : aoRefsKinds[i];
-    if (!["visage1", "visage2", "visage3", "visage4", "produit"].includes(kind) || seen.has(kind)) continue;
+    if (!/^(visage[1-4]|planche[1-4]|produit)$/.test(kind || "") || seen.has(kind)) continue;
     seen.add(kind);
     out.push({ kind, data: await aoPhotoDataUrl(aoRefsFiles[i]) });
   }
@@ -3553,6 +3787,10 @@ function aoAcceptPlan(r, msg) {
   aoShots = r.shots || [];
   aoPersonas = r.personas || null;
   aoPlanBible = r.bible || null;
+  // Preset / bibliothèque : la bible validée des personnages chargés prime sur celle du plan.
+  if (aoPlanBible && aoPresetBible) {
+    Object.entries(aoPresetBible).forEach(([k, v]) => { if (v && String(v).trim()) aoPlanBible[k] = v; });
+  }
   if (r.ad && !$("aoAdName").value.trim()) $("aoAdName").value = r.ad;
   msg.innerHTML = `<div class="ok">✓ ${aoShots.length} plan(s)${r.dry_run ? " (simulation)" : ""}.</div>`;
   renderAoPlan(aoShots, r);
@@ -3619,15 +3857,16 @@ $("aoValidateDocBtn").addEventListener("click", async () => {
 });
 
 const AO_REF_LABEL = { visage: "Visage perso 1", visage1: "Visage perso 1", visage2: "Visage perso 2",
-  visage3: "Visage perso 3", visage4: "Visage perso 4", produit: "Produit", decor: "Décor", style: "Style" };
+  visage3: "Visage perso 3", visage4: "Visage perso 4", planche1: "Planche perso 1", planche2: "Planche perso 2",
+  planche3: "Planche perso 3", planche4: "Planche perso 4", produit: "Produit", decor: "Décor", style: "Style" };
 
-// Libellé d'un type de réf avec le nom du personnage (« Visage perso 2 (Julie) »).
+// Libellé d'un type de réf avec le nom du personnage (« Visage perso 2 (Julie) », « Planche perso 1 »).
 function aoRefLabel(k) {
-  const m = /^visage(\d?)$/.exec(k || "");
-  if (m) {
-    const n = m[1] || "1";
+  const m = /^(visage|planche)(\d?)$/.exec(k || "");
+  if (m && (m[2] || m[1] === "visage")) {
+    const n = m[2] || "1";
     const nm = aoCharName(n);
-    return `Visage perso ${n}` + (nm.startsWith("Perso ") ? "" : ` (${nm})`);
+    return `${m[1] === "planche" ? "Planche" : "Visage"} perso ${n}` + (nm.startsWith("Perso ") ? "" : ` (${nm})`);
   }
   return AO_REF_LABEL[k] || k;
 }
@@ -3649,16 +3888,23 @@ function renderAoPlan(shots, r) {
     }
     prevBlock = s.block_n || null;
     const div = document.createElement("div");
-    div.className = "scene-card";
+    // Pipeline v2 : 1 bloc = 1 réplique d'UN perso (speaker) → qui parle + durée estimée en tête.
+    const v2 = !segs.length && s.speaker != null;
+    div.className = "scene-card" + (v2 ? " ao-v2-block" : "");
+    const v2Head = v2
+      ? ` · <span class="ao-turn-badge">🗣️ ${esc(s.dialogue && String(s.dialogue).trim() ? aoCharName(s.speaker) : "muet")}</span>` +
+        ` · ~${esc(s.duration_s ?? "?")} s`
+      : "";
     div.innerHTML =
-      `<div><span class="n">${aoPlanTitle(s)}</span> <span class="muted">réfs : ${esc(refsTxt)}` +
+      `<div><span class="n">${aoPlanTitle(s)}</span>${v2Head} <span class="muted">réfs : ${esc(refsTxt)}` +
       (segs.length ? ` · ${segs.length} tour(s) · ~${esc(s.duration_s)} s` : "") + `</span></div>` +
       (s.direction ? `<div class="ao-direction">🎬 Client : ${esc(s.direction)}</div>` : "") +
       (segs.length
-        ? aoSegmentsHtml(segs) + `<div class="script">🖼️ ${esc(s.shot_prompt || s.prompt_image)}</div>`
+        ? aoSegmentsHtml(segs) + `<div class="script"><b>🖼️ Image :</b> ${esc(s.shot_prompt || s.prompt_image)}</div>` +
+          (s.video_prompt ? `<div class="motion"><b>🎥 Vidéo :</b> ${esc(s.video_prompt)}</div>` : "")
         : `<div class="motion">💬 ${s.dialogue ? aoHighlightBrackets(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
-          `<div class="script">🖼️ ${esc(s.prompt_image)}</div>` +
-          `<div class="motion">🎥 ${esc(s.prompt_motion)}</div>`);
+          `<div class="script"><b>🖼️ Image :</b> ${esc(s.prompt_image)}</div>` +
+          `<div class="motion"><b>🎥 Vidéo :</b> ${esc(s.video_prompt || s.prompt_motion || "")}</div>`);
     list.appendChild(div);
   });
   aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words, r.alerts, r.max_spoken);
@@ -3708,6 +3954,13 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   }
   aoAdId = res.ad_id;
   aoVoiceUnlockedBy = {};
+  aoAdState = null;
+  // Preset chargé : modèle vidéo + mode voix appliqués à la nouvelle pub (v2).
+  if (aoPresetOptions && Object.keys(aoPresetOptions).length) {
+    api(AO_API + "/options/" + aoAdId, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(aoPresetOptions),
+    }).catch(() => { /* pub v1 ou options refusées : sans effet */ });
+  }
   aoShowImgProgress();
   pollSceneJob(res.job_id, {
     ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
@@ -3770,9 +4023,14 @@ async function loadAoGallery(adId) {
   $("aoValidation").classList.remove("hidden");
   aoGalleryShots = r.shots || [];
   aoOmniDailyLimit = r.omni_daily_limit || null;
+  if ($("aoResolution") && (r.omni_resolution === "720p" || r.omni_resolution === "1080p"))
+    $("aoResolution").value = r.omni_resolution;
+  $("aoKfMsg").innerHTML = "";
   if (r.personas) aoPersonas = r.personas;   // noms des personnages (tours, réfs, fiches voix)
   aoRenderBible(r.bible);
   aoRenderVoiceBlock(r);
+  aoAdState = r;
+  aoRenderVoicesStep(r);
   aoRenderWarnings("aoWarnings", r.warnings, r.max_words, r.alerts, r.max_spoken);
   const g = $("aoGallery");
   renderOverviewBanner(g, r, "avatar_omni", adId);
@@ -3789,12 +4047,143 @@ async function loadAoGallery(adId) {
     prevBlock = s.block_n || null;
     g.appendChild(aoShotCard(s));
   });
-  aoRenderAnimEstimate();
+  aoApplyAdState(r);
 }
 
-// Plans candidats à l'animation = comme le backend : image + statut valide/echec.
+// ---- Étape Keyframes : état par plan + verrou global avant toute vidéo ----
+// keyframe validé pour CE plan (réponse sans keyframe_ok = ancien backend : statut valide/pret).
+function aoKfOk(s) {
+  return s.keyframe_ok != null ? !!Number(s.keyframe_ok) : (s.status === "valide" || s.status === "pret");
+}
+
+function aoKfMode(s) {
+  return s.keyframe_mode === "texte_seul" ? "texte_seul" : "start_frame";
+}
+
+// Animable côté départ : une image, ou le mode « Omni texte seul » (pas de start frame).
+function aoHasStart(s) {
+  return !!s.image_url || aoKfMode(s) === "texte_seul";
+}
+
+function aoResolutionValue() {
+  const el = $("aoResolution");
+  return el && el.value === "1080p" ? "1080p" : "720p";
+}
+
+// Applique la réponse GET /ad : plans, verrou « keyframes validées », bouton vidéo, estimation.
+function aoApplyAdState(ad) {
+  if (!ad) return;
+  aoAdState = ad;
+  aoGalleryShots = ad.shots || aoGalleryShots;
+  aoKeyframesOk = ad.keyframes_ok == null ? true : !!Number(ad.keyframes_ok);
+  aoVoicesOk = !!Number(ad.voices_ok || 0);
+  aoRenderV2Options(ad);
+  aoUpdateAnimGate();
+  aoRenderAnimEstimate();
+  aoRenderFinal(ad);
+}
+
+async function aoReloadAd() {
+  const ad = await api(AO_API + "/ad/" + aoAdId);
+  aoApplyAdState(ad);
+  return ad;
+}
+
+function aoUpdateAnimGate() {
+  const btn = $("aoAnimateBtn");
+  const gate = $("aoKfGate");
+  if (aoIsV2()) {
+    // v2 : keyframes validés (+ voix validées en mode ElevenLabs), sinon bouton désactivé.
+    const missing = [];
+    if (aoUsesElVoices() && !aoVoicesOk) missing.push("les voix (étape 4b, « ✅ Valider les voix »)");
+    if (!aoKeyframesOk) missing.push("les keyframes (« ✅ Valider les keyframes »)");
+    if (btn) {
+      btn.disabled = missing.length > 0;
+      btn.textContent = "🎬 Générer les vidéos (1 appel par bloc)";
+    }
+    if (gate) {
+      gate.textContent = missing.length ? "🔒 Génération vidéo verrouillée : valide d'abord " + missing.join(" et ") + "." : "";
+      gate.classList.toggle("hidden", !missing.length);
+    }
+    const allV = $("aoKfValidateAllBtn");
+    if (allV) allV.textContent = aoKeyframesOk ? "✅ Keyframes validés (revalider)" : "✅ Valider les keyframes";
+    return;
+  }
+  if (btn) btn.textContent = "🎬 Animer les plans validés";
+  if (btn) btn.disabled = !aoKeyframesOk;
+  if (gate) {
+    gate.textContent = aoKeyframesOk ? ""
+      : "🔒 Génération vidéo verrouillée : vérifie chaque keyframe puis clique « ✅ Valider les keyframes ».";
+    gate.classList.toggle("hidden", aoKeyframesOk);
+  }
+  const all = $("aoKfValidateAllBtn");
+  if (all) all.textContent = aoKeyframesOk ? "✅ Keyframes validés (revalider)" : "✅ Valider les keyframes";
+}
+
+// Recharge l'ad puis remplace UNE carte (préserve les prompts édités des autres cartes).
+async function aoRefreshCard(card, clipId) {
+  const ad = await aoReloadAd();
+  const updated = (ad.shots || []).find((x) => x.clip_id === clipId);
+  if (updated) card.replaceWith(aoShotCard(updated));
+  else card.classList.remove("busy");
+}
+
+// Re-rend toutes les cartes depuis une réponse GET /ad en gardant les saisies non envoyées.
+function aoRerenderCards(ad) {
+  (ad.shots || []).forEach((s) => {
+    const card = document.querySelector(`#aoGallery .obj-shot[data-clip="${s.clip_id}"]`);
+    if (!card) return;
+    const keep = {};
+    [".pi", ".kf-corr"].forEach((sel) => { const el = card.querySelector(sel); if (el) keep[sel] = el.value; });
+    const fresh = aoShotCard(s);
+    Object.keys(keep).forEach((sel) => { const el = fresh.querySelector(sel); if (el) el.value = keep[sel]; });
+    card.replaceWith(fresh);
+  });
+}
+
+// Bouton global : valide tous les keyframes (409 + `missing` si un plan start_frame n'a pas d'image).
+async function aoValidateAllKeyframes() {
+  if (!aoAdId) return toast("Génère d'abord les keyframes.");
+  const msg = $("aoKfMsg");
+  const btn = $("aoKfValidateAllBtn");
+  btn.disabled = true;
+  msg.innerHTML = "";
+  document.querySelectorAll("#aoGallery .obj-shot.kf-missing").forEach((c) => c.classList.remove("kf-missing"));
+  try {
+    const r = await fetch(AO_API + "/keyframes/validate-all/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // FastAPI : {detail: "...", missing:[…]} ou {detail: {detail|message, missing}}.
+      const d = data.detail;
+      const missing = Array.isArray(data.missing) ? data.missing
+        : (d && typeof d === "object" && Array.isArray(d.missing) ? d.missing : []);
+      const text = detailToMessage(d) || (d && typeof d === "object" && (d.detail || d.message)) ||
+        "Validation impossible.";
+      msg.innerHTML = `<div class="ko">✗ ${esc(text)}` +
+        (missing.length ? `<br>Plans sans image de départ : <b>${esc(missing.map((n) => "Plan " + n).join(", "))}</b> — ` +
+          `régénère, importe ton image ou passe-les en « Omni texte seul ».` : "") + `</div>`;
+      missing.forEach((n) => {
+        const s = aoGalleryShots.find((x) => String(x.n) === String(n));
+        const card = s && document.querySelector(`#aoGallery .obj-shot[data-clip="${s.clip_id}"]`);
+        if (card) card.classList.add("kf-missing");
+      });
+      return;
+    }
+    msg.innerHTML = `<div class="ok">✓ ${esc(data.validated ?? "")} keyframe(s) validé(s) — tu peux générer la vidéo.</div>`;
+    const ad = await aoReloadAd();
+    aoRerenderCards(ad);
+  } catch (e) {
+    msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Plans candidats à l'animation = comme le backend : keyframe validé + départ dispo + valide/echec.
 function aoCandidates() {
-  return aoGalleryShots.filter((s) => s.image_url && (s.status === "valide" || s.status === "echec"));
+  return aoGalleryShots.filter((s) => aoKfOk(s) && aoHasStart(s) && (s.status === "valide" || s.status === "echec"));
 }
 
 function aoSumSeconds(shots) {
@@ -3805,6 +4194,8 @@ function aoSumSeconds(shots) {
 function aoRequests(shots) {
   return shots.reduce((t, s) => {
     const segs = Array.isArray(s.segments) ? s.segments : [];
+    // Plan déjà « pret » relancé (vidéo seule) : tous ses tours sont refaits.
+    if (s.status === "pret") return t + (segs.length || 1);
     return t + (segs.length ? segs.filter((x) => !x.done).length : 1);
   }, 0);
 }
@@ -3822,43 +4213,54 @@ function aoQuotaText(shots) {
 }
 
 function aoRenderAnimEstimate() {
+  if (aoIsV2()) return void aoRenderV2Estimate();
   const c = aoCandidates();
   const secs = aoSumSeconds(c);
   const usdVid = secs * aoRate();
   const quota = aoQuotaText(c);
   $("aoAnimEstimate").innerHTML = c.length
     ? `≈ <b>${usd(usdVid)}</b> <span class="muted">(${c.length} plan(s) · ~${secs} s de vidéo + voix à ~${usd(aoRate())}/s · ` +
+      `${aoResolutionValue()} · ` +
       `${aoRequests(c)} requête(s) Google, quota ${aoDailyLimit()}/jour)</span>` +
       aoTier1Html(usdVid, false) +
       (quota ? `<div class="ao-tier1">🚦 ${esc(quota)}</div>` : "")
-    : `<span class="muted">Aucun plan validé pour l'instant.</span>`;
+    : `<span class="muted">Aucun keyframe validé pour l'instant.</span>`;
 }
 
+const AO_KF_SOURCE = { nano_banana_pro: "Nano Banana Pro", upload: "Mon image" };
+
+// Carte d'un plan à l'étape Keyframes : image de départ + prompts image/vidéo + actions.
 function aoShotCard(s) {
   const card = document.createElement("div");
-  const valid = s.status === "valide";
   const done = s.status === "pret";
-  card.className = "obj-shot" + (valid || done ? " valide" : "");
+  const kfOk = aoKfOk(s);
+  const mode = aoKfMode(s);
+  card.className = "obj-shot" + (kfOk ? " valide" : "");
   card.dataset.clip = String(s.clip_id);
   const isClient = Array.isArray(s.segments) && s.segments.length > 0;
   const badge = done
     ? '<span class="badge ok">animé ✓</span>'
-    : valid
-    ? '<span class="badge ok">validé ✓</span>'
+    : kfOk
+    ? '<span class="badge ok">keyframe ✓</span>'
     : s.status === "echec"
     ? '<span class="badge ko">échec</span>'
     : '<span class="badge">à valider</span>';
   const bust = s.image_url ? (s.image_url.includes("?") ? "&" : "?") + "t=" + Date.now() : "";
   const thumb = s.image_url
-    ? `<img class="thumb" src="${esc(s.image_url)}${bust}" alt="plan ${esc(s.n)}" />`
-    : `<div class="thumb empty">${esc(s.error || "pas d'image")}</div>`;
+    ? `<img class="thumb" src="${esc(s.image_url)}${bust}" alt="keyframe plan ${esc(s.n)}" />`
+    : `<div class="thumb empty">${esc(s.error || (mode === "texte_seul" ? "Omni texte seul (pas d'image)" : "pas d'image"))}</div>`;
+  const src = AO_KF_SOURCE[s.keyframe_source] || "";
+  const srcBadge = s.image_url && src
+    ? `<span class="kf-src${s.keyframe_source === "upload" ? " up" : ""}">${esc(src)}</span>` : "";
   const vbust = s.video_url ? (s.video_url.includes("?") ? "&" : "?") + "t=" + Date.now() : "";
   const clip = s.video_url
     ? `<a class="dl" href="${esc(s.video_url)}${vbust}" target="_blank" rel="noopener">🎬 Voir le clip</a>`
     : "";
   const err = s.image_url && s.error ? `<div class="ao-err" title="${esc(s.error)}">⚠ ${esc(prettyError(s.error))}</div>` : "";
+  const v2 = aoIsV2();
+  const canTest = kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s));
   card.innerHTML =
-    thumb +
+    `<div class="kf-thumb">${thumb}${srcBadge}${v2 ? aoPlancheCompareHtml(s) : ""}</div>` +
     `<div class="body">` +
     `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}</div>` +
     `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
@@ -3869,25 +4271,39 @@ function aoShotCard(s) {
     err +
     (s.direction ? `<div class="ao-direction" title="Mise en scène du client">🎬 ${esc(s.direction)}</div>` : "") +
     (isClient
-      ? `<div class="lbl">Ce qui change dans ce plan (image de départ — la bible est ajoutée automatiquement)</div>` +
+      ? `<div class="lbl">🖼️ Prompt image — ce qui change dans ce plan (la bible est ajoutée automatiquement)</div>` +
         `<textarea class="pi">${esc(s.shot_prompt || "")}</textarea>` +
-        `<div class="lbl">Tours Omni (1 vidéo continue${s.segments.length > 1 ? `, ${s.segments.length} extensions enchaînées` : ""})</div>` +
+        (s.prompt_image
+          ? `<details class="kf-full"><summary>Prompt image complet envoyé à Nano Banana Pro</summary>` +
+            `<div class="pi-ro">${esc(s.prompt_image)}</div></details>` : "")
+      : `<div class="lbl">🖼️ Prompt image (éditable — pris en compte à la régénération)</div>` +
+        `<textarea class="pi">${esc(s.prompt_image)}</textarea>`) +
+    `<div class="lbl">🎥 Prompt vidéo Omni (mouvement + qui parle)</div>` +
+    `<div class="pi-ro">${esc(s.video_prompt || s.prompt_motion || "—")}</div>` +
+    (isClient
+      ? `<div class="lbl">Tours Omni (1 vidéo continue${s.segments.length > 1 ? `, ${s.segments.length} extensions enchaînées` : ""})</div>` +
         aoSegmentsHtml(s.segments)
-      : `<div class="lbl">Visuel (prompt image, éditable — pris en compte à la régénération)</div>` +
-        `<textarea class="pi">${esc(s.prompt_image)}</textarea>` +
-        `<div class="motion">🎬 ${esc(s.prompt_motion)}</div>`) +
+      : "") +
     `<div class="lbl">💬 Dialogue — ce que la personne DIT (verbatim)</div>` +
     `<textarea class="vo" placeholder="Laisse vide = plan sans parole">${esc(s.dialogue || "")}</textarea>` +
     aoBracketValuesHtml(s.dialogue) +
+    `<label class="kf-mode-lbl">Départ vidéo <select class="kf-mode">` +
+    `<option value="start_frame"${mode === "start_frame" ? " selected" : ""}>Omni avec start frame</option>` +
+    `<option value="texte_seul"${mode === "texte_seul" ? " selected" : ""}>Omni texte seul</option>` +
+    `</select></label>` +
+    `<input type="text" class="kf-corr" maxlength="500" placeholder="Correction (optionnel) — ex. « sourire plus léger, main gauche visible »" />` +
+    `<input type="file" class="kf-file hidden" accept="image/png,image/jpeg,image/webp" />` +
     `<div class="actions">` +
-    (done ? "" : `<button class="btn primary btn-valid">${valid ? "Dévalider" : "Valider"}</button>`) +
-    `<button class="btn btn-regen">Régénérer</button>` +
-    `<button class="btn small btn-test" title="Anime uniquement ce plan">Tester ce plan</button>` +
+    (done && kfOk ? "" : `<button class="btn primary btn-valid">${kfOk ? "Dévalider" : "Valider"}</button>`) +
+    `<button class="btn btn-regen" title="Nouvelle image Nano Banana Pro (avec la correction si remplie)">Regénérer</button>` +
+    `<button class="btn btn-upload" title="Remplacer le keyframe par ta propre image (PNG, JPG, WebP)">Uploader mon image</button>` +
+    `<button class="btn small btn-test"${canTest ? "" : " disabled"} title="${canTest
+      ? "Anime uniquement ce plan" : v2 ? "Valide d'abord ce keyframe et la voix de ce bloc" : "Valide d'abord ce keyframe"}">Tester ce plan</button>` +
     `</div></div>`;
 
   // Anciennes pubs : « visage » = visage1 (même puce) ; le serveur accepte les deux.
   if (Array.isArray(s.refs_needed)) s.refs_needed = s.refs_needed.map((k) => (k === "visage" ? "visage1" : k));
-  card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".actions"));
+  card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".kf-mode-lbl"));
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");
@@ -3906,30 +4322,33 @@ function aoShotCard(s) {
     } catch (e) { toast(e.message); }
   });
 
+  // Valider / Dévalider CE keyframe (dévalider re-verrouille la génération vidéo).
   const validBtn = card.querySelector(".btn-valid");
   if (validBtn) validBtn.addEventListener("click", async () => {
+    card.classList.add("busy");
     try {
-      const res = await api(AO_API + "/validate/" + s.clip_id, {
+      await api(AO_API + "/validate/" + s.clip_id, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ valide: !valid }),
+        body: JSON.stringify({ valide: !kfOk }),
       });
-      s.status = res.status;
-      // Garde la liste de la galerie synchrone (elle peut contenir un autre objet pour ce plan).
-      const g = aoGalleryShots.find((x) => x.clip_id === s.clip_id);
-      if (g) g.status = res.status;
-      card.replaceWith(aoShotCard(s));
-      aoRenderAnimEstimate();
-    } catch (e) { toast(e.message); }
+      await aoRefreshCard(card, s.clip_id);
+    } catch (e) {
+      card.classList.remove("busy");
+      toast(e.message);
+    }
   });
 
   card.querySelector(".btn-regen").addEventListener("click", async () => {
     const prompt_image = card.querySelector(".pi").value.trim();
+    const correction = card.querySelector(".kf-corr").value.trim();
     const dryRun = currentSettings && currentSettings.dry_run;
     if (!dryRun) {
       const ok = await showModal({
-        title: "Régénérer l'image",
-        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
-        confirmText: "Régénérer", cancelText: "Annuler", danger: true,
+        title: "Regénérer le keyframe",
+        message: "Regénérer cette image via Nano Banana Pro (payant)" +
+          (correction ? ` avec la correction : « ${correction} »` : "") +
+          ". Le keyframe devra être revalidé. Continuer ?",
+        confirmText: "Regénérer", cancelText: "Annuler", danger: true,
       });
       if (!ok) return;
     }
@@ -3937,26 +4356,61 @@ function aoShotCard(s) {
     try {
       const res = await api(AO_API + "/regenerate-image/" + s.clip_id, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt_image, confirm: true }),
+        body: JSON.stringify({ prompt_image, confirm: true, correction }),
       });
       const j = await waitJobDone(res.job_id);
       if (j && j.state === "echec") toast(prettyError((j.summary && j.summary.message) || "Régénération en échec."));
       // Ne recharge QUE cette carte (préserve les prompts édités des autres).
-      const ad = await api(AO_API + "/ad/" + aoAdId);
-      aoGalleryShots = ad.shots || aoGalleryShots;
-      const updated = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
-      if (updated) card.replaceWith(aoShotCard(updated));
-      else card.classList.remove("busy");
-      aoRenderAnimEstimate();
+      await aoRefreshCard(card, s.clip_id);
     } catch (e) {
       card.classList.remove("busy");
       toast(e.message);
     }
   });
 
+  // Uploader mon image : remplace le keyframe sans appel Nano Banana.
+  const fileIn = card.querySelector(".kf-file");
+  card.querySelector(".btn-upload").addEventListener("click", () => fileIn.click());
+  fileIn.addEventListener("change", async () => {
+    const f = fileIn.files && fileIn.files[0];
+    if (!f) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) {
+      fileIn.value = "";
+      return toast("Format accepté : PNG, JPG ou WebP.");
+    }
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    card.classList.add("busy");
+    try {
+      await api(AO_API + "/keyframe/upload/" + s.clip_id, { method: "POST", body: fd });
+      toast("Image importée ✓ — valide ce keyframe.");
+      await aoRefreshCard(card, s.clip_id);
+    } catch (e) {
+      card.classList.remove("busy");
+      fileIn.value = "";
+      toast(e.message);
+    }
+  });
+
+  // Mode de départ Omni : avec start frame (défaut) ou texte seul.
+  const modeSel = card.querySelector(".kf-mode");
+  modeSel.addEventListener("change", async () => {
+    card.classList.add("busy");
+    try {
+      await api(AO_API + "/keyframe/mode/" + s.clip_id, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: modeSel.value }),
+      });
+      await aoRefreshCard(card, s.clip_id);
+    } catch (e) {
+      modeSel.value = mode;
+      card.classList.remove("busy");
+      toast(e.message);
+    }
+  });
+
   card.querySelector(".btn-test").addEventListener("click", () => {
-    if (!s.image_url || !["valide", "echec", "pret"].includes(s.status))
-      return toast("Valide ce plan avant de le tester.");
+    if (!canTest) return toast(v2 ? "Valide d'abord ce keyframe et la voix de ce bloc." : "Valide d'abord ce keyframe.");
     aoLaunchAnimation([s], s.clip_id);
   });
 
@@ -4018,71 +4472,104 @@ $("aoConsistencyBtn").addEventListener("click", async () => {
 });
 
 $("aoAnimateBtn").addEventListener("click", () => {
-  if (!aoAdId) return toast("Génère et valide d'abord tes plans.");
+  if (!aoAdId) return toast("Génère et valide d'abord tes keyframes.");
+  if (aoIsV2()) {
+    if (!aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
+    if (!aoKeyframesOk) return toast("Clique d'abord « ✅ Valider les keyframes ».");
+    return aoLaunchAnimation(aoV2Candidates(), null);
+  }
+  if (!aoKeyframesOk) return toast("Clique d'abord « ✅ Valider les keyframes ».");
   const c = aoCandidates();
-  if (!c.length) return toast("Aucun plan validé à animer (valide d'abord les images).");
+  if (!c.length) return toast("Aucun keyframe validé à animer.");
   aoLaunchAnimation(c, null);
 });
 
-// Lance l'animation Omni (tous les candidats, ou un seul plan si clipId) — modale de coût AVANT
-// l'appel payant (estimation = Σ durées Omni × $/s, même formule que le backend), puis 402 plafond.
-async function aoLaunchAnimation(shots, clipId) {
-  // Galerie RELUE juste avant la modale : statuts et durées à jour (validations faites depuis,
-  // régénérations…) → l'estimation affichée correspond à ce que le backend va réellement animer.
-  try {
-    const ad = await api(AO_API + "/ad/" + aoAdId);
-    aoGalleryShots = ad.shots || [];
-    shots = clipId
-      ? aoGalleryShots.filter((s) => s.clip_id === clipId && s.image_url && ["valide", "echec", "pret"].includes(s.status))
-      : aoCandidates();
-    aoRenderAnimEstimate();
-  } catch (e) {
-    return toast(e.message);
-  }
-  if (!shots.length) {
-    return toast(clipId ? "Valide ce plan avant de le tester." : "Aucun plan validé à animer (valide d'abord les images).");
-  }
+$("aoKfValidateAllBtn").addEventListener("click", aoValidateAllKeyframes);
+$("aoResolution").addEventListener("change", aoRenderAnimEstimate);
+
+// Modale de coût (mode réel) puis POST /animate/{adId} (+ reprise 402 « plafond »).
+// Partagée par la galerie (Animer / Tester ce plan) et la Bibliothèque (Relancer la vidéo seule).
+// Retourne la réponse du backend, ou null si annulé / erreur (déjà signalée).
+async function aoPostAnimate(adId, shots, clipId, opt = {}) {
+  if (opt.v2) return aoPostAnimateV2(adId, shots, clipId, opt);
   const dryRun = currentSettings && currentSettings.dry_run;
   if (!dryRun) {
-    if (!(currentSettings && currentSettings.gemini_api_key_set))
-      return toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
+    if (!(currentSettings && currentSettings.gemini_api_key_set)) {
+      toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
+      return null;
+    }
     const secs = aoSumSeconds(shots);
     const usdVid = secs * aoRate();
     const tier1 = usdVid > AO_TIER1_USD ? `\n\n⏳ ${aoTier1Text(usdVid)}` : "";
     const quota = aoQuotaText(shots);
     const reqLine = `\n\n🚦 ${aoRequests(shots)} requête(s) Google (1 par tour) — quota ${aoDailyLimit()}/jour.` +
       (quota ? `\n⚠ ${quota}` : "");
+    const resLine = opt.resolution ? ` en ${opt.resolution}` : "";
     const ok = await showModal({
-      title: clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
+      title: opt.relaunch ? "Relancer la vidéo seule — coût Google Omni (réel)"
+        : clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
       message:
-        (clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) +
+        (opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce plan (même keyframe, aucune nouvelle image)"
+          : clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) + resLine +
         ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s) — estimé ≈ ${usd(usdVid)} pour ~${secs} s. Continuer ?` + tier1 + reqLine,
-      confirmText: clipId ? "Tester" : "Animer", cancelText: "Annuler", danger: true,
+      confirmText: opt.relaunch ? "Relancer" : clipId ? "Tester" : "Animer", cancelText: "Annuler", danger: true,
     });
-    if (!ok) return;
+    if (!ok) return null;
   }
   const post = (over) =>
-    api(AO_API + "/animate/" + aoAdId, {
+    api(AO_API + "/animate/" + adId, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(Object.assign(
-        { confirm: true, confirm_over_cap: !!over }, clipId ? { clip_id: clipId } : {}
+        { confirm: true, confirm_over_cap: !!over },
+        clipId ? { clip_id: clipId } : {},
+        opt.resolution ? { resolution: opt.resolution } : {}
       )),
     });
-  let res;
   try {
-    res = await post(false);
+    return await post(false);
   } catch (e) {
-    if (!/plafond/i.test(e.message)) return toast(e.message);
+    if (!/plafond/i.test(e.message)) { toast(e.message); return null; }
     const ok = await showModal({
       title: "⚠ Dépassement du plafond de dépense",
       message: e.message + "\n\nConfirmer et animer malgré le plafond ?",
       confirmText: "Dépasser et animer", cancelText: "Annuler", danger: true,
     });
-    if (!ok) return;
-    try { res = await post(true); } catch (e2) { return toast(e2.message); }
+    if (!ok) return null;
+    try { return await post(true); } catch (e2) { toast(e2.message); return null; }
+  }
+}
+
+// Lance l'animation Omni (tous les candidats, ou un seul plan si clipId) — modale de coût AVANT
+// l'appel payant (estimation = Σ durées Omni × $/s, même formule que le backend), puis 402 plafond.
+async function aoLaunchAnimation(shots, clipId) {
+  // Galerie RELUE juste avant la modale : statuts et durées à jour (validations faites depuis,
+  // régénérations…) → l'estimation affichée correspond à ce que le backend va réellement animer.
+  let v2 = false;
+  try {
+    await aoReloadAd();
+    v2 = aoIsV2();
+    shots = v2
+      ? (clipId ? aoGalleryShots.filter((s) => s.clip_id === clipId && aoKfOk(s) && aoVoiceOkShot(s)) : aoV2Candidates())
+      : clipId
+      ? aoGalleryShots.filter((s) => s.clip_id === clipId && aoKfOk(s) && aoHasStart(s) &&
+          ["valide", "echec", "pret"].includes(s.status))
+      : aoCandidates();
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (v2 && !clipId && !aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
+  if (!clipId && !aoKeyframesOk) return toast("Clique d'abord « ✅ Valider les keyframes ».");
+  if (!shots.length) {
+    return toast(v2 ? (clipId ? "Valide d'abord le keyframe et la voix de ce bloc." : "Aucun bloc à générer (tous déjà prêts ?).")
+      : clipId ? "Valide d'abord ce keyframe." : "Aucun keyframe validé à animer.");
+  }
+  const res = await aoPostAnimate(aoAdId, shots, clipId, { resolution: aoResolutionValue(), v2 });
+  if (!res) return;
+  if (v2 && res.estimate) {
+    $("aoAnimEstimate").innerHTML = "Lancé : " + aoV2EstimateHtml(res.estimate);
   }
   // Coût revérifié par le backend (vraies durées Omni).
-  if (res.usd_video != null) {
+  if (!v2 && res.usd_video != null) {
     $("aoAnimEstimate").innerHTML =
       `Lancé : ≈ <b>${usd(res.usd_video)}</b> <span class="muted">(${res.n_plans ?? shots.length} plan(s) · ` +
       `~${res.seconds_total ?? aoSumSeconds(shots)} s${res.dry_run ? " · simulation : $0" : ""})</span>` +
@@ -4115,6 +4602,723 @@ async function aoLaunchAnimation(shots, clipId) {
       loadAoGallery(aoAdId);
       loadLibrary();
     },
+  });
+}
+
+// ================================================ AVATAR IA v2 : voix, vidéo par bloc, assemblage
+function aoIsV2(ad = aoAdState) {
+  return !!ad && Number(ad.pipeline_version) === 2;
+}
+
+function aoVoiceOkShot(s) {
+  if (!aoUsesElVoices()) return !!s;      // voix native : aucune voix à valider
+  return !!s && !!Number(s.voice_ok || 0);
+}
+
+function aoIsSpoken(s) {
+  return !!String((s && s.dialogue) || "").trim();
+}
+
+// Blocs à générer en vidéo (v2) : keyframe + voix validés, pas encore prêts.
+function aoV2Candidates() {
+  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret");
+}
+
+function aoSpeakerLabel(s) {
+  return aoIsSpoken(s) ? aoCharName(s.speaker || 1) : "muet";
+}
+
+// ---- Étape 4b : voix ElevenLabs par bloc ----
+function aoRenderVoicesStep(ad) {
+  const box = $("aoVoices");
+  if (!box) return;
+  // Étape sautée en voix native (seul mode actif) : la voix vient du modèle vidéo.
+  const v2 = aoIsV2(ad) && aoUsesElVoices(ad);
+  box.classList.toggle("hidden", !v2);
+  if (!v2) return;
+  aoVoicesOk = !!Number(ad.voices_ok || 0);
+  const list = $("aoVoicesList");
+  list.innerHTML = "";
+  (ad.shots || []).forEach((s) => list.appendChild(aoVoiceRow(s)));
+  $("aoVoicesValidateAllBtn").textContent = aoVoicesOk ? "✅ Voix validées (revalider)" : "✅ Valider les voix";
+}
+
+function aoVoiceRow(s) {
+  const row = document.createElement("div");
+  const ok = aoVoiceOkShot(s);
+  const hasAudio = !!s.voice_url;
+  const spoken = aoIsSpoken(s);
+  row.className = "ao-voice-row" + (ok ? " valide" : "");
+  row.dataset.clip = String(s.clip_id);
+  row.dataset.n = String(s.n);
+  const badge = ok ? '<span class="badge ok">voix ✓</span>'
+    : hasAudio ? '<span class="badge">à valider</span>'
+    : spoken ? '<span class="badge">pas d\'audio</span>' : '<span class="badge">muet</span>';
+  const wav = Number(s.wav_seconds) || 0;
+  const dur = wav > 0
+    ? `⏱️ ${wav.toFixed(1).replace(".", ",")} s réels → clip ${esc(s.clip_seconds || "?")} s`
+    : `⏱️ ~${esc(s.duration_s ?? "?")} s estimés`;
+  const bust = hasAudio ? (s.voice_url.includes("?") ? "&" : "?") + "t=" + Date.now() : "";
+  row.innerHTML =
+    `<div class="ao-vr-head"><b>${aoPlanTitle(s)}</b>` +
+    `<span class="ao-turn-badge">🗣️ ${esc(aoSpeakerLabel(s))}</span>${badge}<span class="muted small">${dur}</span></div>` +
+    `<div class="ao-vr-text">💬 ${spoken ? aoHighlightBrackets(s.dialogue) : "<i>(sans parole)</i>"}</div>` +
+    `<div class="ao-vr-player">` +
+    (hasAudio ? `<audio controls preload="none" src="${esc(s.voice_url)}${bust}"></audio>`
+      : `<span class="muted small">${spoken ? "Pas encore d'audio — « Générer les voix »." : "Aucune voix pour ce bloc."}</span>`) +
+    `</div>` +
+    `<div class="actions">` +
+    (spoken ? `<button class="btn small btn-vregen" type="button">Regénérer</button>` : "") +
+    `<button class="btn small primary btn-vvalid" type="button"${hasAudio || ok ? "" : " disabled"}>${ok ? "Dévalider" : "Valider"}</button>` +
+    `</div>`;
+  const regen = row.querySelector(".btn-vregen");
+  if (regen) regen.addEventListener("click", () => aoRegenerateVoice(s, row));
+  row.querySelector(".btn-vvalid").addEventListener("click", async () => {
+    row.classList.add("busy");
+    try {
+      await api(AO_API + "/voices/validate/" + s.clip_id, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ valide: !ok }),
+      });
+      await aoReloadVoices();
+    } catch (e) {
+      row.classList.remove("busy");
+      toast(e.message);
+    }
+  });
+  return row;
+}
+
+async function aoReloadVoices() {
+  const ad = await aoReloadAd();
+  aoRenderVoicesStep(ad);
+  aoRerenderCards(ad);   // « Tester ce plan » dépend aussi de la voix du bloc
+  return ad;
+}
+
+function aoVoiceCostUsd(shots) {
+  const chars = shots.reduce((t, s) => t + String(s.dialogue || "").trim().length, 0);
+  return { chars, usd: (chars / 1000) * AO_EL_USD_PER_1K };
+}
+
+async function aoConfirmVoiceCost(shots, title) {
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (dryRun) return true;
+  if (!(currentSettings && currentSettings.elevenlabs_api_key_set)) {
+    toast("Ajoute ta clé ElevenLabs dans Réglages.");
+    return false;
+  }
+  const c = aoVoiceCostUsd(shots);
+  return showModal({
+    title,
+    message: `${shots.length} réplique(s), ${c.chars} caractères — ElevenLabs V3, estimé ≈ ${usd(c.usd)}. Continuer ?`,
+    confirmText: "Générer", cancelText: "Annuler", danger: true,
+  });
+}
+
+async function aoGenerateVoices() {
+  if (!aoAdId) return toast("Génère d'abord le Plan 1 (la pub est créée à ce moment-là).");
+  let ad;
+  try { ad = await aoReloadAd(); } catch (e) { return toast(e.message); }
+  const spoken = (ad.shots || []).filter(aoIsSpoken);
+  if (!spoken.length) return toast("Aucune réplique à dire dans cette pub.");
+  const missing = spoken.filter((s) => !s.voice_url);
+  let force = false;
+  let target = missing;
+  if (!missing.length) {
+    const again = await showModal({
+      title: "Toutes les voix existent",
+      message: "Chaque bloc a déjà son audio. Tout regénérer (les validations seront perdues) ?",
+      confirmText: "Tout regénérer", cancelText: "Annuler", danger: true,
+    });
+    if (!again) return;
+    force = true;
+    target = spoken;
+  }
+  if (!(await aoConfirmVoiceCost(target, "Mode réel — voix ElevenLabs"))) return;
+  const btn = $("aoVoicesGenBtn");
+  btn.disabled = true;
+  $("aoVoicesMsg").innerHTML = "";
+  try {
+    const res = await api(AO_API + "/voices/generate/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true, force }),
+    });
+    $("aoVoicesProgress").classList.remove("hidden");
+    $("aoVoicesSceneProgress").innerHTML = "";
+    $("aoVoicesProgFill").style.width = "0%";
+    $("aoVoicesProgCount").textContent = `0/${res.n ?? target.length} voix`;
+    pollSceneJob(res.job_id, {
+      ul: "aoVoicesSceneProgress", fill: "aoVoicesProgFill", count: "aoVoicesProgCount", unit: "voix",
+      onEnd: () => { btn.disabled = false; aoReloadVoices().catch((e) => toast(e.message)); },
+    });
+  } catch (e) {
+    btn.disabled = false;
+    $("aoVoicesMsg").innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
+  }
+}
+
+async function aoRegenerateVoice(s, row) {
+  if (!(await aoConfirmVoiceCost([s], "Regénérer la voix de ce bloc"))) return;
+  row.classList.add("busy");
+  try {
+    const res = await api(AO_API + "/voices/regenerate/" + s.clip_id, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
+    });
+    const j = await waitJobDone(res.job_id);
+    if (j && (j.state === "echec" || Number((j.summary || {}).echec || 0) > 0))
+      toast(prettyError((j.summary && j.summary.message) || "Voix en échec."));
+    await aoReloadVoices();
+  } catch (e) {
+    row.classList.remove("busy");
+    toast(e.message);
+  }
+}
+
+// Bouton global : 409 {missing:[n]} si un bloc n'a pas d'audio → blocs surlignés.
+async function aoValidateAllVoices() {
+  if (!aoAdId) return;
+  const msg = $("aoVoicesMsg");
+  const btn = $("aoVoicesValidateAllBtn");
+  btn.disabled = true;
+  msg.innerHTML = "";
+  document.querySelectorAll("#aoVoicesList .ao-voice-row.kf-missing").forEach((r) => r.classList.remove("kf-missing"));
+  try {
+    const r = await fetch(AO_API + "/voices/validate-all/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const d = data.detail;
+      const missing = Array.isArray(data.missing) ? data.missing
+        : (d && typeof d === "object" && Array.isArray(d.missing) ? d.missing : []);
+      const text = detailToMessage(d) || (d && typeof d === "object" && (d.detail || d.message)) || "Validation impossible.";
+      msg.innerHTML = `<div class="ko">✗ ${esc(text)}` +
+        (missing.length ? `<br>Blocs sans audio : <b>${esc(missing.map((n) => "Plan " + n).join(", "))}</b> — « Générer les voix » ou « Regénérer ».` : "") +
+        `</div>`;
+      missing.forEach((n) => {
+        const el = document.querySelector(`#aoVoicesList .ao-voice-row[data-n="${CSS.escape(String(n))}"]`);
+        if (el) el.classList.add("kf-missing");
+      });
+      return;
+    }
+    msg.innerHTML = `<div class="ok">✓ ${esc(data.validated ?? "")} voix validée(s) — durées des clips fixées.</div>`;
+    await aoReloadVoices();
+  } catch (e) {
+    msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+if ($("aoVoicesGenBtn")) $("aoVoicesGenBtn").addEventListener("click", aoGenerateVoices);
+if ($("aoVoicesValidateAllBtn")) $("aoVoicesValidateAllBtn").addEventListener("click", aoValidateAllVoices);
+
+// ---- Keyframes v2 : planche perso à côté du keyframe du Plan 1 (ancre) ----
+function aoIsAnchorShot(s) {
+  if (s.is_anchor) return true;
+  const first = aoGalleryShots[0];
+  return !aoGalleryShots.some((x) => x.is_anchor) && !!first && first.clip_id === s.clip_id;
+}
+
+// URL de la planche du perso N : réfs de l'ad (si le serveur les renvoie), photos uploadées
+// (type plancheN), ou planche de la bibliothèque (preset / « Utiliser comme perso N »).
+function aoPlancheUrl(n) {
+  const kind = "planche" + n;
+  const ad = aoAdState || {};
+  const refs = [].concat(Array.isArray(ad.ref_images) ? ad.ref_images : [], Array.isArray(ad.refs) ? ad.refs : []);
+  const hit = refs.find((r) => r && r.kind === kind && (r.url || r.media_url || r.image_url));
+  if (hit) return hit.url || hit.media_url || hit.image_url;
+  const i = aoRefsKinds.indexOf(kind);
+  if (i >= 0 && aoRefsFiles[i]) {
+    const f = aoRefsFiles[i];
+    if (!aoRefObjUrls.has(f)) aoRefObjUrls.set(f, URL.createObjectURL(f));
+    return aoRefObjUrls.get(f);
+  }
+  return aoPresetPlanches[n] || "";
+}
+
+function aoPlancheCompareHtml(s) {
+  if (!aoIsAnchorShot(s)) return "";
+  const ns = new Set();
+  if (s.speaker) ns.add(Number(s.speaker));
+  (Array.isArray(s.refs_needed) ? s.refs_needed : []).forEach((k) => {
+    const m = /^(?:planche|visage)(\d)$/.exec(k || "");
+    if (m) ns.add(Number(m[1]));
+  });
+  if (!ns.size) ns.add(1);
+  const figs = [...ns].sort().map((n) => {
+    const url = aoPlancheUrl(n);
+    return url
+      ? `<figure class="ao-planche"><img src="${esc(url)}" alt="planche perso ${n}" /><figcaption>Planche ${esc(aoCharName(n))}</figcaption></figure>`
+      : `<figure class="ao-planche"><div class="thumb empty">pas de planche</div><figcaption>${esc(aoCharName(n))}</figcaption></figure>`;
+  }).join("");
+  return `<div class="ao-planche-cmp">${figs}<div class="ao-planche-tip">👀 Vérifie la ressemblance avec la planche avant de valider.</div></div>`;
+}
+
+// ---- Génération vidéo v2 : options, estimation, lancement, assemblage ----
+function aoRenderV2Options(ad) {
+  const box = $("aoV2Options");
+  if (!box) return;
+  const v2 = aoIsV2(ad);
+  box.classList.toggle("hidden", !v2);
+  if (!v2) return;
+  const vm = ad.video_model || (currentSettings && currentSettings.avatar_video_model) || "grok";
+  if ([...$("aoVideoModel").options].some((o) => o.value === vm)) $("aoVideoModel").value = vm;
+  $("aoVoiceMode").value = aoUsesElVoices(ad) ? "elevenlabs" : "native";
+  if ($("aoVoiceModeLabel")) $("aoVoiceModeLabel").classList.toggle("hidden", !AO_ELEVENLABS_ENABLED);
+}
+
+async function aoPatchOptions(body) {
+  if (!aoAdId) return;
+  try {
+    await api(AO_API + "/options/" + aoAdId, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (aoAdState) Object.assign(aoAdState, body);
+    toast("Option enregistrée ✓");
+    aoRenderAnimEstimate();
+  } catch (e) { toast(e.message); }
+}
+
+if ($("aoVideoModel")) $("aoVideoModel").addEventListener("change", () => aoPatchOptions({ video_model: $("aoVideoModel").value }));
+if ($("aoVoiceMode")) $("aoVoiceMode").addEventListener("change", () => aoPatchOptions({ voice_mode: $("aoVoiceMode").value }));
+
+function aoV2EstimateHtml(e) {
+  e = e || {};
+  const model = AO_VIDEO_MODEL_LABEL[e.video_model] || e.video_model || "";
+  const native = e.voice_mode !== "elevenlabs";
+  const mode = native ? "voix native du modèle" : "voix ElevenLabs";
+  const detail = `${esc(e.n_clips ?? "?")} clip(s) · ~${esc(Math.round(Number(e.seconds_total) || 0))} s` +
+    (model ? ` · ${esc(model)}` : "") + ` · ${esc(mode)}`;
+  if (e.dry_run) return `<b>0 $ (simulation)</b> <span class="muted">(${detail})</span>`;
+  if (native) return `Vidéo (voix incluse) <b>${usd(e.usd_total)}</b> <span class="muted">(${detail})</span>`;
+  return `Voix ${usd(e.usd_voice)} + vidéo ${usd(e.usd_video)} = <b>${usd(e.usd_total)}</b> ` +
+    `<span class="muted">(${detail})</span>`;
+}
+
+let _aoEstSeq = 0;
+async function aoRenderV2Estimate() {
+  const el = $("aoAnimEstimate");
+  if (!aoAdId || !el) return;
+  const seq = ++_aoEstSeq;
+  try {
+    const e = await api(AO_API + "/video/estimate/" + aoAdId);
+    if (seq !== _aoEstSeq) return;
+    el.innerHTML = "Estimation : " + aoV2EstimateHtml(e);
+  } catch (e) {
+    if (seq === _aoEstSeq) el.innerHTML = `<span class="muted">Estimation indisponible : ${esc(e.message)}</span>`;
+  }
+}
+
+function aoVideoKeyOk(model) {
+  const s = currentSettings || {};
+  if (model === "omni") return s.gemini_api_key_set ? "" : "Ajoute ta clé API Google (Gemini) dans Réglages.";
+  if (model === "kling") return s.openrouter_api_key_set ? "" : "Ajoute ta clé OpenRouter (Kling) dans Réglages.";
+  return s.xai_api_key_set ? "" : "Ajoute ta clé xAI (Grok) dans Réglages.";
+}
+
+// v2 : modale de coût (GET /video/estimate) puis POST /video/animate (+ clip_id) ; 402 plafond.
+async function aoPostAnimateV2(adId, shots, clipId, opt = {}) {
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (!dryRun) {
+    let e = {};
+    try { e = await api(AO_API + "/video/estimate/" + adId); } catch (_) { /* estimation absente */ }
+    const keyMsg = aoVideoKeyOk(e.video_model || (aoAdState && aoAdState.video_model) || "grok");
+    if (keyMsg) { toast(keyMsg); return null; }
+    let usdLine;
+    if (clipId) {
+      const s = shots[0] || {};
+      const secs = Number(s.clip_seconds) || 0;
+      const part = Number(e.seconds_total) > 0 && secs ? (Number(e.usd_video) || 0) * secs / Number(e.seconds_total) : null;
+      usdLine = part != null ? `estimé ≈ ${usd(part)} pour ${secs} s` : "coût d'un clip";
+    } else {
+      usdLine = `estimé ≈ ${usd(e.usd_video)} de vidéo (${usd(e.usd_total)} voix comprises) pour ~${Math.round(Number(e.seconds_total) || 0)} s`;
+    }
+    const model = AO_VIDEO_MODEL_LABEL[e.video_model] || e.video_model || "modèle vidéo";
+    const ok = await showModal({
+      title: opt.relaunch ? "Relancer la vidéo — coût réel" : clipId ? "Tester ce plan — coût réel" : "Générer les vidéos — coût réel",
+      message: (opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce bloc (même keyframe, même voix)"
+        : clipId ? "Génère UNIQUEMENT la vidéo de ce bloc" : `Génère ${shots.length} vidéo(s) (1 appel par bloc)`) +
+        ` avec ${model} — ${usdLine}. Continuer ?`,
+      confirmText: opt.relaunch ? "Relancer" : clipId ? "Tester" : "Générer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return null;
+  }
+  const post = (over) =>
+    api(AO_API + "/video/animate/" + adId, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign(
+        { confirm: true, confirm_over_cap: !!over },
+        clipId ? { clip_id: clipId } : {},
+        opt.resolution ? { resolution: opt.resolution } : {}
+      )),
+    });
+  try {
+    return await post(false);
+  } catch (e) {
+    if (!/plafond/i.test(e.message)) { toast(e.message); return null; }
+    const ok = await showModal({
+      title: "⚠ Dépassement du plafond de dépense",
+      message: e.message + "\n\nConfirmer et générer malgré le plafond ?",
+      confirmText: "Dépasser et générer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return null;
+    try { return await post(true); } catch (e2) { toast(e2.message); return null; }
+  }
+}
+
+function aoRenderFinal(ad) {
+  const box = $("aoFinalBox");
+  if (!box) return;
+  const v2 = aoIsV2(ad);
+  box.classList.toggle("hidden", !v2);
+  if (!v2) return;
+  aoRenderFinalLinks(ad.final_url, ad.final_audio_url);
+}
+
+function aoRenderFinalLinks(finalUrl, audioUrl) {
+  const links = $("aoFinalLinks");
+  const bust = (u) => (u.includes("?") ? "&" : "?") + "t=" + Date.now();
+  links.innerHTML =
+    (finalUrl ? `<a class="btn small" href="${esc(finalUrl)}${bust(finalUrl)}" target="_blank" rel="noopener">🎬 Vidéo assemblée</a>` : "") +
+    (audioUrl ? `<a class="btn small" href="${esc(audioUrl)}${bust(audioUrl)}" target="_blank" rel="noopener">🎧 Voix complète</a>` : "") +
+    (!finalUrl && !audioUrl ? `<span class="muted small">Pas encore assemblée (automatique quand tous les clips sont prêts).</span>` : "");
+}
+
+if ($("aoAssembleBtn")) $("aoAssembleBtn").addEventListener("click", async () => {
+  if (!aoAdId) return;
+  const btn = $("aoAssembleBtn");
+  btn.disabled = true;
+  $("aoAssembleMsg").textContent = "⏳ Assemblage…";
+  try {
+    const r = await api(AO_API + "/video/assemble/" + aoAdId, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    aoRenderFinalLinks(r.final_url, r.audio_url || r.final_audio_url);
+    $("aoAssembleMsg").textContent = "✓ Vidéo assemblée.";
+  } catch (e) {
+    $("aoAssembleMsg").textContent = "";
+    toast(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Bibliothèque v2 : dérive + badge « ancien pipeline » ----
+function aoDriftText(c) {
+  if (c.drift_score == null || c.drift_score === "") return "";
+  const pct = Math.round(Number(c.drift_score) * 100);
+  return isFinite(pct) ? ` · ressemblance ${pct} %` : "";
+}
+
+function aoLibAdExtras(block, ad) {
+  const h2 = block.querySelector(".lib-ad-head h2");
+  if (Number(ad.pipeline_version) === 1 && h2) {
+    h2.insertAdjacentHTML("beforeend", ` <span class="badge ao-old-pipe" title="Pub créée avec l'ancien pipeline Omni (tours) — clips consultables">ancien pipeline</span>`);
+  }
+  if (Number(ad.pipeline_version) === 2 && (ad.final_url || ad.final_audio_url)) {
+    const d = document.createElement("div");
+    d.className = "row ao-lib-final";
+    d.innerHTML =
+      (ad.final_url ? `<a class="btn small" href="${esc(ad.final_url)}" target="_blank" rel="noopener">🎬 Vidéo assemblée</a>` : "") +
+      (ad.final_audio_url ? `<a class="btn small" href="${esc(ad.final_audio_url)}" target="_blank" rel="noopener">🎧 Voix complète</a>` : "");
+    block.appendChild(d);
+  }
+}
+
+// ================================================ PRESETS CLIENT + BIBLIOTHÈQUE DE PERSONNAGES
+async function aoUrlToFile(url, base) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Photo introuvable : " + url);
+  const blob = await r.blob();
+  const ext = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp" }[blob.type] || ".png";
+  return new File([blob], base + ext, { type: blob.type || "image/png" });
+}
+
+// Remplace (ou ajoute) la photo de réf d'un type donné (planche1, decor…).
+function aoSetRefOfKind(kind, file) {
+  for (let i = aoRefsKinds.length - 1; i >= 0; i--) {
+    if (aoRefsKinds[i] === kind) { aoRefsFiles.splice(i, 1); aoRefsKinds.splice(i, 1); }
+  }
+  aoRefsFiles.push(file);
+  aoRefsKinds.push(kind);
+}
+
+function aoRefFileOfKind(kind) {
+  const i = aoRefsKinds.indexOf(kind);
+  return i >= 0 ? aoRefsFiles[i] : null;
+}
+
+// Fiche voix saisie pour le perso N (perso 1 = aoV*, sinon aoV{n}* s'il parle).
+function aoFormVoice(n) {
+  const p = n === 1 ? "aoV" : "aoV" + n;
+  return $(p + "Gender") ? aoReadVoice(p) : null;
+}
+
+function aoFormBible(n) {
+  const el = $("aoBibleCharacter" + n);
+  const fromBox = el && !$("aoBibleBox").classList.contains("hidden") ? el.value.trim() : "";
+  return fromBox || (aoPlanBible && aoPlanBible["character" + n]) || (aoPresetBible && aoPresetBible["character" + n]) || "";
+}
+
+// Crée (ou met à jour s'il vient de la bibliothèque) le personnage N du formulaire → id.
+async function aoUpsertCharacterFromForm(n) {
+  const name = ($("aoCharName" + n).value || "").trim() || `Perso ${n}`;
+  const voice = aoFormVoice(n);   // null = perso muet (pas de fiche voix affichée)
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("description", ($("aoPersona" + n).value || "").trim());
+  fd.append("voice_id", (voice && voice.voice_id) || "");
+  fd.append("voice_profile", voice ? JSON.stringify(voice) : "");
+  fd.append("bible", aoFormBible(n));
+  const planche = aoRefFileOfKind("planche" + n);
+  if (planche) fd.append("file", planche, planche.name);
+  const id = aoCharSlotIds[n];
+  let ch;
+  if (id) {
+    try {
+      ch = await api("/api/characters/" + id, { method: "PATCH", body: fd });
+    } catch (e) {
+      if (!/introuvable/i.test(e.message)) throw e;
+      ch = await api("/api/characters", { method: "POST", body: fd });   // supprimé entre-temps
+    }
+  } else {
+    ch = await api("/api/characters", { method: "POST", body: fd });
+  }
+  aoCharSlotIds[n] = ch.id;
+  if (ch.planche_url) aoPresetPlanches[n] = ch.planche_url;
+  return ch;
+}
+
+async function aoLoadPresetList(selectId) {
+  const sel = $("aoPresetSel");
+  if (!sel) return;
+  try {
+    const r = await api("/api/presets");
+    const keep = selectId != null ? String(selectId) : sel.value;
+    sel.innerHTML = `<option value="">— Charger un preset —</option>` +
+      (r.presets || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+    if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  } catch (_) { /* non bloquant */ }
+}
+
+async function aoSavePreset() {
+  const sel = $("aoPresetSel");
+  const cur = sel.value ? sel.options[sel.selectedIndex].textContent : "";
+  const pending = showModal({
+    title: "Enregistrer comme preset",
+    html: `<label>Nom du preset (client) <input type="text" id="aoPresetNameIn" maxlength="80" /></label>` +
+      `<p class="muted small">Enregistre les personnages (nom, description, planche, voice ID, fiche voix, bible), ` +
+      `le décor, le produit, le style et les options vidéo. Même nom = mise à jour.</p>`,
+    confirmText: "Enregistrer", cancelText: "Annuler",
+  });
+  // Contenu statique de la modale ; la saisie est remplie/lue par le DOM (jamais injectée en HTML).
+  if ($("aoPresetNameIn")) { $("aoPresetNameIn").value = cur; $("aoPresetNameIn").focus(); }
+  const ok = await pending;
+  const name = ($("aoPresetNameIn") && $("aoPresetNameIn").value.trim()) || "";
+  if (!ok) return;
+  if (!name) return toast("Donne un nom au preset.");
+  const msg = $("aoPresetMsg");
+  msg.textContent = "⏳ Enregistrement des personnages…";
+  try {
+    const chars = [];
+    for (const c of aoReadCharacters()) {
+      const ch = await aoUpsertCharacterFromForm(c.n);
+      chars.push({ n: c.n, character_id: ch.id, speaks: !!c.speaks });
+    }
+    const bible = {};
+    [["set", "aoBibleSet"], ["product", "aoBibleProduct"], ["positions", "aoBiblePositions"]].forEach(([k, id]) => {
+      const v = ($(id) && !$("aoBibleBox").classList.contains("hidden") ? $(id).value.trim() : "") ||
+        (aoPlanBible && aoPlanBible[k]) || (aoPresetBible && aoPresetBible[k]) || "";
+      if (v) bible[k] = v;
+    });
+    const data = {
+      characters: chars,
+      style: aoStyle(),
+      ambiance: $("aoAmbiance").value.trim(),
+      product: $("aoProduct").value.trim(),
+      bible,
+      voice_mode: aoIsV2() ? $("aoVoiceMode").value : ((aoPresetOptions && aoPresetOptions.voice_mode) || "native"),
+      video_model: aoIsV2() ? $("aoVideoModel").value
+        : ((aoPresetOptions && aoPresetOptions.video_model) || (currentSettings && currentSettings.avatar_video_model) || "grok"),
+    };
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("data", JSON.stringify(data));
+    ["decor", "produit", "style"].forEach((k) => {
+      const f = aoRefFileOfKind(k);
+      if (f) fd.append(k, f, f.name);
+    });
+    const p = await api("/api/presets", { method: "POST", body: fd });
+    msg.textContent = `✓ Preset « ${p.name} » enregistré (${chars.length} personnage(s)).`;
+    await aoLoadPresetList(p.id);
+    aoLoadCharLib();
+  } catch (e) {
+    msg.textContent = "";
+    toast(e.message);
+  }
+}
+
+// Remplit le perso N depuis un personnage de la bibliothèque (nom, description, voix, planche, bible).
+async function aoApplyCharacter(n, ch, speaks) {
+  const row = $("aoCharRow" + n);
+  if (!row) return;
+  row.classList.remove("hidden");
+  $("aoCharName" + n).value = ch.name || "";
+  $("aoPersona" + n).value = ch.description || "";
+  const vp = ch.voice_profile || {};
+  const talks = speaks != null ? !!speaks : (!!ch.voice_id || $("aoCharSpeaks" + n).value === "1");
+  $("aoCharSpeaks" + n).value = talks ? "1" : "0";
+  aoRefreshCharsUi();
+  const prefix = n === 1 ? "aoV" : "aoV" + n;
+  if ($(prefix + "Gender")) aoWriteVoice(prefix, Object.assign({}, vp, { voice_id: ch.voice_id || vp.voice_id || "" }));
+  aoCharSlotIds[n] = ch.id;
+  if (ch.bible) {
+    aoPresetBible = aoPresetBible || {};
+    aoPresetBible["character" + n] = ch.bible;
+  }
+  if (ch.planche_url) {
+    aoPresetPlanches[n] = ch.planche_url;
+    try { aoSetRefOfKind("planche" + n, await aoUrlToFile(ch.planche_url, "planche" + n)); }
+    catch (e) { toast(e.message); }
+  }
+}
+
+async function aoLoadPreset() {
+  const id = $("aoPresetSel").value;
+  if (!id) return toast("Choisis un preset.");
+  const msg = $("aoPresetMsg");
+  msg.textContent = "⏳ Chargement du preset…";
+  try {
+    const p = await api("/api/presets/" + id);
+    const d = p.data || {};
+    // Persos : on repart des lignes du preset (les autres sont vidées).
+    aoCharSlotIds = {};
+    aoPresetPlanches = {};
+    aoPresetBible = Object.assign({}, d.bible || {});
+    for (let n = 1; n <= AO_MAX_CHARS; n++) {
+      if (n > 1) {
+        $("aoCharName" + n).value = "";
+        $("aoPersona" + n).value = "";
+        $("aoCharSpeaks" + n).value = "0";
+        if (n > 2) $("aoCharRow" + n).classList.add("hidden");
+      }
+    }
+    for (const item of d.characters || []) {
+      if (item.character) await aoApplyCharacter(Number(item.n), item.character, item.speaks);
+    }
+    // Photos décor / produit / style du preset (les autres photos déjà déposées sont gardées).
+    for (const k of ["decor", "produit", "style"]) {
+      if (d[k + "_url"]) {
+        try { aoSetRefOfKind(k, await aoUrlToFile(d[k + "_url"], k)); } catch (e) { toast(e.message); }
+      }
+    }
+    if (d.style) {
+      const radio = document.querySelector(`input[name="aoStyle"][value="${CSS.escape(d.style)}"]`);
+      if (radio) { radio.checked = true; radio.dispatchEvent(new Event("change", { bubbles: true })); }
+    }
+    if (d.ambiance != null) $("aoAmbiance").value = d.ambiance;
+    if (d.product != null) $("aoProduct").value = d.product;
+    aoPresetOptions = {};
+    if (d.video_model) aoPresetOptions.video_model = d.video_model;
+    if (d.voice_mode) aoPresetOptions.voice_mode = d.voice_mode;
+    aoRefreshCharsUi();
+    // aoRefreshCharsUi re-rend les fiches 2..4 en gardant les valeurs : on réécrit les voix.
+    for (const item of d.characters || []) {
+      const ch = item.character;
+      const n = Number(item.n);
+      const prefix = n === 1 ? "aoV" : "aoV" + n;
+      if (ch && $(prefix + "Gender"))
+        aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" }));
+    }
+    msg.textContent = `✓ Preset « ${p.name} » chargé — il ne reste qu'à coller le script.`;
+    $("aoScript").focus();
+  } catch (e) {
+    msg.textContent = "";
+    toast(e.message);
+  }
+}
+
+async function aoDeletePreset() {
+  const sel = $("aoPresetSel");
+  if (!sel.value) return toast("Choisis un preset.");
+  const ok = await showModal({
+    title: "Supprimer le preset ?",
+    message: `Supprimer « ${sel.options[sel.selectedIndex].textContent} » ? Les personnages restent dans la bibliothèque.`,
+    confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api("/api/presets/" + sel.value, { method: "DELETE" });
+    $("aoPresetMsg").textContent = "Preset supprimé.";
+    aoLoadPresetList("");
+  } catch (e) { toast(e.message); }
+}
+
+async function aoLoadCharLib() {
+  const box = $("aoCharLibList");
+  if (!box) return;
+  let list = [];
+  try { list = (await api("/api/characters")).characters || []; } catch (e) {
+    box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`;
+    return;
+  }
+  if (!list.length) {
+    box.innerHTML = `<p class="muted small">Aucun personnage enregistré — « Enregistrer ce perso » depuis le formulaire.</p>`;
+    return;
+  }
+  box.innerHTML = "";
+  list.forEach((ch) => {
+    const card = document.createElement("div");
+    card.className = "ao-charlib-card";
+    card.innerHTML =
+      (ch.planche_url ? `<img src="${esc(ch.planche_url)}" alt="planche ${esc(ch.name)}" loading="lazy" />`
+        : `<div class="thumb empty">pas de planche</div>`) +
+      `<div class="ao-charlib-info"><b>${esc(ch.name)}</b>` +
+      `<span class="muted small">${ch.voice_id ? "🎙️ " + esc(ch.voice_id) : "sans voice ID"}</span></div>` +
+      `<div class="row"><select class="ao-charlib-n">${[1, 2, 3, 4].map((n) => `<option value="${n}">perso ${n}</option>`).join("")}</select>` +
+      `<button class="btn small ao-charlib-use" type="button">Utiliser comme perso N</button>` +
+      `<button class="btn small danger-outline ao-charlib-del" type="button" title="Supprimer de la bibliothèque">🗑</button></div>`;
+    card.querySelector(".ao-charlib-use").addEventListener("click", async () => {
+      const n = Number(card.querySelector(".ao-charlib-n").value);
+      await aoApplyCharacter(n, ch, null);
+      aoRefreshCharsUi();
+      const prefix = n === 1 ? "aoV" : "aoV" + n;
+      if ($(prefix + "Gender")) aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" }));
+      toast(`« ${ch.name} » → personnage ${n} ✓`);
+    });
+    card.querySelector(".ao-charlib-del").addEventListener("click", async () => {
+      const ok = await showModal({
+        title: "Supprimer ce personnage ?",
+        message: `Supprimer « ${ch.name} » de la bibliothèque (et sa planche) ? Les presets qui l'utilisent ne le chargeront plus.`,
+        confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api("/api/characters/" + ch.id, { method: "DELETE" });
+        Object.keys(aoCharSlotIds).forEach((k) => { if (aoCharSlotIds[k] === ch.id) delete aoCharSlotIds[k]; });
+        aoLoadCharLib();
+      } catch (e) { toast(e.message); }
+    });
+    box.appendChild(card);
+  });
+}
+
+if ($("aoPresetSaveBtn")) {
+  $("aoPresetSaveBtn").addEventListener("click", aoSavePreset);
+  $("aoPresetLoadBtn").addEventListener("click", aoLoadPreset);
+  $("aoPresetDelBtn").addEventListener("click", aoDeletePreset);
+  $("aoCharLibSaveBtn").addEventListener("click", async () => {
+    const n = Number($("aoCharLibSaveN").value);
+    if (!aoCharRowVisible(n) || !(($("aoCharName" + n).value || "").trim() || ($("aoPersona" + n).value || "").trim()))
+      return toast(`Le personnage ${n} est vide.`);
+    try {
+      const ch = await aoUpsertCharacterFromForm(n);
+      toast(`« ${ch.name} » enregistré dans la bibliothèque ✓`);
+      aoLoadCharLib();
+    } catch (e) { toast(e.message); }
   });
 }
 

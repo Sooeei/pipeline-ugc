@@ -47,8 +47,9 @@
           <button class="btn" id="refreshDash">↻ Rafraîchir</button>
         </header>
         <div class="cards">
-          <div class="card"><div class="card-label">Crédits Gradium</div><div class="card-value" id="gradiumCredits">—</div></div>
-          <div class="card"><div class="card-label">Quota HeyGen</div><div class="card-value" id="heygenQuota">—</div></div>
+          <div class="card"><div class="card-label">OpenRouter (solde)</div><div class="card-value" id="dashOpenrouter">—</div></div>
+          <div class="card"><div class="card-label">xAI (Grok)</div><div class="card-value" id="dashXai">—</div></div>
+          <div class="card"><div class="card-label">ElevenLabs (caractères)</div><div class="card-value" id="dashElevenlabs">—</div></div>
           <div class="card"><div class="card-label">Vidéos générées</div><div class="card-value" id="totalVideos">—</div></div>
         </div>
         <h2>Activité récente</h2>
@@ -370,6 +371,28 @@
           <p class="muted">Une personne IA photoréaliste (adulte, visage générique) dit ton script face caméra.
             Google Omni génère la vidéo <b>et</b> la voix en une passe.
             <span class="ao-flag">🇫🇷 voix FR expérimentale</span> (Google n'évalue officiellement que l'anglais).</p>
+          <!-- Presets client (v2) : persos + fiches voix + photos + style → il ne reste que le script -->
+          <div class="card-block ao-presets" id="aoPresetsBox">
+            <div class="ao-voice-head"><b>📦 Preset client</b>
+              <span class="muted small">— recharge persos, fiches voix, planches, photos, style et bible : il ne reste que le script à coller.</span></div>
+            <div class="row">
+              <select id="aoPresetSel"><option value="">— Charger un preset —</option></select>
+              <button class="btn small" id="aoPresetLoadBtn" type="button">📂 Charger</button>
+              <button class="btn small" id="aoPresetSaveBtn" type="button">💾 Enregistrer comme preset</button>
+              <button class="btn small danger-outline" id="aoPresetDelBtn" type="button" title="Supprimer le preset sélectionné">🗑</button>
+            </div>
+            <div id="aoPresetMsg" class="muted small"></div>
+            <details id="aoCharLib" class="ao-charlib">
+              <summary>👥 Bibliothèque de personnages</summary>
+              <div class="row">
+                <label>Enregistrer le perso <select id="aoCharLibSaveN">
+                  <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                </select></label>
+                <button class="btn small" id="aoCharLibSaveBtn" type="button">💾 Enregistrer ce perso</button>
+              </div>
+              <div id="aoCharLibList" class="ao-charlib-list"></div>
+            </details>
+          </div>
           <h2>2. Ton script &amp; tes personnages</h2>
           <div class="ao-modes" role="radiogroup" aria-label="Style visuel">
             <span class="lbl">Style :</span>
@@ -528,12 +551,33 @@
             <ul class="scene-progress" id="aoSceneProgress"></ul>
           </div>
 
+          <!-- Étape 4b (pipeline v2) : voix ElevenLabs par bloc — fixe la durée de chaque clip -->
+          <div id="aoVoices" class="hidden">
+            <h2>4b. Voix</h2>
+            <p class="muted">Une voix <b>ElevenLabs</b> par bloc (voice ID de la fiche voix du personnage qui
+              parle). Écoute chaque réplique, regénère si besoin, puis valide : la <b>durée réelle</b> de l'audio
+              fixe la durée du clip vidéo. <b>Aucune vidéo tant que les voix ne sont pas validées.</b></p>
+            <div class="row">
+              <button class="btn primary" id="aoVoicesGenBtn" type="button">🎙️ Générer les voix</button>
+              <button class="btn primary" id="aoVoicesValidateAllBtn" type="button">✅ Valider les voix</button>
+            </div>
+            <div id="aoVoicesMsg"></div>
+            <div id="aoVoicesProgress" class="hidden">
+              <div class="progressbar"><div class="progressbar-fill" id="aoVoicesProgFill"></div></div>
+              <div class="prog-count" id="aoVoicesProgCount"></div>
+              <ul class="scene-progress" id="aoVoicesSceneProgress"></ul>
+            </div>
+            <div id="aoVoicesList" class="ao-voices-list"></div>
+          </div>
+
           <!-- Étape 5 : validation + fiche voix + animation -->
           <div id="aoValidation" class="hidden">
-            <h2>5. Validation des plans</h2>
-            <p class="muted">Valide chaque image. <b>Rien n'est animé tant que tu n'as pas validé.</b>
-              Valide d'abord le <b>Plan 1</b> (ou marque un plan ⚓ ancre), puis
-              « Générer les plans suivants » : même personne, cadrages variés.</p>
+            <h2>5. Keyframes</h2>
+            <p class="muted"><b>Keyframe = image de départ de chaque plan, validée avant toute vidéo.</b>
+              Générée par Nano Banana Pro (ou ta propre image). Pour chaque plan : vérifie l'image et les
+              prompts, regénère avec une correction si besoin, puis valide. Valide d'abord le <b>Plan 1</b>
+              (ou marque un plan ⚓ ancre), puis « Générer les plans suivants » : même personne, cadrages variés.
+              <b>Aucune vidéo n'est générée tant que tu n'as pas cliqué « Valider les keyframes ».</b></p>
 
             <div class="card-block ao-voice-block">
               <div class="ao-voice-head">
@@ -593,20 +637,54 @@
             <div class="row">
               <button class="btn" id="aoRefreshBtn">↻ Rafraîchir</button>
               <button class="btn primary" id="aoConsistencyBtn">▶️ Générer les plans suivants (depuis le plan validé)</button>
+              <button class="btn primary" id="aoKfValidateAllBtn" type="button">✅ Valider les keyframes</button>
             </div>
+            <div id="aoKfMsg"></div>
 
-            <h2>6. Animer les plans validés</h2>
+            <h2>6. Générer la vidéo (keyframes validés)</h2>
             <p class="muted">Seuls les plans <b>validés</b> (et ceux en échec à reprendre) sont animés :
               Google Omni fait la vidéo <b>et</b> la voix (lip-sync) — environ 0,10 $ par seconde.
               Les clips numérotés arrivent dans la Bibliothèque (onglet « 🧑 Avatar IA »).</p>
+            <div id="aoV2Options" class="row hidden">
+              <label class="ao-res">Modèle vidéo
+                <select id="aoVideoModel">
+                  <option value="grok">Grok Imagine (défaut)</option>
+                  <option value="kling">Kling 3.0</option>
+                  <option value="omni">Omni (Google)</option>
+                </select>
+              </label>
+              <!-- Voix : toujours native (générée par le modèle vidéo). Option ElevenLabs masquée
+                   (désactivée, pas supprimée) : cf. AO_ELEVENLABS_ENABLED dans app.js. -->
+              <label class="ao-res hidden" id="aoVoiceModeLabel">Voix
+                <select id="aoVoiceMode">
+                  <option value="native">Voix native du modèle (défaut)</option>
+                  <option value="elevenlabs" hidden disabled>ElevenLabs maître (désactivé)</option>
+                </select>
+              </label>
+            </div>
             <div class="estimate" id="aoAnimEstimate"></div>
             <div class="row">
-              <button class="btn primary" id="aoAnimateBtn">🎬 Animer les plans validés</button>
+              <label class="ao-res">Résolution vidéo
+                <select id="aoResolution">
+                  <option value="720p" selected>720p (économique)</option>
+                  <option value="1080p">1080p</option>
+                </select>
+              </label>
+              <button class="btn primary" id="aoAnimateBtn" disabled>🎬 Animer les plans validés</button>
             </div>
+            <div id="aoKfGate" class="ao-kf-gate hidden"></div>
             <div id="aoAnimProgress" class="hidden">
               <div class="progressbar"><div class="progressbar-fill" id="aoAnimProgFill"></div></div>
               <div class="prog-count" id="aoAnimProgCount"></div>
               <ul class="scene-progress" id="aoAnimSceneProgress"></ul>
+            </div>
+            <div id="aoFinalBox" class="card-block hidden">
+              <div class="ao-voice-head"><b>🎞️ Vidéo assemblée</b></div>
+              <div id="aoFinalLinks" class="row"></div>
+              <div class="row">
+                <button class="btn small" id="aoAssembleBtn" type="button">🧩 Assembler</button>
+                <span id="aoAssembleMsg" class="muted small"></span>
+              </div>
             </div>
           </div>
         </div><!-- /avatarOmniFlow -->
@@ -697,6 +775,8 @@
             <input type="password" id="xaiKey" /></label>
           <label>Clé API Google (Gemini) — Avatar IA Omni <span class="muted">(Google AI Studio, tier payant)</span>
             <input type="password" id="geminiKey" /></label>
+          <label>Clé API ElevenLabs — voix Avatar IA
+            <input type="password" id="elevenlabsKey" /></label>
           <fieldset class="engine-box">
             <legend>Moteur du cerveau (Claude)</legend>
             <label class="check"><input type="radio" name="brainEngine" value="anthropic_api" checked />
@@ -763,6 +843,16 @@
           </label>
           <label>Durée max d'un tour parlé (s) <span class="muted">(Avatar IA : 3 à 10 ; 8 recommandé — au-delà le lip-sync se dégrade)</span>
             <input type="number" id="omniMaxSpoken" min="3" max="10" step="1" placeholder="8" />
+          </label>
+          <label>Modèle vidéo « Avatar IA » (1 appel par bloc)
+            <select id="avatarVideoModel">
+              <option value="grok">Grok Imagine (défaut)</option>
+              <option value="kling">Kling 3.0</option>
+              <option value="omni">Omni</option>
+            </select>
+          </label>
+          <label>Seuil de dérive « Avatar IA » <span class="muted">(0 à 1 ; sous ce score de ressemblance frame 0 / keyframe, le clip est signalé — 0,80 recommandé)</span>
+            <input type="number" id="driftThreshold" min="0" max="1" step="0.01" placeholder="0.80" />
           </label>
           <label class="check">
             <input type="checkbox" id="dryRun" />

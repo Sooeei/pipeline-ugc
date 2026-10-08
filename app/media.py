@@ -267,3 +267,87 @@ def make_placeholder_image(
 
     img.save(str(path), format="PNG")
     return str(path)
+
+
+# --------- Avatar IA v2 : frame 0, remplacement d'audio, concat audio, clip fixe simulé ---------
+def _run_ffmpeg(args: list[str]) -> None:
+    """Lance ffmpeg (silencieux) ; RuntimeError(FFMPEG_MISSING_MSG) s'il est absent."""
+    if not ffmpeg_available():
+        raise RuntimeError(FFMPEG_MISSING_MSG)
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args],
+                   check=True, capture_output=True)
+
+
+def extract_first_frame(mp4: str | Path, out_png: str | Path) -> Path:
+    """Extrait la PREMIÈRE image d'une vidéo en PNG (contrôle de dérive : frame 0 vs keyframe)."""
+    out = Path(out_png)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(["-ss", "0", "-i", str(mp4), "-frames:v", "1", str(out)])
+    return out
+
+
+def replace_audio(video: str | Path, audio: str | Path, out_mp4: str | Path) -> Path:
+    """Remplace la piste audio de `video` par `audio` (vidéo copiée sans ré-encodage, audio en
+    AAC). L'audio est complété de silence (apad) jusqu'à la fin de la vidéo ; `-shortest` coupe
+    à la durée vidéo (un audio plus long que la vidéo est donc tronqué)."""
+    out = Path(out_mp4)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg([
+        "-i", str(video), "-i", str(audio),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-af", "apad", "-shortest",
+        str(out),
+    ])
+    return out
+
+
+def concat_audio(parts: Sequence[str | Path], out_mp3: str | Path) -> Path:
+    """Concatène des fichiers audio (mp3/wav mélangés acceptés) en UN mp3, dans l'ordre donné
+    (ré-encodage via le filtre concat : robuste aux formats différents)."""
+    if not parts:
+        raise ValueError("Aucun audio à concaténer.")
+    out = Path(out_mp3)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    inputs: list[str] = []
+    for p in parts:
+        inputs += ["-i", str(p)]
+    n = len(parts)
+    graph = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
+    _run_ffmpeg([
+        *inputs, "-filter_complex", graph, "-map", "[a]",
+        "-map_metadata", "-1", "-codec:a", "libmp3lame",
+        "-b:a", f"{int(config_app.MP3_BITRATE_KBPS)}k", str(out),
+    ])
+    return out
+
+
+def extract_audio_mp3(video: str | Path, out_mp3: str | Path) -> Path:
+    """Piste audio d'une vidéo → mp3 (même durée que la vidéo : silences compris, donc calée
+    sur la vidéo assemblée)."""
+    out = Path(out_mp3)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg([
+        "-i", str(video), "-vn", "-map_metadata", "-1", "-codec:a", "libmp3lame",
+        "-b:a", f"{int(config_app.MP3_BITRATE_KBPS)}k", str(out),
+    ])
+    return out
+
+
+def make_placeholder_mp4_from_image(
+    image: str | Path, out_mp4: str | Path, seconds: float = 4.0,
+) -> Path:
+    """MODE SIMULATION : clip FIXE 9:16 (720x1280) montrant `image` pendant `seconds`, avec une
+    piste audio muette. Sa frame 0 ressemble au keyframe → le contrôle de dérive donne ~1."""
+    out = Path(out_mp4)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    secs = max(0.5, float(seconds))
+    vf = ("scale=720:1280:force_original_aspect_ratio=decrease,"
+          "pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p")
+    _run_ffmpeg([
+        "-loop", "1", "-framerate", "10", "-i", str(image),
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-t", f"{secs:.3f}", "-vf", vf,
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+        "-c:a", "aac", "-shortest", str(out),
+    ])
+    return out

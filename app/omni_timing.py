@@ -308,3 +308,73 @@ def build_turn_timecode_prompt(
         f"\"{text}\"{while_part}. "
         f"[{_fmt(y)}s-{d}s] {t['apres'] or 'A small natural pause'}, then holds still, silent."
     )
+
+
+# ============================================================ v2 : découpage des répliques en blocs
+def replica_seconds(text: str, wps: float) -> float:
+    """Durée parlée estimée d'une réplique (mots ÷ débit), sans marge ni geste."""
+    words = len((text or "").split())
+    return words / float(wps or config_app.GROK_WORDS_PER_SEC)
+
+
+def _inside_aside(text: str, pos: int) -> bool:
+    """Vrai si `pos` tombe dans un geste/aparté : ( … ), [ … ] ou * … * — on n'y coupe jamais."""
+    before = text[:pos]
+    return (before.count("(") > before.count(")") or before.count("[") > before.count("]")
+            or before.count("*") % 2 == 1)
+
+
+def _cut_outside(text: str, regex: re.Pattern[str]) -> list[str]:
+    """Comme _cut, mais ignore les ponctuations situées DANS un geste/aparté."""
+    pieces, start = [], 0
+    for m in regex.finditer(text):
+        if _inside_aside(text, m.end()):
+            continue
+        piece = text[start:m.end()].strip()
+        if piece:
+            pieces.append(piece)
+        start = m.end()
+    rest = text[start:].strip()
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def _pack(units: list[str], wps: float, max_s: float) -> list[str]:
+    """Regroupe les unités dans l'ordre, le plus possible par bloc sans dépasser max_s."""
+    chunks: list[str] = []
+    cur = ""
+    for u in units:
+        cand = f"{cur} {u}" if cur else u
+        if cur and replica_seconds(cand, wps) > max_s:
+            chunks.append(cur)
+            cur = u
+        else:
+            cur = cand
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def split_replica_blocks(
+    text: str, wps: float, max_s: float = config_app.AVATAR_MAX_BLOCK_S,
+) -> list[str]:
+    """Découpe une réplique d'UN perso en blocs vidéo (pipeline v2 : 1 bloc = 1 clip ≤ max_s).
+
+    Durée estimée ≤ max_s → [text] (inchangé). Sinon coupe à la ponctuation : fins de phrase
+    d'abord (. ! ? …), puis, pour une phrase encore trop longue, « : ; , — ». Jamais au milieu
+    d'un mot ni d'un geste/aparté ( ( … ), [ … ], * … * ) ; une phrase sans ponctuation
+    utilisable reste entière (bloc trop long plutôt que coupe arbitraire).
+    VERBATIM : chaque bloc est une tranche exacte du texte → " ".join(blocs) == texte aux
+    espaces de coupe près (même règle que split_turn)."""
+    src = text or ""
+    if not src.strip() or replica_seconds(src, wps) <= max_s:
+        return [src]
+    out: list[str] = []
+    for chunk in _pack(_cut_outside(src, _SENTENCE_END_RE), wps, max_s):
+        if replica_seconds(chunk, wps) <= max_s:
+            out.append(chunk)
+            continue
+        clauses = _cut_outside(chunk, _CLAUSE_END_RE)
+        out.extend(_pack(clauses, wps, max_s) if len(clauses) > 1 else [chunk])
+    return out

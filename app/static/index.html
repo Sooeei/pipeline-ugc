@@ -14,14 +14,16 @@
         <div class="logo">▶</div>
         <div>
           <div class="brand-title">Pipeline UGC</div>
-          <div class="brand-sub">Gradium → HeyGen</div>
+          <div class="brand-sub">Studio de pubs IA</div>
         </div>
       </div>
       <nav>
         <button class="nav-item active" data-section="dashboard">📊 Tableau de bord</button>
         <button class="nav-item" data-section="new">✨ Nouvelle pub</button>
         <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
+        <button class="nav-item" data-section="clients">👥 Clients &amp; persos</button>
         <button class="nav-item" data-section="costs">💰 Coûts</button>
+        <button class="nav-item" data-section="modeles">🧩 Modèles</button>
         <button class="nav-item" data-section="settings">⚙️ Réglages</button>
       </nav>
       <div class="mode-badge" id="modeBadge">Mode : —</div>
@@ -155,6 +157,20 @@
 
         <!-- ============ FLUX OBJET ANIMÉ ============ -->
         <div id="objetFlow" class="hidden">
+          <!-- Preset client : refs, persos, ambiance, produit, dossier d'export → il ne reste que le script -->
+          <div class="card-block ao-presets" id="objClientBox">
+            <div class="row">
+              <label class="inline">👤 Client
+                <select id="objClientSel"><option value="">— Aucun client —</option></select>
+              </label>
+              <label class="inline">Ajouter un perso de la bibliothèque
+                <select id="objCharLibSel"><option value="">— Choisir —</option></select>
+              </label>
+              <button class="btn small" id="objClientManageBtn" type="button">👥 Gérer clients &amp; persos</button>
+            </div>
+            <div id="objClientMsg" class="muted small"></div>
+            <div id="objPersosList" class="obj-persos"></div>
+          </div>
           <h2>2. Ton produit</h2>
           <div class="row grid2">
             <label>Nom du produit <span class="muted">(optionnel)</span>
@@ -205,6 +221,21 @@
             <p class="muted">Séquentiel : on génère d'abord le <b>Plan 1</b> (il définit le
               personnage). Tu le valides, puis tu génères les plans suivants — tu ne paies les
               autres que quand le personnage te plaît.</p>
+            <!-- Mon image pour le Plan 1 (ex. image du client) : recadrée 9:16, posée comme ancre -->
+            <label>Mon image pour le Plan 1 <span class="muted">(optionnel — ex. l'image du client ;
+              recadrée automatiquement en 9:16 720x1280, aucune génération pour ce plan)</span>
+              <input type="file" id="objPlan1File" accept="image/png,image/jpeg,image/webp" />
+            </label>
+            <div id="objPlan1Preview" class="plan1-preview hidden"><img alt="aperçu 9:16 du Plan 1" /></div>
+            <label class="check">
+              <input type="checkbox" id="objPlan1Anchor" checked />
+              Utiliser cette image comme ancre
+            </label>
+            <label class="check">
+              <input type="checkbox" id="objAnchorEdit" />
+              Retouche de l'ancre — les plans suivants RETOUCHENT l'ancre (mêmes perso/produit/décor)
+              au lieu d'être régénérés depuis les réfs
+            </label>
             <div class="row">
               <button class="btn primary" id="objGenImagesBtn">🖼️ Générer le Plan 1 (le personnage)</button>
             </div>
@@ -227,6 +258,8 @@
               <b>Plan 1</b> (il fixe l'apparence du personnage), puis clique
               <b>« Générer les plans suivants »</b> — ils sont générés à partir de ton Plan 1
               validé (même tête/yeux/bouche/style) + tes photos produit, dans leur propre scène.</p>
+            <!-- Réglages de la pub : retouche de l'ancre, persos parlants, réf principale -->
+            <div id="objAdPanel" class="obj-ad-panel"></div>
             <div id="objGallery" class="obj-gallery"></div>
             <div class="row">
               <button class="btn" id="objRefreshBtn">↻ Rafraîchir</button>
@@ -245,6 +278,11 @@
               <div class="progressbar"><div class="progressbar-fill" id="objAnimProgFill"></div></div>
               <div class="prog-count" id="objAnimProgCount"></div>
               <ul class="scene-progress" id="objAnimSceneProgress"></ul>
+            </div>
+            <!-- Agent C : coût réel cumulé + export de la pub (app/static/outils_c.js) -->
+            <div id="objCostBox" class="pub-cost-box hidden"></div>
+            <div class="row">
+              <button class="btn" id="objExportBtn" type="button">📤 Exporter la pub</button>
             </div>
           </div>
         </div><!-- /objetFlow -->
@@ -362,6 +400,11 @@
               <div class="progressbar"><div class="progressbar-fill" id="mashAnimProgFill"></div></div>
               <div class="prog-count" id="mashAnimProgCount"></div>
               <ul class="scene-progress" id="mashAnimSceneProgress"></ul>
+            </div>
+            <!-- Agent C : coût réel cumulé + export de la pub (app/static/outils_c.js) -->
+            <div id="mashCostBox" class="pub-cost-box hidden"></div>
+            <div class="row">
+              <button class="btn" id="mashExportBtn" type="button">📤 Exporter la pub</button>
             </div>
           </div>
         </div><!-- /mashupFlow -->
@@ -712,6 +755,67 @@
         <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
       </section>
 
+      <!-- ---- CLIENTS (presets) & BIBLIOTHÈQUE DE PERSONNAGES (tous modes) ---- -->
+      <section id="clients" class="panel">
+        <header class="panel-head">
+          <h1>Clients &amp; personnages</h1>
+          <button class="btn" id="refreshClients">↻ Rafraîchir</button>
+        </header>
+        <p class="muted">Un <b>client</b> (preset) regroupe ses personnages, ses photos de réf (décor, produit, style),
+          son ambiance et son dossier d'export. Choisis-le dans <b>Objet animé</b> ou <b>Avatar IA</b> : il ne reste
+          qu'à coller le script. Les <b>personnages</b> sont réutilisables entre pubs et clients.</p>
+
+        <h2>Personnages</h2>
+        <div class="card-block" id="charEditor">
+          <input type="hidden" id="charEditId" value="" />
+          <div class="row grid2">
+            <label>Nom <input type="text" id="charEditName" maxlength="80" placeholder="Ex. Julie, la tasse Mug…" /></label>
+            <label>Image de réf (planche / visage)
+              <input type="file" id="charEditFile" accept="image/*" />
+            </label>
+          </div>
+          <label>Description (apparence, rôle)
+            <textarea id="charEditDesc" rows="2" placeholder="Ex. femme 35 ans, cheveux châtains, pull crème…"></textarea>
+          </label>
+          <label>Fiche voix (texte)
+            <textarea id="charEditVoice" rows="2" placeholder="Ex. voix féminine posée, chaleureuse, légèrement souriante, débit naturel…"></textarea>
+          </label>
+          <div class="row">
+            <button class="btn primary" id="charEditSave" type="button">💾 Enregistrer le personnage</button>
+            <button class="btn" id="charEditReset" type="button">Nouveau</button>
+            <span id="charEditMsg" class="muted small"></span>
+          </div>
+        </div>
+        <div id="charLibGrid" class="ao-charlib-list"></div>
+
+        <h2>Clients (presets)</h2>
+        <div class="row">
+          <select id="clientEditSel"><option value="">— Nouveau client —</option></select>
+          <button class="btn small danger-outline" id="clientDelBtn" type="button" title="Supprimer ce client">🗑 Supprimer</button>
+        </div>
+        <div class="card-block" id="clientEditor">
+          <div class="row grid2">
+            <label>Nom du client <input type="text" id="clientName" maxlength="80" /></label>
+            <label>Dossier d'export <input type="text" id="clientExportDir" maxlength="500" placeholder="Ex. D:\Clients\Liberty\Exports" /></label>
+          </div>
+          <div class="row grid2">
+            <label>Produit <input type="text" id="clientProduct" /></label>
+            <label>Style visuel
+              <select id="clientStyle"><option value="">—</option><option value="realiste">Réaliste</option><option value="3d">3D animée</option></select>
+            </label>
+          </div>
+          <label>Ambiance / contexte <textarea id="clientAmbiance" rows="2"></textarea></label>
+          <label>Persona / cible <textarea id="clientPersona" rows="2"></textarea></label>
+          <div class="row grid2" id="clientPhotos"></div>
+          <h3>Personnages du client</h3>
+          <div id="clientChars"></div>
+          <div class="row">
+            <button class="btn primary" id="clientSaveBtn" type="button">💾 Enregistrer le client</button>
+            <span id="clientMsg" class="muted small"></span>
+          </div>
+        </div>
+      </section>
+
       <!-- ---- COÛTS / DÉPENSES ---- -->
       <section id="costs" class="panel">
         <header class="panel-head">
@@ -758,6 +862,32 @@
         <div id="costArchivesBlock">
           <h2>🗄 Archives <span class="muted" style="font-size:13px;font-weight:400">— périodes clôturées, historique conservé</span></h2>
           <div id="costArchivesList"></div>
+        </div>
+      </section>
+
+      <!-- ---- MODÈLES (agent C : tableau généré depuis config_app.py + statut des clés) ---- -->
+      <section id="modeles" class="panel">
+        <header class="panel-head">
+          <h1>Modèles <span class="muted" style="font-size:14px;font-weight:400">— quel modèle sert à quoi, à quel prix</span></h1>
+          <div class="head-actions">
+            <button class="btn" id="refreshModeles">↻ Rafraîchir</button>
+          </div>
+        </header>
+        <div class="card-block">
+          <h2>Clés API</h2>
+          <p class="muted small">Les clés ne sont jamais affichées : seulement leur statut. La vérification
+            utilise des requêtes gratuites en lecture ; en mode simulation, aucun appel réseau.</p>
+          <div id="modelesKeys" class="key-status-list"></div>
+          <div class="row">
+            <button class="btn" id="checkKeysBtn" type="button">🔑 Vérifier les clés</button>
+            <span id="checkKeysMsg" class="muted small"></span>
+          </div>
+        </div>
+        <div class="card-block">
+          <h2>Modèles par mode et par étape</h2>
+          <p class="muted small">Tarifs estimés lus dans la configuration de l'app (config_app.py). « ✓ » = modèle
+            actuellement utilisé (choisi dans les Réglages ou imposé).</p>
+          <div id="modelesTable"></div>
         </div>
       </section>
 
@@ -919,6 +1049,39 @@
     </main>
   </div>
 
+  <!-- Agent C : fenêtre « Exporter la pub » (avant la modale générique pour qu'elle reste dessous) -->
+  <div id="exportOverlay" class="modal-overlay hidden">
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+      <h3 class="modal-title" id="exportTitle">📤 Exporter la pub</h3>
+      <div id="exportForm">
+        <label>Client <select id="exportClient"><option value="">— aucun —</option></select></label>
+        <label>Dossier d'export du client
+          <input type="text" id="exportDir" placeholder="Ex. D:\clients\Ho My Jelly\IA" />
+        </label>
+        <label>Sous-dossier de la pub
+          <input type="text" id="exportSubdir" placeholder="ADS1_nom-de-la-pub" />
+        </label>
+        <label class="check"><input type="checkbox" id="exportRemember" checked />
+          Mémoriser ce dossier pour ce client</label>
+        <div id="exportDest" class="muted small"></div>
+        <div id="exportConflict" class="hidden">
+          <p class="small">⚠ <b id="exportConflictN"></b> fichier(s) existent déjà dans ce dossier (jamais écrasés) :</p>
+          <label class="check"><input type="radio" name="exportConflict" value="suffix" checked />
+            Copier quand même avec un suffixe (<code>_2</code>, <code>_3</code>…)</label>
+          <label class="check"><input type="radio" name="exportConflict" value="skip" />
+            Ne pas copier ces fichiers (garder ceux déjà présents)</label>
+        </div>
+        <div id="exportFiles" class="export-files"></div>
+      </div>
+      <div id="exportResult" class="hidden"></div>
+      <div class="modal-actions">
+        <button class="btn hidden" id="exportOpenBtn" type="button">📂 Ouvrir le dossier</button>
+        <button class="btn" id="exportCancel" type="button">Fermer</button>
+        <button class="btn primary" id="exportGo" type="button">📤 Exporter</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modale intégrée (remplace les alert/confirm natifs du navigateur) -->
   <div id="modalOverlay" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -933,5 +1096,6 @@
 
   <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>
+  <script src="/static/outils_c.js"></script>
 </body>
 </html>

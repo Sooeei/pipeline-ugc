@@ -21,6 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (
@@ -54,11 +55,84 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     db.init_db()
     bootstrap.seed_from_config_if_empty()
     bootstrap.migrate_voice_to_list()
+    # Reprise après plantage : plans restés « en cours » → « échec — à relancer » (jamais de
+    # relance automatique d'un appel payant).
+    try:
+        for r in db.recover_interrupted_jobs():
+            prov._log_detail(f"[REPRISE] job {r['job_id']} interrompu (pub {r['ad_id']}, "
+                             f"{r['mode']}) : plans {r['reset']} remis « à relancer ».")
+    except Exception as exc:  # noqa: BLE001 - la reprise ne doit jamais empêcher le démarrage
+        prov._log_detail(f"[REPRISE] impossible : {exc!r}")
+    _quiet_connection_resets()
     yield
+
+
+# Erreur de connexion fermée par la fenêtre (Windows, boucle Proactor) : sans gravité, mais elle
+# inondait app.log de tracebacks « WinError 10054 » (400+ occurrences) et masquait les vrais soucis.
+def _quiet_connection_resets() -> None:
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    previous = loop.get_exception_handler()
+
+    def _handler(lp: Any, context: dict[str, Any]) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError | ConnectionAbortedError | BrokenPipeError):
+            return
+        if previous is not None:
+            previous(lp, context)
+        else:
+            lp.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
+
+
+# Heure (time.monotonic) de la dernière requête reçue : sert à ne PAS arrêter le serveur tant que
+# la fenêtre de l'app l'interroge encore (cf. run() — le process navigateur peut se terminer
+# alors que la fenêtre reste ouverte).
+_LAST_REQUEST = [0.0]
+SERVER_INTERNAL_ERROR_MSG = (
+    "Erreur interne du serveur — réessaie ; si ça persiste, relance l'app (LANCER.bat). "
+    "Le détail technique est dans app.log."
+)
+
+
+def _install_robustness(app: FastAPI) -> None:
+    """Handler global d'exceptions (réponse JSON FR propre + traceback dans app.log) et suivi de
+    la dernière requête (heartbeat de la fenêtre)."""
+    import time as _time
+    import traceback
+
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    class _TrackLastRequest:
+        """Middleware ASGI pur (n'enveloppe pas les réponses en streaming)."""
+
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope.get("type") == "http":
+                _LAST_REQUEST[0] = _time.monotonic()
+            await self.inner(scope, receive, send)
+
+    app.add_middleware(_TrackLastRequest)
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        prov._log_detail(f"[ERREUR SERVEUR] {request.method} {request.url.path} : {exc!r}\n{tb[-4000:]}")
+        msg = str(exc) if isinstance(exc, prov.ProviderError) else SERVER_INTERNAL_ERROR_MSG
+        return JSONResponse(status_code=500, content={"detail": msg})
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Pipeline UGC", lifespan=lifespan)
+    _install_robustness(app)
 
     # App strictement locale : on n'accepte que localhost (défense anti DNS-rebinding).
     # "testserver" est l'hôte utilisé par le client de test.
@@ -71,6 +145,11 @@ def create_app() -> FastAPI:
     app.include_router(avatar_voices.router)
     app.include_router(avatar_video.router)
     app.include_router(presets.router)
+    # Agent C : export de la pub par client, coût de la pub (estimé / réel), page « Modèles ».
+    from . import cout_pub, export_pub, modeles
+    app.include_router(export_pub.router)
+    app.include_router(cout_pub.router)
+    app.include_router(modeles.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -108,6 +187,7 @@ def create_app() -> FastAPI:
 
         html = html.replace("/static/app.js", f"/static/app.js?v={_ver('app.js')}")
         html = html.replace("/static/style.css", f"/static/style.css?v={_ver('style.css')}")
+        html = html.replace("/static/outils_c.js", f"/static/outils_c.js?v={_ver('outils_c.js')}")
         return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
     # -------------------------------------------------- RÉGLAGES
@@ -660,7 +740,11 @@ def create_app() -> FastAPI:
     def job_status(job_id: str) -> dict[str, Any]:
         job = jobs.manager.get(job_id)
         if job is None:
-            raise HTTPException(404, "Job inconnu.")
+            # Les jobs vivent en mémoire : après une relance de l'app, ils n'existent plus (leurs
+            # plans ont été remis « à relancer » au démarrage, cf. db.recover_interrupted_jobs).
+            raise HTTPException(404, "Suivi perdu : l'app a redémarré pendant la génération. "
+                                     "Les plans interrompus sont marqués « à relancer » — "
+                                     "rafraîchis la page.")
         return job.snapshot()
 
     # -------------------------------------------------- OBJET ANIMÉ (Nano Banana + Grok)
@@ -692,14 +776,110 @@ def create_app() -> FastAPI:
         confirm: bool = Form(False),
         ref_kinds: str = Form(""),
         files: list[UploadFile] = File(default=[]),
+        plan1_file: UploadFile | None = File(None),
+        plan1_anchor: bool = Form(True),
+        anchor_edit: bool = Form(False),
+        characters: str = Form(""),
     ) -> dict[str, Any]:
+        """`plan1_file` (facultatif) = MON image pour le Plan 1 : recadrée 9:16 720x1280, posée
+        comme image du plan (« image_pret », ancre si `plan1_anchor`) — AUCUNE génération Nano
+        Banana pour ce plan. `anchor_edit` = « Retouche de l'ancre » ; `characters` = persos (JSON)."""
         cfg = load_provider_config()
         shots = _parse_shots(shots_json)
+        raw1 = await plan1_file.read() if plan1_file is not None else b""
+        if plan1_file is not None and not raw1:
+            raise HTTPException(400, "Image du Plan 1 vide.")
+        if len(raw1) > _KEYFRAME_MAX_BYTES:
+            raise HTTPException(400, "Image trop lourde (max 25 Mo).")
+
+        def _on_ad(aid: int) -> None:
+            db.set_ad_fields(aid, anchor_edit=1 if anchor_edit else 0)
+            if characters.strip():
+                db.set_ad_characters(aid, characters)
+
         # script = DIALOGUE du plan (verbatim, éditable) ; motion_prompt + prompt_image.
-        return await _start_plan_images(
+        res = await _start_plan_images(
             cfg, "objet", ad_name, shots, files, ref_kinds, confirm,
             clip_script=lambda s: str(s.get("dialogue", "")),
+            on_ad=_on_ad, generate_first=not raw1,
         )
+        if raw1:
+            first = db.clips_for_ad(int(res["ad_id"]))[0]
+            _save_plan_upload(first, raw1, as_anchor=plan1_anchor)
+        return res
+
+    @app.post("/api/objet/upload-image/{clip_id}")
+    async def objet_upload_image(
+        clip_id: int, file: UploadFile = File(...), anchor: bool = Form(False),
+    ) -> dict[str, Any]:
+        """« Uploader mon image » sur un plan : recadrage CENTRÉ 9:16 720x1280 (Pillow), écrit
+        sous {n}.png (même convention que les images générées), clips.image_path mis à jour,
+        statut « image_pret » ; `anchor` = utiliser comme ancre. AUCUN appel payant."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"])) or {}
+        if ad.get("kind") != "objet":
+            raise HTTPException(400, "Ce plan n'appartient pas à une pub « Objet animé ».")
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(400, "Fichier vide.")
+        if len(raw) > _KEYFRAME_MAX_BYTES:
+            raise HTTPException(400, "Image trop lourde (max 25 Mo).")
+        return _save_plan_upload(clip, raw, as_anchor=anchor)
+
+    @app.post("/api/objet/ad/{ad_id}/settings")
+    def objet_ad_settings(ad_id: int, body: ObjetAdSettingsIn) -> dict[str, Any]:
+        """Réglages de la pub Objet animé : retouche de l'ancre (toggle) et liste des persos."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "objet":
+            raise HTTPException(404, "Pub « Objet animé » introuvable.")
+        if body.anchor_edit is not None:
+            db.set_ad_fields(ad_id, anchor_edit=1 if body.anchor_edit else 0)
+        persos = None
+        if body.characters is not None:
+            persos = db.set_ad_characters(ad_id, body.characters)
+        ad = db.get_ad(ad_id) or {}
+        return {"ok": True, "anchor_edit": pipeline.ad_anchor_edit(ad),
+                "characters": persos if persos is not None else pipeline.ad_characters(ad)}
+
+    @app.post("/api/objet/clip/{clip_id}/options")
+    def objet_clip_options(clip_id: int, body: ObjetClipOptionsIn) -> dict[str, Any]:
+        """Options d'un plan Objet animé : surcharge de la retouche de l'ancre et « Qui parle »."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"])) or {}
+        if ad.get("kind") != "objet":
+            raise HTTPException(400, "Ce plan n'appartient pas à une pub « Objet animé ».")
+        fields: dict[str, Any] = {}
+        if body.anchor_edit is not None:
+            v = body.anchor_edit.strip().lower()
+            if v not in ("pub", "oui", "non"):
+                raise HTTPException(400, "Retouche de l'ancre : « pub », « oui » ou « non ».")
+            fields["anchor_edit"] = None if v == "pub" else (1 if v == "oui" else 0)
+        if body.speaker is not None:
+            n = len(pipeline.ad_characters(ad))
+            if not 1 <= int(body.speaker) <= max(n, 1):
+                raise HTTPException(400, "« Qui parle » : perso inconnu.")
+            fields["speaker"] = int(body.speaker)
+        if fields:
+            db.update_clip(clip_id, **fields)
+        clip = db.get_clip(clip_id) or {}
+        return {"ok": True, **_objet_clip_fields(ad, clip)}
+
+    @app.post("/api/objet/ad/{ad_id}/main-ref")
+    def objet_main_ref(ad_id: int, body: MainRefIn) -> dict[str, Any]:
+        """Désigne la RÉF PRINCIPALE de la pub (envoyée en image 1, elle prime sur les planches)."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "objet":
+            raise HTTPException(404, "Pub « Objet animé » introuvable.")
+        if body.ref_id is not None and not any(
+            int(r["id"]) == int(body.ref_id) for r in db.list_ref_images_typed(ad_id)
+        ):
+            raise HTTPException(404, "Réf introuvable pour cette pub.")
+        db.set_main_ref(ad_id, body.ref_id)
+        return {"ok": True, **_objet_refs_fields(ad)}
 
     @app.post("/api/objet/regenerate-image/{clip_id}")
     def objet_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
@@ -766,6 +946,55 @@ def create_app() -> FastAPI:
             "n_plans": len(candidates), "usd_video": est["usd_video"],
         }
 
+    @app.post("/api/clips/{clip_id}/regenerate-longer")
+    def clip_regenerate_longer(clip_id: int, body: AnimateIn) -> dict[str, Any]:
+        """« Régénérer (+1 s) » : relance la vidéo Grok d'UN plan dont la réplique semble coupée,
+        avec 1 s de plus (clips.extra_seconds += 1), bornée au max Grok. Image/keyframe inchangés.
+        Objet animé et Avatar IA v2 (modèle Grok). Coût réel → confirmation requise."""
+        clip = db.get_clip(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Plan introuvable.")
+        ad = db.get_ad(int(clip["ad_id"]))
+        if ad is None:
+            raise HTTPException(404, "Pub introuvable.")
+        kind = ad.get("kind")
+        is_v2 = kind == "avatar_omni" and int(ad.get("pipeline_version") or 1) == 2
+        if kind != "objet" and not is_v2:
+            raise HTTPException(400, "« Régénérer (+1 s) » n'existe que pour Objet animé et Avatar IA.")
+        if is_v2 and avatar_video.effective_video_model(ad) != "grok":
+            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok.")
+        durations = config_app.AVATAR_VIDEO_MODELS["grok"]["durations"]
+        current = int(clip.get("clip_seconds") or 0)
+        if current >= max(durations):
+            raise HTTPException(400, f"Durée déjà au maximum Grok ({max(durations)} s) — raccourcis "
+                                     "plutôt la réplique.")
+        old_extra = int(clip.get("extra_seconds") or 0)
+        db.update_clip(clip_id, extra_seconds=old_extra + 1)
+        try:
+            if is_v2:
+                res = avatar_video.video_animate(int(ad["id"]), avatar_video.VideoAnimateIn(
+                    confirm=body.confirm, confirm_over_cap=body.confirm_over_cap, clip_id=clip_id))
+                return {**res, "extra_seconds": old_extra + 1}
+            cfg = load_provider_config()
+            if not clip.get("image_path"):
+                raise HTTPException(409, "Ce plan n'a pas d'image : impossible de relancer la vidéo.")
+            if not cfg.dry_run and not body.confirm:
+                raise HTTPException(400, "Confirmation requise avant de relancer (coût Grok).")
+            if not cfg.dry_run and not (cfg.xai_api_key or "").strip():
+                raise HTTPException(400, "Clé API xAI (Grok) manquante (Réglages).")
+            secs = config_app.with_extra_seconds(max(current, min(durations)), 1, durations)
+            usd = secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE
+            _check_spend_cap(cfg, usd, body.confirm_over_cap)
+            job = jobs.manager.start(
+                cfg, int(ad["id"]), str(ad["name"]), [{"n": int(clip["scene_n"])}], "",
+                output_mode="objet_animate", only_clip_id=clip_id,
+            )
+            return {"ok": True, "job_id": job.id, "ad_id": int(ad["id"]), "dry_run": cfg.dry_run,
+                    "extra_seconds": old_extra + 1, "usd_video": round(usd, 2)}
+        except Exception:
+            db.update_clip(clip_id, extra_seconds=old_extra)   # rien lancé → rallonge annulée
+            raise
+
     @app.post("/api/objet/resume/{ad_id}")
     def objet_resume(ad_id: int, body: AnimateIn) -> dict[str, Any]:
         """Reprend une pub « Objet animé » : relance uniquement les plans en échec (jalon 3)."""
@@ -773,8 +1002,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/objet/ad/{ad_id}")
     def objet_ad(ad_id: int) -> dict[str, Any]:
-        # « dialogue » = ce que l'objet dit (verbatim, éditable).
-        return _ad_shots_response(ad_id, lambda c: {"dialogue": c.get("script") or ""})
+        # « dialogue » = ce que l'objet dit (verbatim, éditable). + options ancre / qui parle.
+        ad = db.get_ad(ad_id) or {}
+        res = _ad_shots_response(ad_id, lambda c: {
+            "dialogue": c.get("script") or "", **_objet_clip_fields(ad, c)})
+        res.update(anchor_edit=pipeline.ad_anchor_edit(ad), characters=pipeline.ad_characters(ad),
+                   **_objet_refs_fields(ad))
+        return res
 
     @app.post("/api/objet/dialogue/{clip_id}")
     def objet_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
@@ -856,7 +1090,10 @@ def create_app() -> FastAPI:
         profiles = config_app.normalize_voice_profiles(voice_profiles, legacy=voice_profile or None)
         profile_json = _json(profiles.get("1") or config_app.normalize_voice_profile(voice_profile))
         profiles_json = _json(profiles)
-        personas_json = _json(_resolve_personas(cfg, personas))
+        # ⚠️ Endpoint ASYNC : _resolve_personas peut appeler le cerveau (Claude, 10-25 s). Appelé
+        # directement, il BLOQUAIT la boucle événementielle → plus aucune requête servie (l'app
+        # semblait plantée). → exécuté dans un thread.
+        personas_json = _json(await run_in_threadpool(_resolve_personas, cfg, personas))
         bible_json = _json(brain.normalize_bible(bible)) if bible.strip() else ""
         style_v = config_app.normalize_omni_style(style)
 
@@ -930,8 +1167,10 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Fichier vide.")
         if len(raw) > _KEYFRAME_MAX_BYTES:
             raise HTTPException(400, "Image trop lourde (max 25 Mo).")
-        dest = _save_keyframe_upload(raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
-                                     int(clip["scene_n"]))
+        # Décodage/écriture PIL (jusqu'à 25 Mo) hors boucle événementielle.
+        dest = await run_in_threadpool(
+            _save_keyframe_upload, raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
+            int(clip["scene_n"]))
         db.update_clip(clip_id, image_path=str(dest), keyframe_source="upload",
                        status="image_pret", error=None)
         _reset_keyframe(clip_id)
@@ -940,9 +1179,15 @@ def create_app() -> FastAPI:
     @app.post("/api/avatar-omni/keyframe/mode/{clip_id}")
     def avatar_omni_keyframe_mode(clip_id: int, body: KeyframeModeIn) -> dict[str, Any]:
         """Mode du plan : « start_frame » (keyframe en 1re image Omni) | « texte_seul » (sans image)."""
-        _omni_clip_or_404(clip_id)
+        _clip, _ad = _omni_clip_or_404(clip_id)
         if body.mode not in config_app.OMNI_KEYFRAME_MODES:
             raise HTTPException(400, "Mode inconnu (start_frame | texte_seul).")
+        if (body.mode == "texte_seul" and int(_ad.get("pipeline_version") or 1) == 2
+                and avatar_video.effective_video_model(_ad, load_provider_config()) != "omni"):
+            # v2 : Grok / Kling partent TOUJOURS d'une image → refus tout de suite plutôt qu'au
+            # lancement de la vidéo (409 « texte seul n'existe qu'avec Google Omni »).
+            raise HTTPException(409, "Le mode « texte seul » n'existe qu'avec Google Omni : change "
+                                     "le modèle vidéo de la pub ou garde un keyframe.")
         db.update_clip(clip_id, keyframe_mode=body.mode)
         clip = db.get_clip(clip_id) or {}
         db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
@@ -1801,6 +2046,22 @@ class AnchorIn(BaseModel):
     is_anchor: bool = True        # marque ce plan validé comme ancre de cohérence (jalon 2c)
 
 
+class ObjetAdSettingsIn(BaseModel):
+    # Objet animé — réglages de la pub (None = inchangé)
+    anchor_edit: bool | None = None                    # « Retouche de l'ancre » pour toute la pub
+    characters: list[dict[str, Any]] | None = None     # [{nom, image_ref, description, fiche_voix}]
+
+
+class ObjetClipOptionsIn(BaseModel):
+    # Objet animé — options d'UN plan. anchor_edit : "pub" (suit la pub) | "oui" | "non".
+    anchor_edit: str | None = None
+    speaker: int | None = None    # « Qui parle » : n° du perso (1-based) dans la liste de la pub
+
+
+class MainRefIn(BaseModel):
+    ref_id: int | None = None     # réf principale de la pub (None = repli auto : 1re réf produit)
+
+
 class AvatarOmniPlanIn(BaseModel):
     script: str = ""        # texte VERBATIM que la personne dit (découpé, jamais réécrit)
     persona: str = ""       # brief / persona / cible : guide la personne et le ton (visuel)
@@ -2379,6 +2640,61 @@ def _save_keyframe_upload(raw: bytes, folder: Path, n: int) -> Path:
     return dest
 
 
+def _save_plan_upload(clip: dict[str, Any], raw: bytes, *, as_anchor: bool = False) -> dict[str, Any]:
+    """Objet animé — « Uploader mon image » : recadre 9:16 720x1280 → `{n}.png` du dossier de la
+    pub (même convention que les images générées), clips.image_path, statut « image_pret »,
+    keyframe_source « upload » ; `as_anchor` → ce plan devient L'ancre (une seule par pub)."""
+    ad = db.get_ad(int(clip["ad_id"])) or {}
+    folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"]))
+    n = int(clip["scene_n"])
+    try:
+        dest = media.crop_to_plan_png(raw, folder / f"{n}.png")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    clip_id = int(clip["id"])
+    if as_anchor:
+        for c in db.clips_for_ad(int(ad["id"])):
+            if int(c["id"]) != clip_id and c.get("is_anchor"):
+                db.update_clip(int(c["id"]), is_anchor=0)
+    fields: dict[str, Any] = {"image_path": str(dest), "status": "image_pret", "error": None,
+                              "keyframe_source": "upload"}
+    if as_anchor:
+        fields["is_anchor"] = 1
+    db.update_clip(clip_id, **fields)
+    db.log_activity("objet", f"Plan {n} : image uploadée (9:16 720x1280)"
+                             + (" — ancre." if as_anchor else "."))
+    w, h = media.PLAN_IMAGE_SIZE
+    return {"ok": True, "clip_id": clip_id, "image_url": _media_url_v(str(dest)),
+            "status": "image_pret", "is_anchor": bool(as_anchor or clip.get("is_anchor")),
+            "width": w, "height": h}
+
+
+def _objet_clip_fields(ad: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
+    """Champs Objet animé d'un plan : surcharge de retouche (« pub »/« oui »/« non »), retouche
+    effective, « Qui parle » (n° de perso, 0 = pub sans persos), image uploadée ou non."""
+    v = c.get("anchor_edit")
+    override = "pub" if v is None or v == "" else ("oui" if int(v) else "non")
+    has_persos = bool(pipeline.ad_characters(ad))
+    return {
+        "anchor_edit": override,
+        "anchor_edit_on": pipeline.clip_anchor_edit_on(ad, c),
+        "speaker": int(c.get("speaker") or 1) if has_persos else 0,
+        "uploaded": (c.get("keyframe_source") or "") == "upload",
+    }
+
+
+def _objet_refs_fields(ad: dict[str, Any]) -> dict[str, Any]:
+    """Réfs de la pub (avec la RÉF PRINCIPALE effective) + avertissements de contradiction."""
+    typed = db.list_ref_images_typed(int(ad["id"]))
+    main = pipeline.main_ref(typed)
+    refs = [{"id": int(t["id"]), "kind": t.get("kind") or "", "url": _media_url(t.get("path")),
+             "path": t.get("path") or "", "is_main": bool(main and int(main["id"]) == int(t["id"])),
+             "main_explicit": bool(int(t.get("is_main") or 0))}
+            for t in typed]
+    return {"refs": refs, "main_ref_id": int(main["id"]) if main else None,
+            "ref_warnings": pipeline.ref_conflict_warnings(typed, pipeline.ad_anchor_edit(ad))}
+
+
 def _keyframe_fields(c: dict[str, Any]) -> dict[str, Any]:
     """Champs « étape Keyframes » d'un plan Avatar IA (réponse /ad et bibliothèque)."""
     return {
@@ -2409,11 +2725,10 @@ def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _grok_video_estimate(cfg: Any, clips: list[dict[str, Any]]) -> dict[str, Any]:
     """Coût vidéo Grok des plans à animer, sur les VRAIES durées (débit choisi dans Réglages)."""
-    pace = config_app.GROK_VOICE_PACES.get(
-        cfg.objet_voice_pace, config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]
-    )
+    # Même débit que l'animation (voix native réelle, ~2,2 mots/s au débit par défaut).
     return cost.estimate_grok_video(
-        [str(c.get("script") or "") for c in clips], pace["words_per_sec"]
+        [str(c.get("script") or "") for c in clips],
+        config_app.grok_clip_words_per_sec(cfg.objet_voice_pace),
     )
 
 
@@ -2538,15 +2853,17 @@ async def _start_plan_images(
     clip_script: Callable[[dict[str, Any]], str],
     on_clip: Callable[[int, dict[str, Any]], None] | None = None,
     on_ad: Callable[[int], None] | None = None,
+    generate_first: bool = True,
 ) -> dict[str, Any]:
     """Commun Objet / Mashup / Avatar IA : contrôles (confirmation, clé OpenRouter), création de la
     pub + des clips (refs_needed conservé), sauvegarde des réfs typées, puis job image du Plan 1
     SEULEMENT (il fixe le personnage/la personne ; les suivants via /consistency après validation).
-    `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type."""
-    # Confirmation coûts : les images Nano Banana peuvent être payantes au-delà du quota gratuit.
-    if not cfg.dry_run and not confirm:
+    `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type.
+    `generate_first=False` (Objet : image du Plan 1 uploadée) → aucun job, aucun coût : job_id None."""
+    # Confirmation coûts : les images Nano Banana sont payantes (OpenRouter).
+    if generate_first and not cfg.dry_run and not confirm:
         raise HTTPException(400, "Confirmation requise avant de générer des images.")
-    if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+    if generate_first and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
 
     ad_id = db.create_ad(ad_name, "", _json(shots), kind=kind)
@@ -2569,6 +2886,10 @@ async def _start_plan_images(
             "prompt_image": s["prompt_image"], "refs_needed": rn,
         })
 
+    if not generate_first:   # Plan 1 fourni par l'utilisateur : rien à générer maintenant
+        db.set_ad_status(ad_id, "objet_images")
+        return {"ok": True, "job_id": None, "ad_id": ad_id, "dry_run": cfg.dry_run,
+                "plans_total": len(job_shots), "generated_now": 0}
     # SÉQUENTIEL : on ne génère QUE le Plan 1. Les plans suivants restent « en_attente » et se
     # génèrent APRÈS validation du Plan 1, à partir de son image (« Générer les plans suivants »).
     first_only = job_shots[:1]
@@ -2815,11 +3136,16 @@ def _run_consistency(
     clips = db.clips_for_ad(ad_id)
     # Personnage de référence = ancre, sinon 1er plan VALIDÉ avec image (typiquement Plan 1).
     ref = _consistency_ref(clips)
+    if kind == "objet" and pipeline.ad_anchor_edit(ad):
+        # Retouche de l'ancre : l'ancre (même simplement uploadée, « image_pret ») fait foi.
+        ref = pipeline.objet_edit_anchor(clips) or ref
     if ref is None:
         raise HTTPException(400, ref_msg)
     targets = [
         c for c in clips
         if c["id"] != ref["id"] and str(c.get("prompt_image") or "").strip()
+        # Objet : une image UPLOADÉE par l'utilisateur n'est jamais écrasée par ce lot.
+        and not (kind == "objet" and (c.get("keyframe_source") or "") == "upload")
     ]
     if not targets:
         raise HTTPException(400, "Aucun autre plan à uniformiser (un seul plan ?).")
@@ -2972,6 +3298,13 @@ def run() -> None:
             return
 
         _open_window(url)          # BLOQUE jusqu'à la fermeture de la fenêtre
+        # ⚠️ Cause probable du « port qui ne répond plus » : le process navigateur (Chrome/Edge
+        # --app) peut se terminer alors que la fenêtre reste ouverte (relais vers un process
+        # déjà lancé, redémarrage après mise à jour…) → on coupait le serveur sous les pieds de
+        # l'utilisateur. Désormais on ne l'arrête que lorsque la fenêtre ne l'interroge plus
+        # (heartbeat /api/health toutes les 10 s côté front).
+        _wait_until_window_idle()
+        prov._log_detail("[APP] fenêtre fermée (plus aucune requête) → arrêt du serveur.")
         server.should_exit = True  # fenêtre fermée -> on arrête le serveur en fond
         time.sleep(0.5)
         try:
@@ -2981,6 +3314,17 @@ def run() -> None:
     except Exception as exc:  # noqa: BLE001 - lancé sans console : on journalise
         _log_launch_error(exc)
         raise
+
+
+WINDOW_IDLE_SHUTDOWN_S = 45.0   # sans requête depuis 45 s (heartbeat 10 s) = fenêtre fermée
+
+
+def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: float = 2.0) -> None:
+    """Bloque tant que la fenêtre interroge le serveur (dernière requête < idle_s)."""
+    import time
+
+    while time.monotonic() - _LAST_REQUEST[0] < idle_s:
+        time.sleep(poll_s)
 
 
 def _open_window(url: str) -> None:

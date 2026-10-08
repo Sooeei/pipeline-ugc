@@ -492,6 +492,23 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 .obj-shot .kf-full summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 .obj-shot .kf-full .pi-ro { margin-top: 4px; }
 .obj-shot .btn[disabled] { opacity: .45; cursor: not-allowed; }
+/* Objet animé : upload d'image + ancre, retouche, persos parlants, réf principale */
+.plan1-preview img { width: 90px; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+.obj-ad-panel { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; }
+.obj-ad-panel .box { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); }
+.obj-ad-panel h3 { margin: 0 0 6px; font-size: 14px; }
+.obj-ad-panel .warn { font-size: 12px; color: var(--warn); margin-top: 6px; }
+.perso-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
+.perso-row:first-of-type { border-top: 0; }
+.perso-row textarea { grid-column: 1 / -1; min-height: 44px; font-size: 12px; }
+.perso-row input, .perso-row select { font-size: 12px; margin: 0; min-width: 0; }
+.main-refs { display: flex; flex-wrap: wrap; gap: 10px; }
+.main-refs label { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.main-refs img { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; border: 2px solid transparent; }
+.main-refs label.on img { border-color: var(--accent); }
+.obj-shot .obj-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.obj-shot .obj-opts select { font-size: 12px; margin: 0; flex: 1 1 120px; min-width: 0; }
+.obj-shot .obj-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
 .ao-res { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .ao-res select { margin: 0; }
 #aoAnimateBtn[disabled] { opacity: .45; cursor: not-allowed; }
@@ -523,6 +540,15 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 .ao-charlib-info { display: flex; flex-direction: column; overflow-wrap: anywhere; }
 .ao-charlib-card .row { gap: 4px; flex-wrap: wrap; align-items: center; }
 .ao-charlib-card select { margin: 0; font-size: 12px; }
+/* Clients (presets) & personnages — tous modes */
+label.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+label.inline select { margin: 0; min-width: 160px; }
+.obj-persos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.ref-remove-inline { background: none; border: 0; color: inherit; cursor: pointer; font-size: 14px; padding: 0 2px; }
+.client-photo { display: flex; flex-direction: column; gap: 4px; }
+.client-photo-cur { display: flex; align-items: center; gap: 8px; }
+.client-photo-cur img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; background: #000; }
+#clientChars .row { gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 /* Voice ID ElevenLabs dans les fiches voix */
 .ao-elv { grid-column: 1 / -1; }
 .ao-elv-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
@@ -555,3 +581,25 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 #aoFinalLinks { gap: 8px; flex-wrap: wrap; }
 .ao-lib-media.v2 { grid-template-columns: 1fr 1fr 1fr; }
 .ao-lib-final { gap: 8px; margin: 4px 0 8px; }
+
+/* ---------- Agent C : export de la pub, coût d'une pub, page Modèles ---------- */
+.modal.wide { max-width: 720px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.modal.wide .modal-body, #exportResult { white-space: normal; }
+.export-files ul { margin: 4px 0 10px; padding-left: 18px; max-height: 220px; overflow-y: auto; font-size: 13px; }
+.pub-cost-est { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.pub-cost-est .cost-table { margin: 6px 0; font-size: 13px; }
+.pub-cost-box { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.pub-cost-services { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.key-status-list { display: grid; gap: 8px; margin: 8px 0 12px; }
+.key-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.key-status .key-name { min-width: 260px; }
+.key-status .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+.key-status .badge.ok { color: #0c1a10; background: var(--ok); font-weight: 600; border-color: transparent; }
+.key-status .badge.ko { color: #1a0c0c; background: var(--err); font-weight: 600; border-color: transparent; }
+.key-status .badge.warn { color: #1a1200; background: var(--warn); font-weight: 600; border-color: transparent; }
+.modeles-table tr.inactif td { color: var(--muted); }
+.modeles-table td code { font-size: 12px; }
+
+/* Badge « réplique peut-être coupée » : sur sa propre ligne, sous le numéro et le lien (cartes étroites). */
+.clip .meta { flex-wrap: wrap; }
+.clip .meta .badge.ko { order: 3; white-space: nowrap; }

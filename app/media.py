@@ -129,6 +129,56 @@ def mp4_duration(path: str | Path) -> float | None:
         return None
 
 
+# --------- Contrôle « réplique coupée » (niveau RMS de la fin du clip) ---------
+_RMS_SAMPLE_RATE = 48000
+
+
+def parse_rms_frames(stderr: str) -> list[float]:
+    """Niveaux RMS (dB) par tranche, lus dans la sortie `astats … ametadata=print` de ffmpeg.
+    Tranche totalement muette (-inf) → -120 dB."""
+    import re
+
+    out: list[float] = []
+    for v in re.findall(r"RMS_level=(-?[\w.]+)", stderr or ""):
+        try:
+            x = float(v)
+        except ValueError:
+            x = -120.0
+        out.append(-120.0 if x != x or x == float("-inf") else max(-120.0, x))
+    return out
+
+
+def speech_cut_from_levels(levels: list[float]) -> bool:
+    """True si la fin du clip est encore au niveau de la voix → réplique peut-être coupée.
+    Voix = 90e centile des tranches ; fin = tranches des SPEECH_CUT_TAIL_S dernières secondes.
+    Clip muet (simulation) ou trop court → False."""
+    n_tail = max(1, round(config_app.SPEECH_CUT_TAIL_S / config_app.SPEECH_CUT_FRAME_S))
+    if len(levels) <= n_tail:
+        return False
+    voice = sorted(levels)[int(len(levels) * 0.9)]
+    if voice < config_app.SPEECH_CUT_MIN_VOICE_DB:
+        return False
+    return max(levels[-n_tail:]) > voice - config_app.SPEECH_CUT_MARGIN_DB
+
+
+def detect_speech_cut(mp4: str | Path) -> bool:
+    """Mesure le niveau de la piste audio de `mp4` → True si la réplique semble coupée.
+    Jamais d'exception : ffmpeg absent, fichier illisible ou sans audio → False (non bloquant)."""
+    if not ffmpeg_available() or not Path(str(mp4)).is_file():
+        return False
+    n = int(_RMS_SAMPLE_RATE * config_app.SPEECH_CUT_FRAME_S)
+    af = (f"aresample={_RMS_SAMPLE_RATE},asetnsamples=n={n}:p=0,astats=metadata=1:reset=1,"
+          "ametadata=print:key=lavfi.astats.Overall.RMS_level")
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(mp4), "-vn", "-af", af, "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+    except Exception:  # noqa: BLE001 - contrôle indicatif : jamais bloquant
+        return False
+    return speech_cut_from_levels(parse_rms_frames(proc.stderr or ""))
+
+
 def concat_mp4(parts: Sequence[str | Path], out_path: str | Path) -> str:
     """Concatène des mp4 (tours successifs d'une vidéo Omni étendue) en UN fichier. D'abord sans
     ré-encodage (demuxer concat, -c copy) ; si ça échoue (flux incompatibles), ré-encodage."""
@@ -350,4 +400,30 @@ def make_placeholder_mp4_from_image(
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
         "-c:a", "aac", "-shortest", str(out),
     ])
+    return out
+
+
+# Format des images de plan (Objet animé) : vertical 9:16, 720x1280 (même cadre que Grok 720p).
+PLAN_IMAGE_SIZE = (720, 1280)
+
+
+def crop_to_plan_png(raw: bytes, out_png: str | Path, size: tuple[int, int] = PLAN_IMAGE_SIZE) -> Path:
+    """Image uploadée → PNG 9:16 `size` (720x1280) : recadrage CENTRÉ au ratio cible (rien n'est
+    déformé, les bords en trop sont coupés) puis redimensionnement. Orientation EXIF appliquée.
+    Lève ValueError si `raw` n'est pas une image lisible."""
+    import io
+
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(raw)) as src:
+            src.load()
+            im = ImageOps.exif_transpose(src)
+            im = im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB")
+            fitted = ImageOps.fit(im, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("Image illisible (formats acceptés : png, jpg, webp).") from exc
+    out = Path(out_png)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fitted.save(out, format="PNG")
     return out

@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS presets (
     created_at TEXT,
     updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS jobs_inflight (
+    job_id      TEXT PRIMARY KEY,
+    ad_id       INTEGER NOT NULL,
+    output_mode TEXT NOT NULL DEFAULT '',
+    scene_ns    TEXT NOT NULL DEFAULT '[]',
+    clip_id     INTEGER,
+    started_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS voice_meta (
     uid        TEXT PRIMARY KEY,
     label      TEXT DEFAULT '',
@@ -166,10 +174,31 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("frame0_path", "TEXT DEFAULT ''"),      # frame 0 extraite (contrôle de dérive)
         ("drift_score", "REAL"),                 # NULL = pas mesuré ; score 0..1
         ("drift_flag", "INTEGER DEFAULT 0"),     # 1 = dérive (score sous le seuil)
+        # Contrôle « réplique coupée » (niveau RMS de la fin du clip Grok) + rallonge demandée.
+        ("speech_cut", "INTEGER DEFAULT 0"),     # 1 = voix jusqu'aux 0,3 dernières s (coupée ?)
+        ("extra_seconds", "INTEGER DEFAULT 0"),  # secondes ajoutées via « Régénérer (+1 s) »
     ],
     "ref_images": [("kind", "TEXT DEFAULT ''")],   # type de réf : visage/produit/decor/style (2a)
     "cost_events": [("archive_id", "INTEGER")],
 }
+
+# Export de la pub (agent C) : dernière destination utilisée PAR PUB (mémorisée et pré-remplie).
+# Ajout à la suite (idempotent : init_db ne crée que les colonnes absentes).
+_MIGRATIONS["ads"] += [
+    ("export_dir", "TEXT DEFAULT ''"),        # dossier client de base (ex. D:\clients\X\IA)
+    ("export_subdir", "TEXT DEFAULT ''"),     # sous-dossier de la pub (ex. ADS3_ma-pub)
+    ("export_preset_id", "INTEGER"),          # preset client choisi pour l'export (export_dir)
+]
+# Presets client (tous modes) + bibliothèque de personnages — ajoutés à la suite (idempotent).
+_MIGRATIONS.setdefault("characters", []).extend([
+    # Fiche voix TEXTE libre du perso (« femme 30 ans, voix posée, accent du Sud… ») : format
+    # perso commun {nom, image_ref, description, fiche_voix}. voice_profile (JSON) reste à côté.
+    ("fiche_voix", "TEXT DEFAULT ''"),
+])
+_MIGRATIONS["ads"].extend([
+    ("client_preset_id", "INTEGER"),      # preset client appliqué à la pub (export_dir, persos…)
+    ("preset_characters", "TEXT"),        # JSON : persos [{nom, image_ref, description, fiche_voix}]
+])
 
 
 def connect() -> sqlite3.Connection:
@@ -208,6 +237,7 @@ def init_db() -> None:
                 "AND c.status NOT IN ('valide', 'pret'))"
             )
         _migrate_objet_image_model(con)
+        _migrate_objet_anchor_characters(con)
         con.commit()
     finally:
         con.close()
@@ -234,6 +264,25 @@ def _migrate_objet_image_model(con: sqlite3.Connection) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (_OBJET_IMAGE_MIGRATION_FLAG,),
     )
+
+
+def _add_column_if_missing(con: sqlite3.Connection, table: str, col: str, col_def: str) -> None:
+    """ALTER TABLE … ADD COLUMN seulement si la colonne est absente (idempotent)."""
+    existing = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    if col not in existing:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+
+
+def _migrate_objet_anchor_characters(con: sqlite3.Connection) -> None:
+    """Objet animé — retouche de l'ancre, persos parlants, réf principale (idempotent) :
+    - ads.anchor_edit   : 1 = « Retouche de l'ancre » active pour toute la pub (défaut 0) ;
+    - ads.characters    : JSON liste de persos [{nom, image_ref, description, fiche_voix}] ;
+    - clips.anchor_edit : surcharge par plan (NULL = suit la pub, 0 = non, 1 = oui) ;
+    - ref_images.is_main: 1 = RÉF PRINCIPALE de la pub (envoyée en image 1, elle prime)."""
+    _add_column_if_missing(con, "ads", "anchor_edit", "INTEGER DEFAULT 0")
+    _add_column_if_missing(con, "ads", "characters", "TEXT")
+    _add_column_if_missing(con, "clips", "anchor_edit", "INTEGER")
+    _add_column_if_missing(con, "ref_images", "is_main", "INTEGER DEFAULT 0")
 
 
 # ---------------------------------------------------------------- settings
@@ -506,7 +555,10 @@ _ALLOWED_AD_COLS = {
     "keyframes_ok", "omni_resolution",
     "pipeline_version", "voice_mode", "video_model", "voices_ok",
     "final_path", "final_audio_path",
+    "anchor_edit", "characters",   # Objet animé : retouche de l'ancre + persos parlants
 }
+_ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # export de la pub
+_ALLOWED_AD_COLS |= {"client_preset_id", "preset_characters"}   # presets client (tous modes)
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -584,16 +636,74 @@ def list_ref_images(ad_id: int) -> list[str]:
 
 
 def list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]:
-    """Réfs avec leur type (jalon 2a) : [{id, path, kind}]."""
+    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main}]."""
     con = connect()
     try:
         rows = con.execute(
-            "SELECT id, path, COALESCE(kind, '') AS kind FROM ref_images WHERE ad_id=? ORDER BY id",
+            "SELECT id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main "
+            "FROM ref_images WHERE ad_id=? ORDER BY id",
             (ad_id,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
         con.close()
+
+
+def set_main_ref(ad_id: int, ref_id: int | None) -> None:
+    """Désigne LA réf principale d'une pub (une seule) ; `None` = aucune désignée (repli auto)."""
+    con = connect()
+    try:
+        con.execute("UPDATE ref_images SET is_main=0 WHERE ad_id=?", (ad_id,))
+        if ref_id is not None:
+            con.execute("UPDATE ref_images SET is_main=1 WHERE ad_id=? AND id=?", (ad_id, ref_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- persos parlants (Objet animé)
+# CONVENTION PARTAGÉE (presets client / bibliothèque de persos) : un perso = dict JSON
+# {"nom", "image_ref" (chemin), "description", "fiche_voix"} — toutes des chaînes.
+CHARACTER_KEYS = ("nom", "image_ref", "description", "fiche_voix")
+MAX_AD_CHARACTERS = 6
+
+
+def normalize_characters(persos: Any) -> list[dict[str, str]]:
+    """Liste de persos propre : accepte une liste de dicts ou sa forme JSON (str). Garde les
+    4 clés de la convention (chaînes, espaces retirés ; la fiche voix reste MOT POUR MOT hors
+    espaces de bord), ignore les persos sans nom, plafonne à MAX_AD_CHARACTERS."""
+    import json
+
+    if isinstance(persos, str):
+        try:
+            persos = json.loads(persos) if persos.strip() else []
+        except ValueError:
+            persos = []
+    out: list[dict[str, str]] = []
+    for p in persos if isinstance(persos, list) else []:
+        if not isinstance(p, dict):
+            continue
+        perso = {k: str(p.get(k) or "").strip() for k in CHARACTER_KEYS}
+        if perso["nom"]:
+            out.append(perso)
+    return out[:MAX_AD_CHARACTERS]
+
+
+def set_ad_characters(ad_id: int, persos: Any) -> list[dict[str, str]]:
+    """Charge (remplace) la liste des persos d'une pub. Point d'entrée réutilisable (presets,
+    bibliothèque) : `persos` = [{nom, image_ref, description, fiche_voix}] (ou JSON).
+    Renvoie la liste normalisée enregistrée. Liste vide = pub sans persos (comportement d'origine)."""
+    import json
+
+    clean = normalize_characters(persos)
+    set_ad_fields(ad_id, characters=json.dumps(clean, ensure_ascii=False) if clean else "")
+    return clean
+
+
+def get_ad_characters(ad_or_id: Any) -> list[dict[str, str]]:
+    """Persos d'une pub (dict `ads` déjà chargé ou id) — [] si aucun."""
+    ad = ad_or_id if isinstance(ad_or_id, dict) else get_ad(int(ad_or_id))
+    return normalize_characters((ad or {}).get("characters") or "")
 
 
 _ALLOWED_CLIP_COLS = {
@@ -605,6 +715,8 @@ _ALLOWED_CLIP_COLS = {
     "video_prompt", "keyframe_mode", "keyframe_ok", "keyframe_source", "omni_prompt",
     "speaker", "voice_ok", "wav_seconds", "clip_seconds", "raw_mp4_path", "frame0_path",
     "drift_score", "drift_flag",
+    "anchor_edit",   # Objet animé : surcharge par plan de la retouche de l'ancre (NULL = pub)
+    "speech_cut", "extra_seconds",
 }
 
 
@@ -858,7 +970,8 @@ def count_clips(status: str | None = None) -> int:
 
 
 # ---------------------------------------------------------------- personnages (bibliothèque)
-_CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible"}
+_CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible",
+                   "fiche_voix"}
 
 
 def _now_iso() -> str:
@@ -867,15 +980,17 @@ def _now_iso() -> str:
 
 def create_character(
     name: str, description: str = "", planche_path: str = "", voice_id: str = "",
-    voice_profile: str = "", bible: str = "",
+    voice_profile: str = "", bible: str = "", fiche_voix: str = "",
 ) -> int:
-    """Crée un personnage réutilisable. `voice_profile` = fiche voix en JSON (str)."""
+    """Crée un personnage réutilisable. `voice_profile` = fiche voix en JSON (str) ;
+    `fiche_voix` = fiche voix en texte libre."""
     con = connect()
     try:
         cur = con.execute(
             "INSERT INTO characters(name, description, planche_path, voice_id, voice_profile, "
-            "bible, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (name, description, planche_path, voice_id, voice_profile, bible, _now_iso()),
+            "bible, fiche_voix, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, description, planche_path, voice_id, voice_profile, bible, fiche_voix,
+             _now_iso()),
         )
         con.commit()
         return int(cur.lastrowid or 0)
@@ -991,3 +1106,113 @@ def recent_activity(limit: int = 20) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------- coût réel PAR PUB (agent C)
+def cost_by_service_for_ad(ad_id: int) -> list[dict[str, Any]]:
+    """Coût RÉEL cumulé d'UNE pub, ventilé par (service, unité), archives COMPRISES (le coût
+    d'une pub ne doit pas « disparaître » quand on archive la période des Coûts)."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT service, unit, COUNT(*) AS n, COALESCE(SUM(qty),0) AS qty, "
+            "COALESCE(SUM(usd),0) AS usd, COALESCE(SUM(credits),0) AS credits "
+            "FROM cost_events WHERE ad_id=? GROUP BY service, unit",
+            (ad_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- jobs en cours (reprise après plantage)
+# Chaque job de fond est inscrit dans `jobs_inflight` au démarrage et retiré à la fin. Une ligne
+# restante au lancement de l'app = job INTERROMPU (plantage, fermeture brutale) → ses plans sont
+# remis dans un état cohérent « échec — à relancer ». On ne relance JAMAIS automatiquement :
+# l'appel fournisseur a peut-être déjà été facturé (pas de double facturation).
+INTERRUPTED_MSG = (
+    "Génération interrompue (l'app s'est arrêtée en cours de route) — relance ce plan. "
+    "Rien n'a été relancé automatiquement."
+)
+# Statuts « déjà terminés » selon le type de job (un plan déjà fini n'est pas touché).
+_DONE_STATUSES_IMAGES = ("image_pret", "valide", "pret")
+_DONE_STATUSES_VIDEO = ("pret",)
+_IMAGE_MODES = ("objet_images",)
+# Jobs « voix » : l'état des plans est porté par d'autres champs (voice_ok…) → on ne touche pas
+# aux statuts des plans, seulement au statut de la pub.
+_VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off")
+
+
+def job_inflight_add(
+    job_id: str, ad_id: int, output_mode: str, scene_ns: list[int], clip_id: int | None = None
+) -> None:
+    import json
+
+    con = connect()
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO jobs_inflight(job_id, ad_id, output_mode, scene_ns, clip_id, "
+            "started_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (job_id, int(ad_id), output_mode, json.dumps([int(n) for n in scene_ns]),
+             int(clip_id) if clip_id is not None else None, time.time()),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def job_inflight_done(job_id: str) -> None:
+    con = connect()
+    try:
+        con.execute("DELETE FROM jobs_inflight WHERE job_id=?", (job_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def recover_interrupted_jobs() -> list[dict[str, Any]]:
+    """Au DÉMARRAGE : remet en état cohérent les plans des jobs restés « en cours » (process
+    arrêté pendant une génération). Plans non terminés → status « echec » + INTERRUPTED_MSG ;
+    pub « en_cours » → « echec ». Idempotent (la table est vidée). Renvoie le récapitulatif."""
+    import json
+
+    con = connect()
+    out: list[dict[str, Any]] = []
+    try:
+        rows = [dict(r) for r in con.execute("SELECT * FROM jobs_inflight").fetchall()]
+        for job in rows:
+            mode = str(job.get("output_mode") or "")
+            ad_id = int(job["ad_id"])
+            try:
+                scene_ns = [int(n) for n in json.loads(job.get("scene_ns") or "[]")]
+            except (TypeError, ValueError):
+                scene_ns = []
+            reset: list[int] = []
+            if mode not in _VOICE_MODES:
+                done = _DONE_STATUSES_IMAGES if mode in _IMAGE_MODES else _DONE_STATUSES_VIDEO
+                clips = con.execute(
+                    "SELECT id, scene_n, status FROM clips WHERE ad_id=?", (ad_id,)
+                ).fetchall()
+                for c in clips:
+                    if job.get("clip_id"):
+                        targeted = int(c["id"]) == int(job["clip_id"])
+                    else:
+                        targeted = int(c["scene_n"]) in scene_ns
+                    if targeted and str(c["status"] or "") not in done:
+                        con.execute("UPDATE clips SET status='echec', error=? WHERE id=?",
+                                    (INTERRUPTED_MSG, int(c["id"])))
+                        reset.append(int(c["scene_n"]))
+            con.execute("UPDATE ads SET status='echec' WHERE id=? AND status='en_cours'", (ad_id,))
+            detail = (f"plan(s) {', '.join(str(n) for n in sorted(reset))} à relancer."
+                      if reset else "rien à relancer.")
+            con.execute(
+                "INSERT INTO activity(ts, kind, message) VALUES(?, ?, ?)",
+                (time.time(), "reprise",
+                 f"Pub #{ad_id} : génération interrompue ({mode or 'job'}) — {detail}"),
+            )
+            out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": sorted(reset)})
+        con.execute("DELETE FROM jobs_inflight")
+        con.commit()
+    finally:
+        con.close()
+    return out

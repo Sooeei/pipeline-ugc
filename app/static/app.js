@@ -11,8 +11,49 @@ function detailToMessage(detail) {
   if (typeof detail === "object" && typeof detail.msg === "string") return detail.msg;
   return "";
 }
+// ------------------------------------------------ serveur déconnecté (bandeau)
+// Un fetch qui ÉCHOUE (réseau, pas une réponse HTTP d'erreur) = serveur injoignable. Après
+// SRV_FAIL_LIMIT échecs consécutifs → bandeau « Serveur déconnecté — relance l'app » au lieu
+// d'erreurs en cascade. Le heartbeat /api/health (10 s) détecte la panne même sans action et
+// signale au serveur que la fenêtre est toujours ouverte.
+const SRV_FAIL_LIMIT = 2;
+let srvFails = 0;
+function srvBanner(show) {
+  let b = $("srvDownBanner");
+  if (!b && show) {
+    b = document.createElement("div");
+    b.id = "srvDownBanner";
+    b.setAttribute("role", "alert");
+    b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:10000;padding:10px 16px;" +
+      "background:#b42318;color:#fff;font-weight:600;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25)";
+    b.textContent = "⚠ Serveur déconnecté — relance l'app (LANCER.bat). Tes plans déjà générés sont conservés.";
+    document.body.appendChild(b);
+  }
+  if (b) b.style.display = show ? "block" : "none";
+}
+function srvOk() {
+  if (srvFails) { srvFails = 0; srvBanner(false); }
+}
+function srvFail() {
+  srvFails += 1;
+  if (srvFails >= SRV_FAIL_LIMIT) srvBanner(true);
+}
+async function srvFetch(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    srvOk();
+    return r;
+  } catch (e) {
+    srvFail();
+    throw new Error(srvFails >= SRV_FAIL_LIMIT
+      ? "Serveur déconnecté — relance l'app (LANCER.bat)."
+      : "Le serveur ne répond pas — réessaie dans un instant.");
+  }
+}
+setInterval(() => { srvFetch("/api/health", { cache: "no-store" }).catch(() => {}); }, 10000);
+
 const api = async (url, opts) => {
-  const r = await fetch(url, opts);
+  const r = await srvFetch(url, opts);
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     throw new Error(detailToMessage(data.detail) || "Le serveur n'a pas pu traiter la demande — réessaie.");
@@ -81,7 +122,8 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (sec === "library") loadLibrary();
     if (sec === "costs") loadCosts();
     if (sec === "settings") loadSettings();
-    if (sec === "new") populateNewPubSelectors();
+    if (sec === "new") { populateNewPubSelectors(); objClientRefresh(); }
+    if (sec === "clients") loadClientsPanel();
   });
 });
 
@@ -468,7 +510,7 @@ $("objetStylePreviewBtn").addEventListener("click", async () => {
   if (!dryRun) {
     const ok = await showModal({
       title: "Générer l'aperçu du style", danger: true,
-      message: "Aucun aperçu en cache pour ce style : on en génère un (1 image Nano Banana, payante au-delà du quota gratuit). Continuer ?",
+      message: "Aucun aperçu en cache pour ce style : on en génère un (1 image Nano Banana, payante). Continuer ?",
       confirmText: "Générer", cancelText: "Annuler",
     });
     if (!ok) return;
@@ -651,6 +693,9 @@ async function loadDashboard() {
   $("totalVideos").textContent = d.total_videos ?? "0";
   const ul = $("activityList");
   ul.innerHTML = "";
+  // Stack actuelle : les entrées d'activité liées à Gradium / HeyGen (ancien mode « Avatar ») ne
+  // sont plus affichées sur le tableau de bord (toujours en base).
+  d.activity = (d.activity || []).filter((a) => !/gradium|heygen/i.test(`${a.kind} ${a.message}`));
   (d.activity || []).forEach((a) => {
     const li = document.createElement("li");
     li.innerHTML =
@@ -1361,15 +1406,18 @@ function renderObjPlan(shots, est) {
   const e = est || {};
   $("objEstimate").innerHTML =
     `≈ <b>$${(e.usd_images || 0).toFixed(2)}</b> pour les ${e.shots || shots.length} images ` +
-    `<span class="muted">(Nano Banana : gratuit jusqu'à ~500/jour · animation Grok ensuite : ~$${(e.usd_video || 0).toFixed(2)} pour les plans validés)</span>` +
+    `<span class="muted">(Nano Banana ~$${(e.cout_par_image_usd || 0).toFixed(3)}/image · animation Grok ensuite : ~$${(e.usd_video || 0).toFixed(2)} pour les plans validés)</span>` +
     `<div class="card-sub">Payé seulement en mode réel. En simulation : $0.</div>`;
+  if (window.renderPubEstimate) window.renderPubEstimate("objet", shots, $("objEstimate"));  // agent C
   $("objPlanArea").classList.remove("hidden");
 }
 
 $("objGenImagesBtn").addEventListener("click", async () => {
   if (!objShots.length) return toast("Génère d'abord le plan de tournage.");
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
+  // Mon image pour le Plan 1 : aucune génération (donc aucun coût) pour ce plan.
+  const plan1File = ($("objPlan1File").files || [])[0] || null;
+  if (!dryRun && !plan1File) {
     if (!(currentSettings && currentSettings.openrouter_api_key_set))
       return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages (Objet animé).");
     const perImg = (lastObjEstimate && lastObjEstimate.cout_par_image_usd) || 0.04;
@@ -1388,6 +1436,11 @@ $("objGenImagesBtn").addEventListener("click", async () => {
   fd.append("confirm", "true");
   fd.append("ref_kinds", JSON.stringify(objRefsKinds));
   objRefsFiles.forEach((f) => fd.append("files", f, f.name));
+  fd.append("anchor_edit", $("objAnchorEdit").checked ? "true" : "false");
+  if (plan1File) {
+    fd.append("plan1_file", plan1File, plan1File.name);
+    fd.append("plan1_anchor", $("objPlan1Anchor").checked ? "true" : "false");
+  }
 
   let res;
   try {
@@ -1396,6 +1449,13 @@ $("objGenImagesBtn").addEventListener("click", async () => {
     return toast(e.message);
   }
   objAdId = res.ad_id;
+  // Client / persos choisis : liés à la pub (persos au format commun, dossier d'export).
+  if (objClientPresetId || objPersos.length)
+    await clientPresetLinkAd(objAdId, objClientPresetId, objPersos.map((p) => p.id));
+  if (!res.job_id) {   // Plan 1 uploadé : rien à générer, on passe direct à la validation
+    toast("Plan 1 : ton image est en place (recadrée 9:16 720x1280).");
+    return loadObjGallery(objAdId);
+  }
   $("objProgress").classList.remove("hidden");
   initObjProgress(objShots.slice(0, res.generated_now || 1));  // séquentiel : Plan 1 seulement
   pollObjJob(res.job_id, () => loadObjGallery(objAdId));
@@ -1458,11 +1518,14 @@ async function pollObjJob(jobId, onDone) {
 async function loadObjGallery(adId) {
   if (!adId) return;
   const r = await api("/api/objet/ad/" + adId);
+  objAdState = r;
   $("objValidation").classList.remove("hidden");
   const g = $("objGallery");
   renderOverviewBanner(g, r, "objet", adId);
+  renderObjAdPanel(r, adId);
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(objShotCard(s)));
+  if (window.renderPubRealCost) window.renderPubRealCost(adId, $("objCostBox"));  // agent C
 }
 
 // JALON 3 — bannière « vue d'ensemble » : coût réel cumulé, échecs, reprise, alerte facturation.
@@ -1582,6 +1645,8 @@ function objShotCard(s) {
   card.querySelector(".body").insertBefore(
     planRefsControls(s), card.querySelector(".actions")
   );
+  // Upload de MON image + retouche de l'ancre / qui parle (Objet animé).
+  card.querySelector(".body").insertBefore(objPlanOptions(s, card), card.querySelector(".actions"));
 
   // Sauvegarde du DIALOGUE (verbatim, jamais modifié) à la perte de focus.
   const voEl = card.querySelector(".vo");
@@ -1620,7 +1685,7 @@ function objShotCard(s) {
     if (!dryRun) {
       const ok = await showModal({
         title: "Régénérer l'image",
-        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
+        message: "Régénérer cette image via Nano Banana (payant, tarif du modèle choisi dans les Réglages). Continuer ?",
         confirmText: "Régénérer",
         cancelText: "Annuler",
         danger: true,
@@ -1665,6 +1730,196 @@ function waitJobDone(jobId) {
 }
 
 $("objRefreshBtn").addEventListener("click", () => loadObjGallery(objAdId));
+
+// ---- Objet animé : upload d'image + ancre, retouche de l'ancre, persos parlants, réf principale
+let objAdState = null;   // dernière réponse /api/objet/ad (persos, réfs, retouche)
+
+// Aperçu local du Plan 1 (recadrage 9:16 simulé en CSS ; le vrai recadrage est fait côté serveur).
+$("objPlan1File").addEventListener("change", () => {
+  const f = ($("objPlan1File").files || [])[0];
+  const box = $("objPlan1Preview");
+  box.classList.toggle("hidden", !f);
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => (box.querySelector("img").src = String(rd.result));
+  rd.readAsDataURL(f);
+});
+
+async function postJson(url, body) {
+  return api(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
+// Panneau de la pub : toggle « Retouche de l'ancre », persos parlants, réf principale + alertes.
+function renderObjAdPanel(r, adId) {
+  const panel = $("objAdPanel");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  // 1) Retouche de l'ancre (niveau pub ; surcharge possible par plan)
+  const boxEdit = document.createElement("div");
+  boxEdit.className = "box";
+  boxEdit.innerHTML =
+    `<label class="check"><input type="checkbox" class="ae" ${r.anchor_edit ? "checked" : ""} />` +
+    ` <b>Retouche de l'ancre</b> — les plans suivants retouchent l'image ancre (⚓, par défaut le ` +
+    `Plan 1) : « EDIT the anchor image… keep … STRICTLY IDENTICAL… Change ONLY … ». Les chips ` +
+    `de réfs du plan ajoutent des images après l'ancre (ex. un 2e perso via « Style »).</label>`;
+  boxEdit.querySelector(".ae").addEventListener("change", async (ev) => {
+    try {
+      await postJson("/api/objet/ad/" + adId + "/settings", { anchor_edit: ev.target.checked });
+      loadObjGallery(adId);
+    } catch (e) { toast(e.message); }
+  });
+  panel.appendChild(boxEdit);
+
+  // 2) Persos parlants (nom, réf image, description, fiche voix MOT POUR MOT dans le prompt Grok)
+  const boxP = document.createElement("div");
+  boxP.className = "box";
+  boxP.innerHTML =
+    `<h3>🗣️ Persos qui parlent</h3><p class="muted small">Facultatif. La <b>fiche voix</b> (âge, ` +
+    `timbre, débit, ton) est injectée <b>mot pour mot</b> dans le prompt Grok de chacun de ses ` +
+    `plans → voix la plus constante possible. À 2 persos ou plus, choisis « Qui parle » sur ` +
+    `chaque plan.</p><div class="persos"></div>`;
+  const list = boxP.querySelector(".persos");
+  const persos = (r.characters || []).map((p) => ({ ...p }));
+  const refOpts = (r.refs || []).map((x, i) =>
+    ({ v: x.path, t: `Réf ${i + 1}${x.kind ? " (" + x.kind + ")" : ""}` }));
+  const drawPersos = () => {
+    list.innerHTML = "";
+    persos.forEach((p, idx) => {
+      const row = document.createElement("div");
+      row.className = "perso-row";
+      row.innerHTML =
+        `<input type="text" class="nom" placeholder="Nom (ex. Pot)" value="${esc(p.nom || "")}" />` +
+        `<select class="img"><option value="">Réf image : aucune</option>` +
+        refOpts.map((o) => `<option value="${esc(o.v)}" ${o.v === p.image_ref ? "selected" : ""}>${esc(o.t)}</option>`).join("") +
+        `</select>` +
+        `<input type="text" class="desc" placeholder="Description (ex. pot en céramique blanc)" value="${esc(p.description || "")}" />` +
+        `<button type="button" class="btn small rm">Retirer</button>` +
+        `<textarea class="fv" placeholder="Fiche voix — ex. Femme, 45 ans, timbre chaud et posé, débit lent, ton rassurant.">${esc(p.fiche_voix || "")}</textarea>`;
+      row.querySelector(".nom").addEventListener("input", (ev) => (p.nom = ev.target.value));
+      row.querySelector(".img").addEventListener("change", (ev) => (p.image_ref = ev.target.value));
+      row.querySelector(".desc").addEventListener("input", (ev) => (p.description = ev.target.value));
+      row.querySelector(".fv").addEventListener("input", (ev) => (p.fiche_voix = ev.target.value));
+      row.querySelector(".rm").addEventListener("click", () => { persos.splice(idx, 1); drawPersos(); });
+      list.appendChild(row);
+    });
+  };
+  drawPersos();
+  const actions = document.createElement("div");
+  actions.className = "row";
+  actions.innerHTML =
+    `<button type="button" class="btn small add">+ Ajouter un perso</button>` +
+    `<button type="button" class="btn small primary save">Enregistrer les persos</button>`;
+  actions.querySelector(".add").addEventListener("click", () => {
+    persos.push({ nom: "", image_ref: "", description: "", fiche_voix: "" });
+    drawPersos();
+  });
+  actions.querySelector(".save").addEventListener("click", async () => {
+    try {
+      const res = await postJson("/api/objet/ad/" + adId + "/settings", { characters: persos });
+      toast(`${res.characters.length} perso(s) enregistré(s).`);
+      loadObjGallery(adId);
+    } catch (e) { toast(e.message); }
+  });
+  boxP.appendChild(actions);
+  panel.appendChild(boxP);
+
+  // 3) Réf principale (image 1, elle prime sur les planches) + avertissements honnêtes
+  if ((r.refs || []).length) {
+    const boxR = document.createElement("div");
+    boxR.className = "box";
+    boxR.innerHTML =
+      `<h3>⭐ Réf principale</h3><p class="muted small">Envoyée en <b>image 1</b> avec la consigne ` +
+      `« Match reference image 1 exactly; do not add labels, text or logos that are not on it ». ` +
+      `Par défaut : la 1re photo « Produit ».</p><div class="main-refs"></div>`;
+    const wrap = boxR.querySelector(".main-refs");
+    (r.refs || []).forEach((x, i) => {
+      const lab = document.createElement("label");
+      lab.className = x.is_main ? "on" : "";
+      lab.title = x.is_main ? "Réf principale" : "Choisir comme réf principale";
+      lab.innerHTML =
+        `<img src="${esc(x.url || "")}" alt="réf ${i + 1}" />` +
+        `<span><input type="radio" name="objMainRef" ${x.is_main ? "checked" : ""} /> Réf ${i + 1}${x.kind ? " · " + esc(x.kind) : ""}</span>`;
+      lab.querySelector("input").addEventListener("change", async () => {
+        try {
+          await postJson("/api/objet/ad/" + adId + "/main-ref", { ref_id: x.id });
+          loadObjGallery(adId);
+        } catch (e) { toast(e.message); }
+      });
+      wrap.appendChild(lab);
+    });
+    (r.ref_warnings || []).forEach((w) => {
+      const d = document.createElement("div");
+      d.className = "warn";
+      d.textContent = "⚠ " + w;
+      boxR.appendChild(d);
+    });
+    panel.appendChild(boxR);
+  }
+}
+
+// Par plan : « Uploader mon image » (+ ancre), surcharge de la retouche, « Qui parle ».
+function objPlanOptions(s, card) {
+  const box = document.createElement("div");
+  box.className = "obj-plan-opts";
+  const persos = (objAdState && objAdState.characters) || [];
+  const up = document.createElement("div");
+  up.className = "obj-upload";
+  up.innerHTML =
+    `<input type="file" class="hidden up-file" accept="image/png,image/jpeg,image/webp" />` +
+    `<button type="button" class="btn small up-btn">📤 Uploader mon image</button>` +
+    `<label class="check"><input type="checkbox" class="up-anchor" ${s.n === 1 || s.is_anchor ? "checked" : ""} /> utiliser comme ancre</label>` +
+    (s.uploaded ? `<span class="muted small">image uploadée (recadrée 9:16 720x1280)</span>` : "");
+  const fileEl = up.querySelector(".up-file");
+  up.querySelector(".up-btn").addEventListener("click", () => fileEl.click());
+  fileEl.addEventListener("change", async () => {
+    const f = (fileEl.files || [])[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    fd.append("anchor", up.querySelector(".up-anchor").checked ? "true" : "false");
+    card.classList.add("busy");
+    try {
+      await api("/api/objet/upload-image/" + s.clip_id, { method: "POST", body: fd });
+      toast(`Plan ${s.n} : image en place (recadrée 9:16 720x1280).`);
+      await loadObjGallery(objAdId);   // l'ancre a pu changer sur un autre plan
+    } catch (e) {
+      toast(e.message);
+      card.classList.remove("busy");
+    }
+  });
+  box.appendChild(up);
+
+  const opts = document.createElement("div");
+  opts.className = "obj-opts";
+  opts.innerHTML =
+    `<span>Retouche de l'ancre :</span><select class="ae">` +
+    [["pub", `comme la pub (${objAdState && objAdState.anchor_edit ? "oui" : "non"})`], ["oui", "oui"], ["non", "non"]]
+      .map(([v, t]) => `<option value="${v}" ${s.anchor_edit === v ? "selected" : ""}>${t}</option>`).join("") +
+    `</select>` +
+    (persos.length >= 2
+      ? `<span>Qui parle :</span><select class="spk">` +
+        persos.map((p, i) => `<option value="${i + 1}" ${s.speaker === i + 1 ? "selected" : ""}>${esc(p.nom)}</option>`).join("") +
+        `</select>`
+      : "");
+  opts.querySelector(".ae").addEventListener("change", async (ev) => {
+    try {
+      const res = await postJson("/api/objet/clip/" + s.clip_id + "/options", { anchor_edit: ev.target.value });
+      Object.assign(s, res);
+    } catch (e) { toast(e.message); }
+  });
+  const spk = opts.querySelector(".spk");
+  if (spk) spk.addEventListener("change", async (ev) => {
+    try {
+      const res = await postJson("/api/objet/clip/" + s.clip_id + "/options", { speaker: Number(ev.target.value) });
+      Object.assign(s, res);
+    } catch (e) { toast(e.message); }
+  });
+  box.appendChild(opts);
+  return box;
+}
 
 // Uniformiser le personnage : régénère les autres plans depuis le Plan 1 validé.
 $("objConsistencyBtn").addEventListener("click", async () => {
@@ -1922,7 +2177,9 @@ function libAdHeader(ad, asset, hasFiles) {
   const dl =
     hasFiles && ad.id != null
       ? `<a class="btn small dl-all" href="/api/ads/${ad.id}/download?asset=${asset}" ` +
-        `title="Toutes les pièces de la pub dans un ZIP, numérotées (1, 2, 3…)">⬇ Télécharger tout (ZIP)</a>`
+        `title="Toutes les pièces de la pub dans un ZIP, numérotées (1, 2, 3…)">⬇ Télécharger tout (ZIP)</a>` +
+        // agent C : export des clips validés dans le dossier du client (outils_c.js)
+        (asset === "video" ? ` <button class="btn small btn-export-pub" type="button" data-ad-id="${ad.id}">📤 Exporter la pub</button>` : "")
       : "";
   return (
     `<div class="lib-ad-head"><h2>${esc(ad.name)} ` +
@@ -1952,8 +2209,10 @@ function renderClipAds(root, ads, emptyMsg) {
       } else if (c.media_url && c.status === "pret") {
         div.innerHTML =
           `<video src="${esc(c.media_url)}" controls preload="metadata"></video>` +
-          `<div class="meta"><span class="scene-n">#${c.scene_n}</span>` +
-          `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a></div>`;
+          `<div class="meta"><span class="scene-n">#${c.scene_n}</span>${speechCutBadge(c)}` +
+          `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a></div>` +
+          (ad.kind === "objet" ? speechCutActions(c) : "");
+        if (ad.kind === "objet") bindSpeechCut(div, c);
       } else {
         div.innerHTML =
           `<div class="meta"><span class="scene-n">#${c.scene_n}</span></div>` +
@@ -2008,8 +2267,9 @@ function aoLibClip(div, ad, c) {
     `</details>`;
   div.innerHTML =
     `<div class="ao-lib-media${v2 ? " v2" : ""}">${kf}${frame0}${vid}</div>` +
-    `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}` +
+    `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}${v2 && ok ? speechCutBadge(c) : ""}` +
     (ok ? `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a>` : "") + `</div>` +
+    (v2 && ok ? speechCutActions(c) : "") +
     prompts +
     `<div class="ao-lib-actions"><button class="btn small btn-relaunch" type="button" ` +
     (v2
@@ -2019,6 +2279,64 @@ function aoLibClip(div, ad, c) {
   const btn = div.querySelector(".btn-relaunch");
   const state = div.querySelector(".ao-lib-state");
   btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
+  if (v2 && ok) bindSpeechCut(div, c);
+}
+
+// ------------------------------------------------ réplique peut-être coupée (voix native Grok)
+// Le serveur contrôle chaque clip Grok (niveau sonore de la fin) : si la voix continue jusqu'à la toute
+// fin, badge + bouton « Régénérer (+1 s) » (relance la vidéo seule avec 1 s de plus).
+function speechCutBadge(c) {
+  return c.speech_cut && Number(c.speech_cut)
+    ? `<span class="badge ko" title="La voix continue jusqu'à la toute fin du clip : la réplique est peut-être coupée.">Réplique peut-être coupée</span>`
+    : "";
+}
+function speechCutActions(c) {
+  if (!(c.speech_cut && Number(c.speech_cut))) return "";
+  return `<div class="ao-lib-actions"><button class="btn small btn-speech-longer" type="button" ` +
+    `title="Refait uniquement la vidéo de ce plan avec 1 s de plus (même image, même réplique)">⏱ Régénérer (+1 s)</button>` +
+    `<span class="speech-state muted small"></span></div>`;
+}
+function bindSpeechCut(div, c) {
+  const btn = div.querySelector(".btn-speech-longer");
+  if (!btn) return;
+  const state = div.querySelector(".speech-state");
+  btn.addEventListener("click", async () => {
+    const dryRun = currentSettings && currentSettings.dry_run;
+    if (!dryRun) {
+      const ok = await showModal({
+        title: "Régénérer (+1 s) — coût Grok (réel)",
+        message: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $). Continuer ?",
+        confirmText: "Régénérer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+    }
+    btn.disabled = true;
+    try {
+      const post = (over) => api("/api/clips/" + c.id + "/regenerate-longer", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true, confirm_over_cap: !!over }),
+      });
+      let res;
+      try {
+        res = await post(false);
+      } catch (e) {
+        if (!/plafond/i.test(e.message)) throw e;
+        const over = await showModal({ title: "Plafond de dépense", message: e.message, confirmText: "Confirmer", cancelText: "Annuler", danger: true });
+        if (!over) return;
+        res = await post(true);
+      }
+      if (state) state.textContent = "⏳ Vidéo en cours (+1 s)…";
+      const j = await waitJobDone(res.job_id);
+      if (!j) toast("Suivi interrompu — rafraîchis la Bibliothèque.");
+      else if (j.state === "echec" || Number((j.summary || {}).echec || 0) > 0) toast(prettyError((j.summary && j.summary.message) || "La relance a échoué."));
+      else toast("Vidéo refaite avec 1 s de plus ✓");
+      loadLibraryVideos().catch(() => {});
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // Relance la vidéo d'UN clip Avatar IA depuis la Bibliothèque (même keyframe, pas de Nano Banana).
@@ -2729,6 +3047,7 @@ function renderMashPlan(shots, est) {
       `<b>Coût estimé :</b> ${usd(est.usd_total)} <span class="muted">(images ${usd(est.usd_images)} · ` +
       `animation vidéo ${usd(est.usd_video)} pour les plans validés)</span>`;
   }
+  if (window.renderPubEstimate) window.renderPubEstimate("mashup", shots, $("mashEstimate"));  // agent C
   $("mashPlanArea").classList.remove("hidden");
 }
 
@@ -2822,6 +3141,7 @@ async function loadMashGallery(adId) {
   renderOverviewBanner(g, r, "mashup", adId);
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(mashShotCard(s)));
+  if (window.renderPubRealCost) window.renderPubRealCost(adId, $("mashCostBox"));  // agent C
 }
 
 function mashShotCard(s) {
@@ -2888,7 +3208,7 @@ function mashShotCard(s) {
     if (!dryRun) {
       const ok = await showModal({
         title: "Régénérer l'image",
-        message: "Régénérer cette image via Nano Banana (payant au-delà du quota gratuit ~500/jour). Continuer ?",
+        message: "Régénérer cette image via Nano Banana (payant, tarif du modèle choisi dans les Réglages). Continuer ?",
         confirmText: "Régénérer", cancelText: "Annuler", danger: true,
       });
       if (!ok) return;
@@ -3061,6 +3381,7 @@ let aoPresetBible = null;    // bible des persos chargés (preset / bibliothèqu
 let aoPresetOptions = null;  // {video_model, voice_mode} du preset chargé (appliqués à la nouvelle pub)
 let aoCharSlotIds = {};      // perso N → id du personnage de la bibliothèque (preset / « Utiliser »)
 let aoPresetPlanches = {};   // perso N → planche_url (bibliothèque)
+let aoLoadedPresetId = null; // preset client chargé (lié à la pub créée)
 const aoRefObjUrls = new Map();   // File → objectURL (aperçu planche à côté du keyframe)
 const AO_EL_USD_PER_1K = 0.30;    // estimation ElevenLabs ($ / 1000 caractères) — même valeur que le backend
 const AO_VIDEO_MODEL_LABEL = { grok: "Grok Imagine", kling: "Kling 3.0", omni: "Omni (Google)" };
@@ -3961,6 +4282,8 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(aoPresetOptions),
     }).catch(() => { /* pub v1 ou options refusées : sans effet */ });
   }
+  // Preset client chargé : la pub est liée à son client (persos + dossier d'export).
+  if (aoLoadedPresetId) clientPresetLinkAd(aoAdId, aoLoadedPresetId);
   aoShowImgProgress();
   pollSceneJob(res.job_id, {
     ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
@@ -5233,6 +5556,7 @@ async function aoLoadPreset() {
       if (ch && $(prefix + "Gender"))
         aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" }));
     }
+    aoLoadedPresetId = p.id;
     msg.textContent = `✓ Preset « ${p.name} » chargé — il ne reste qu'à coller le script.`;
     $("aoScript").focus();
   } catch (e) {
@@ -5322,6 +5646,340 @@ if ($("aoPresetSaveBtn")) {
   });
 }
 
+// ================================================ CLIENTS (presets) & BIBLIOTHÈQUE DE PERSONNAGES
+// Communs à tous les modes. Perso au format {nom, image_ref, description, fiche_voix}.
+let charLibCache = [];          // personnages de la bibliothèque (GET /api/characters)
+let clientLoaded = null;        // preset client ouvert dans l'éditeur (réponse GET /api/presets/{id})
+let objClientPresetId = null;   // client choisi dans le formulaire Objet animé
+let objPersos = [];             // persos de la pub Objet animé [{id, nom, image_ref, description, fiche_voix, file}]
+let objClientRefFiles = [];     // photos de réf ajoutées par le client (retirées si on change de client)
+const CLIENT_PHOTO_KINDS = [["decor", "Décor"], ["produit", "Produit"], ["style", "Style"]];
+
+async function fetchCharLib() {
+  try { charLibCache = (await api("/api/characters")).characters || []; } catch (_) { charLibCache = []; }
+  return charLibCache;
+}
+
+async function fetchPresets() {
+  try { return (await api("/api/presets")).presets || []; } catch (_) { return []; }
+}
+
+function fillPresetSelect(sel, presets, emptyLabel, keep) {
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${esc(emptyLabel)}</option>` +
+    presets.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  const k = keep != null ? String(keep) : "";
+  if ([...sel.options].some((o) => o.value === k)) sel.value = k;
+}
+
+// Lie une pub à son client (persos + dossier d'export) — non bloquant.
+// Renvoie une promesse : l'attendre AVANT d'afficher la pub (sinon les persos n'y sont pas encore).
+function clientPresetLinkAd(adId, presetId, characterIds) {
+  if (!adId) return Promise.resolve();
+  const body = { preset_id: presetId || null };
+  if (Array.isArray(characterIds)) body.character_ids = characterIds;
+  return api("/api/ads/" + adId + "/client-preset", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }).catch((e) => toast("Client non lié à la pub : " + e.message));
+}
+
+// ---- Page « Clients & persos »
+async function loadClientsPanel() {
+  await fetchCharLib();
+  renderCharLibGrid();
+  fillPresetSelect($("clientEditSel"), await fetchPresets(), "— Nouveau client —", $("clientEditSel").value);
+  await clientEditLoad($("clientEditSel").value);
+}
+
+function renderCharLibGrid() {
+  const box = $("charLibGrid");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!charLibCache.length) {
+    box.innerHTML = '<p class="muted small">Aucun personnage pour l’instant — crée le premier ci-dessus.</p>';
+    return;
+  }
+  charLibCache.forEach((ch) => {
+    const card = document.createElement("div");
+    card.className = "ao-charlib-card";
+    card.innerHTML =
+      (ch.planche_url ? `<img src="${esc(ch.planche_url)}" alt="${esc(ch.name)}" loading="lazy" />`
+        : `<div class="thumb empty">pas d'image</div>`) +
+      `<div class="ao-charlib-info"><b>${esc(ch.name)}</b>` +
+      (ch.description ? `<span class="muted small">${esc(ch.description)}</span>` : "") +
+      (ch.fiche_voix ? `<span class="muted small">🎙️ ${esc(ch.fiche_voix)}</span>` : "") + `</div>` +
+      `<div class="row"><button class="btn small" data-act="edit" type="button">✏️ Modifier</button>` +
+      `<button class="btn small danger-outline" data-act="del" type="button" title="Supprimer">🗑</button></div>`;
+    card.querySelector('[data-act="edit"]').addEventListener("click", () => charEditFill(ch));
+    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      const ok = await showModal({
+        title: "Supprimer ce personnage ?",
+        message: `Supprimer « ${ch.name} » de la bibliothèque (et son image) ? Les clients qui l'utilisent ne le chargeront plus.`,
+        confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api("/api/characters/" + ch.id, { method: "DELETE" });
+        if (String($("charEditId").value) === String(ch.id)) charEditFill(null);
+        loadClientsPanel();
+      } catch (e) { toast(e.message); }
+    });
+    box.appendChild(card);
+  });
+}
+
+function charEditFill(ch) {
+  $("charEditId").value = ch ? ch.id : "";
+  $("charEditName").value = ch ? ch.name || "" : "";
+  $("charEditDesc").value = ch ? ch.description || "" : "";
+  $("charEditVoice").value = ch ? ch.fiche_voix || "" : "";
+  $("charEditFile").value = "";
+  $("charEditMsg").textContent = ch ? `Modification de « ${ch.name} »` : "";
+  if (ch) $("charEditName").focus();
+}
+
+async function clientEditLoad(id) {
+  clientLoaded = null;
+  if (id) {
+    try { clientLoaded = await api("/api/presets/" + id); } catch (e) { toast(e.message); }
+  }
+  const d = (clientLoaded && clientLoaded.data) || {};
+  $("clientName").value = clientLoaded ? clientLoaded.name : "";
+  $("clientExportDir").value = d.export_dir || "";
+  $("clientProduct").value = d.product || "";
+  $("clientStyle").value = ["realiste", "3d"].includes(d.style) ? d.style : "";
+  $("clientAmbiance").value = d.ambiance || "";
+  $("clientPersona").value = d.persona || "";
+  const ph = $("clientPhotos");
+  ph.innerHTML = "";
+  CLIENT_PHOTO_KINDS.forEach(([k, label]) => {
+    const cell = document.createElement("div");
+    cell.className = "client-photo";
+    cell.innerHTML = `<label>Photo ${esc(label)} <input type="file" accept="image/*" id="clientPhoto_${k}" /></label>` +
+      (d[k + "_url"] ? `<div class="client-photo-cur"><img src="${esc(d[k + "_url"])}" alt="${esc(label)}" />` +
+        `<label class="check"><input type="checkbox" id="clientPhotoKeep_${k}" checked /> garder</label></div>` : "");
+    ph.appendChild(cell);
+  });
+  const cur = {};
+  (d.characters || []).forEach((c) => { cur[Number(c.n)] = c; });
+  const box = $("clientChars");
+  box.innerHTML = "";
+  for (let n = 1; n <= 4; n++) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const opts = `<option value="">—</option>` +
+      charLibCache.map((ch) => `<option value="${esc(ch.id)}">${esc(ch.name)}</option>`).join("");
+    row.innerHTML = `<label class="inline">Perso ${n} <select id="clientChar${n}">${opts}</select></label>` +
+      `<label class="check"><input type="checkbox" id="clientCharSpeaks${n}" /> parle</label>`;
+    box.appendChild(row);
+    const c = cur[n];
+    if (c) $("clientChar" + n).value = String(c.character_id);
+    $("clientCharSpeaks" + n).checked = c ? c.speaks !== false : n === 1;
+    // Choisir un perso le fait parler par défaut (décochable) ; le retirer décoche.
+    $("clientChar" + n).addEventListener("change", (ev) => {
+      $("clientCharSpeaks" + n).checked = !!ev.target.value;
+    });
+  }
+  $("clientDelBtn").disabled = !clientLoaded;
+}
+
+async function clientSave() {
+  const name = $("clientName").value.trim();
+  if (!name) return toast("Donne un nom au client.");
+  const base = Object.assign({}, (clientLoaded && clientLoaded.data) || {});
+  const characters = [];
+  for (let n = 1; n <= 4; n++) {
+    const id = $("clientChar" + n).value;
+    if (id) characters.push({ n, character_id: Number(id), speaks: $("clientCharSpeaks" + n).checked });
+  }
+  const data = Object.assign(base, {
+    characters,
+    export_dir: $("clientExportDir").value.trim(),
+    product: $("clientProduct").value.trim(),
+    style: $("clientStyle").value,
+    ambiance: $("clientAmbiance").value.trim(),
+    persona: $("clientPersona").value.trim(),
+  });
+  const fd = new FormData();
+  fd.append("name", name);
+  CLIENT_PHOTO_KINDS.forEach(([k]) => {
+    const input = $("clientPhoto_" + k);
+    const keep = $("clientPhotoKeep_" + k);
+    if (input && input.files && input.files[0]) fd.append(k, input.files[0], input.files[0].name);
+    if (!(keep && keep.checked)) delete data[k + "_url"];   // décoché / absent → photo retirée
+  });
+  fd.append("data", JSON.stringify(data));
+  try {
+    const p = await api("/api/presets", { method: "POST", body: fd });
+    $("clientMsg").textContent = `✓ Client « ${p.name} » enregistré (${characters.length} perso(s)).`;
+    fillPresetSelect($("clientEditSel"), await fetchPresets(), "— Nouveau client —", p.id);
+    await clientEditLoad(String(p.id));
+    aoLoadPresetList();
+    objClientRefresh();
+  } catch (e) { toast(e.message); }
+}
+
+if ($("charEditSave")) {
+  $("refreshClients").addEventListener("click", loadClientsPanel);
+  $("charEditReset").addEventListener("click", () => charEditFill(null));
+  $("charEditSave").addEventListener("click", async () => {
+    const name = $("charEditName").value.trim();
+    if (!name) return toast("Donne un nom au personnage.");
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("description", $("charEditDesc").value.trim());
+    fd.append("fiche_voix", $("charEditVoice").value.trim());
+    const f = $("charEditFile").files && $("charEditFile").files[0];
+    if (f) fd.append("file", f, f.name);
+    const id = $("charEditId").value;
+    try {
+      const ch = await api("/api/characters" + (id ? "/" + id : ""), { method: id ? "PATCH" : "POST", body: fd });
+      charEditFill(null);
+      $("charEditMsg").textContent = `✓ « ${ch.name} » enregistré.`;
+      await loadClientsPanel();
+      aoLoadCharLib();
+      objClientRefresh();
+    } catch (e) { toast(e.message); }
+  });
+  $("clientEditSel").addEventListener("change", (ev) => { $("clientMsg").textContent = ""; clientEditLoad(ev.target.value); });
+  $("clientSaveBtn").addEventListener("click", clientSave);
+  $("clientDelBtn").addEventListener("click", async () => {
+    if (!clientLoaded) return;
+    const ok = await showModal({
+      title: "Supprimer ce client ?",
+      message: `Supprimer « ${clientLoaded.name} » ? Ses personnages restent dans la bibliothèque.`,
+      confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api("/api/presets/" + clientLoaded.id, { method: "DELETE" });
+      if (String(objClientPresetId) === String(clientLoaded.id)) objClientPresetId = null;
+      if (String(aoLoadedPresetId) === String(clientLoaded.id)) aoLoadedPresetId = null;
+      $("clientEditSel").value = "";
+      $("clientMsg").textContent = "Client supprimé.";
+      await loadClientsPanel();
+      aoLoadPresetList("");
+      objClientRefresh();
+    } catch (e) { toast(e.message); }
+  });
+}
+
+// ---- Objet animé : sélecteur « Client » + persos de la bibliothèque
+async function objClientRefresh() {
+  if (!$("objClientSel")) return;
+  fillPresetSelect($("objClientSel"), await fetchPresets(), "— Aucun client —", objClientPresetId);
+  await fetchCharLib();
+  $("objCharLibSel").innerHTML = `<option value="">— Choisir —</option>` +
+    charLibCache.map((ch) => `<option value="${esc(ch.id)}">${esc(ch.name)}</option>`).join("");
+}
+
+function objRemoveRefFile(file) {
+  const i = objRefsFiles.indexOf(file);
+  if (i >= 0) { objRefsFiles.splice(i, 1); objRefsKinds.splice(i, 1); }
+}
+
+function objAddRefFile(file, kind) {
+  objRefsFiles.push(file);
+  objRefsKinds.push(kind);
+}
+
+async function objAddPerso(p) {
+  if (objPersos.some((x) => String(x.id) === String(p.id))) return;
+  const perso = Object.assign({}, p, { file: null });
+  if (p.image_ref) {
+    try {
+      perso.file = await aoUrlToFile(p.image_ref, "perso_" + p.id);
+      objAddRefFile(perso.file, "visage");   // image du perso = réf « Visage » (apparence fidèle)
+    } catch (e) { toast(e.message); }
+  }
+  objPersos.push(perso);
+}
+
+function renderObjPersos() {
+  const box = $("objPersosList");
+  if (!box) return;
+  box.innerHTML = "";
+  objPersos.forEach((p, idx) => {
+    const chip = document.createElement("span");
+    chip.className = "ref-chip on";
+    chip.title = [p.description, p.fiche_voix ? "Voix : " + p.fiche_voix : ""].filter(Boolean).join(" — ");
+    chip.textContent = "👤 " + (p.nom || "Perso") + " ";
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ref-remove-inline";
+    rm.title = "Retirer ce perso de la pub";
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      if (p.file) objRemoveRefFile(p.file);
+      objPersos.splice(idx, 1);
+      renderObjPersos();
+      renderObjRefs();
+    });
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
+}
+
+async function objApplyClient(id) {
+  const msg = $("objClientMsg");
+  // On retire ce que l'ancien client avait ajouté (photos + persos), le reste du formulaire est gardé.
+  objClientRefFiles.forEach(objRemoveRefFile);
+  objClientRefFiles = [];
+  objPersos.forEach((p) => { if (p.file) objRemoveRefFile(p.file); });
+  objPersos = [];
+  objClientPresetId = null;
+  if (!id) {
+    msg.textContent = "";
+    renderObjRefs();
+    renderObjPersos();
+    return;
+  }
+  msg.textContent = "⏳ Chargement du client…";
+  try {
+    const p = await api("/api/presets/" + id);
+    const d = p.data || {};
+    if (d.product) $("objProduct").value = d.product;
+    if (d.ambiance) $("objAmbiance").value = d.ambiance;
+    if (d.persona) $("objPersona").value = d.persona;
+    for (const [k] of CLIENT_PHOTO_KINDS) {
+      if (!d[k + "_url"]) continue;
+      try {
+        const f = await aoUrlToFile(d[k + "_url"], "client_" + k);
+        objAddRefFile(f, k);
+        objClientRefFiles.push(f);
+      } catch (e) { toast(e.message); }
+    }
+    const items = (d.characters || []).slice().sort((a, b) => Number(a.n) - Number(b.n));
+    for (const item of items) {
+      if (item.perso) await objAddPerso(Object.assign({ id: item.character_id }, item.perso));
+    }
+    objClientPresetId = p.id;
+    msg.textContent = `✓ Client « ${p.name} » chargé (${objPersos.length} perso(s))` +
+      (d.export_dir ? ` · export : ${d.export_dir}` : "") + " — il ne reste qu'à coller le script.";
+    $("objScript").focus();
+  } catch (e) {
+    msg.textContent = "";
+    toast(e.message);
+  }
+  renderObjRefs();
+  renderObjPersos();
+}
+
+if ($("objClientSel")) {
+  $("objClientSel").addEventListener("change", (ev) => objApplyClient(ev.target.value));
+  $("objCharLibSel").addEventListener("change", async (ev) => {
+    const ch = charLibCache.find((c) => String(c.id) === ev.target.value);
+    ev.target.value = "";
+    if (!ch) return;
+    await objAddPerso({ id: ch.id, nom: ch.name, image_ref: ch.planche_url, description: ch.description, fiche_voix: ch.fiche_voix });
+    renderObjRefs();
+    renderObjPersos();
+    toast(`« ${ch.name} » ajouté à la pub ✓`);
+  });
+  $("objClientManageBtn").addEventListener("click", () => gotoSection("clients"));
+  objClientRefresh();
+}
+
 // Navigue vers une section en réutilisant le gestionnaire de clic de la barre latérale.
 function gotoSection(sec) {
   const btn = document.querySelector(`.nav-item[data-section="${sec}"]`);
@@ -5344,8 +6002,6 @@ async function maybeOnboarding() {
         "et colle leurs clés dans <b>Réglages</b> :</p>" +
         "<ul style='margin:6px 0 6px 18px'>" +
         "<li><b>Anthropic (Claude)</b> — le « cerveau » qui découpe tes scripts</li>" +
-        "<li><b>Gradium</b> — les voix</li>" +
-        "<li><b>HeyGen</b> — les vidéos avatar</li>" +
         "<li><b>OpenRouter</b> — images (Nano Banana) + vidéos mashup (Kling/Veo)</li>" +
         "<li><b>xAI (Grok)</b> — animation « objet » (voix + lip-sync)</li>" +
         "<li><b>Google (Gemini)</b> — « Avatar IA » Omni (vidéo + voix ; clé Google AI Studio, tier payant)</li>" +

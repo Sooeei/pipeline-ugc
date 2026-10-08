@@ -91,7 +91,10 @@ def clip_target_seconds(
     sinon avatar_clip_seconds(wav_seconds) ; sans audio : durée estimée du texte au débit de la
     fiche voix (estimation de coût avant l'étape Voix)."""
     if config_app.normalize_voice_mode(voice_mode) == "native":
-        return config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model)
+        # + secondes demandées via « Régénérer (+1 s) » (réplique coupée), bornées au max du modèle.
+        return config_app.with_extra_seconds(
+            config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model),
+            c.get("extra_seconds"), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
     durations = config_app.AVATAR_VIDEO_MODELS[model]["durations"]
     wav = float(c.get("wav_seconds") or 0.0)
     stored = int(c.get("clip_seconds") or 0)
@@ -282,6 +285,7 @@ def clip_v2_fields(c: dict[str, Any]) -> dict[str, Any]:
         "drift_score": float(score) if score is not None else None,
         "drift_flag": bool(int(c.get("drift_flag") or 0)),
         "mp4_url": media_url(c.get("mp4_path")),
+        "speech_cut": bool(int(c.get("speech_cut") or 0)),
     }
 
 
@@ -456,9 +460,13 @@ def animate_blocks(
             else:
                 shutil.copyfile(raw, final)
             d = _measure_drift(c, raw, folder / f"{n}_frame0.png", threshold)
+            # Voix native Grok : la réplique va-t-elle jusqu'au bout du clip (coupée) ?
+            cut = (model == "grok" and voice_mode == "native" and bool(str(c.get("script") or "").strip())
+                   and pipeline._speech_cut_safe(final, n))
             db.update_clip(
                 clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
                 drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret", error=None,
+                speech_cut=1 if cut else 0,
             )
             emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
                   "drift_score": d["drift_score"], "drift_flag": bool(d["drift_flag"]),

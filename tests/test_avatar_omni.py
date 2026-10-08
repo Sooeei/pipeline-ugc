@@ -888,7 +888,9 @@ def test_objet_animate_includes_echec_and_real_grok_estimate(monkeypatch):
         assert r.status_code == 200, r.text
         assert r.json()["n_plans"] == 3
         assert sorted(s["n"] for s in captured[-1]) == [1, 2, 3]
-        pace = config_app.GROK_VOICE_PACES[config_app.DEFAULT_GROK_VOICE_PACE]["words_per_sec"]
+        # Débit RÉEL de la voix native Grok au débit par défaut (2,2 mots/s).
+        pace = config_app.grok_clip_words_per_sec(config_app.DEFAULT_GROK_VOICE_PACE)
+        assert pace == config_app.NATIVE_VOICE_WORDS_PER_SEC == 2.2
         expected = sum(
             config_app.clip_seconds_for_dialogue(d, pace) * 0.14 + 0.01 for d in dialogues
         )

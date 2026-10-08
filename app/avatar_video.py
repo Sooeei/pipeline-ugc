@@ -164,20 +164,28 @@ def build_video_prompt(
     names: dict[int, str],
     model: str,
     scene_desc: str = "",
+    images: list[Any] | None = None,
+    camera_key: str = "",
+    style: str = config_app.DEFAULT_OMNI_STYLE,
 ) -> str:
     """Prompt image→vidéo d'UN bloc. Ordre : geste/expression (video_prompt nettoyé des marques,
     ≤ 12 mots) → « Character N (nom) talking… » → chaque autre perso à l'image bouche fermée →
     « Never mirror… » → réplique VERBATIM (crochets retirés) + fiche voix VERBATIM, au format du
     modèle (Grok : section AUDIO: ; Omni : réplique + synchro ; Kling : réplique entre
     guillemets). AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
-    `scene_desc` : UNIQUEMENT en mode « texte seul » (Omni sans image), sinon rien à voir."""
+    `scene_desc` : UNIQUEMENT en mode « texte seul » (Omni sans image), sinon rien à voir.
+    Omni : prompt dédié (pipeline.build_omni_block_prompt : rôles d'images déclarés = `images`
+    envoyées, caméra `camera_key`, ordre fixe prompt_profiles)."""
     model = config_app.normalize_avatar_video_model(model)
+    if model == "omni":
+        return pipeline.build_omni_block_prompt(
+            video_prompt, speaker=speaker, others_in_frame=others_in_frame, dialogue=dialogue,
+            voice_sheet=voice_sheet, names=names, scene_desc=scene_desc, images=images,
+            camera_key=camera_key, style=style)
     sp = max(1, int(speaker or 1))
     text = pipeline._omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
     sheet = str(voice_sheet or "").strip()
     parts: list[str] = []
-    if model == "omni" and not scene_desc.strip():
-        parts.append("<FIRST_FRAME>")
     if scene_desc.strip():
         parts.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
     if g := _gesture(video_prompt):
@@ -199,12 +207,6 @@ def build_video_prompt(
             # Même section AUDIO que providers.grok_dialogue_prompt ; la fiche voix porte déjà
             # le débit → pas de directive de débit ajoutée.
             parts.append(f'AUDIO: {sheet}, saying: "{text}"' if sheet else f'AUDIO: saying: "{text}"')
-        elif model == "omni":
-            parts.append(f'Character {sp} says: "{text}"')
-            if sheet:
-                parts.append(f"Voice: {sheet}.")
-            parts.append(f"Lips and expression stay in sync with every word; only Character {sp}'s "
-                         "lips move. No other speakers. No subtitles. No on-screen text. No music.")
         else:
             parts.append(f'Character {sp} says: "{text}"')
             if sheet:
@@ -212,9 +214,32 @@ def build_video_prompt(
     return " ".join(p for p in parts if p)
 
 
-def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str) -> str:
+def omni_block_images(
+    c: dict[str, Any], ad: dict[str, Any], all_clips: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """(start frame, ancre) RÉELLEMENT envoyées à Omni pour ce bloc : texte seul → ("", "") ;
+    « Start frame seule » (défaut) → (keyframe, "") ; sinon + l'ancre / 1er bloc validé en
+    référence (si différente du bloc)."""
+    if pipeline.clip_text_only(c):
+        return "", ""
+    image = str(c.get("image_path") or "")
+    if pipeline.ad_start_frame_only(ad) or not image:
+        return image, ""
+    clips = all_clips if all_clips is not None else db.clips_for_ad(int(ad["id"]))
+    ref = pipeline.consistency_ref(clips, statuses=("valide", "pret", "echec"))
+    if ref is None or int(ref["id"]) == int(c["id"]):
+        return image, ""
+    return image, str(ref.get("image_path") or "")
+
+
+def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str,
+                 omni_images: tuple[str, str] | None = None) -> str:
     sp = _speaker(c)
     in_frame = pipeline.clip_characters_in_frame(c, ad)
+    sent = None
+    if config_app.normalize_avatar_video_model(model) == "omni":
+        image, anchor = omni_images if omni_images is not None else omni_block_images(c, ad)
+        sent = providers.omni_sent_images(image, anchor)
     return build_video_prompt(
         str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt") or ""),
         speaker=sp,
@@ -224,6 +249,7 @@ def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str) -> str:
         names=pipeline.ad_character_names(ad),
         model=model,
         scene_desc=pipeline.clip_scene_desc(c) if pipeline.clip_text_only(c) else "",
+        images=sent, camera_key=pipeline.ad_omni_camera(ad), style=pipeline.ad_style(ad),
     )
 
 
@@ -305,7 +331,28 @@ def ad_v2_fields(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> dict[
         "final_audio_url": media_url(ad.get("final_audio_path")),
         "estimate": est,
         "ref_images": _ref_images(ad),
+        **pipeline.omni_options(ad),
+        "omni_alerts": omni_alerts(ad, cfg),
     }
+
+
+def omni_alerts(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> list[str]:
+    """Avertissements Omni de la pub (modèle Omni, ou ancien pipeline) : répliques > ~7 s de
+    parole (« coupe-la en 2 plans dans le script ») et gestes de tête retirés."""
+    if int(ad.get("pipeline_version") or 1) == 2 and effective_video_model(ad, cfg) != "omni":
+        return []
+    try:
+        clips = db.clips_for_ad(int(ad["id"]))
+    except Exception as exc:  # noqa: BLE001 - affichage : jamais d'erreur
+        _log_detail(f"omni_alerts : {exc!r}")
+        return []
+    wps_for = pipeline.ad_wps_for(ad)
+    out: list[str] = []
+    for c in sorted(clips, key=lambda x: int(x["scene_n"])):
+        out.extend(pipeline.omni_plan_warnings(
+            c.get("block_n") or c.get("scene_n"), str(c.get("script") or ""),
+            str(c.get("video_prompt") or ""), wps_for(_speaker(c))))
+    return out
 
 
 def _ref_images(ad: dict[str, Any]) -> list[dict[str, Any]]:
@@ -348,9 +395,11 @@ def _generate_raw(
             generate_audio=voice_mode_of(ad) == "native",
         )
         return {"usage_cost": usage.get("cost")}
+    image, anchor = omni_block_images(c, ad)
     res = providers.omni_generate_video(
-        cfg, image, prompt, raw, seconds, model_value=spec["model"], label=label,
-        index=n - 1, store=False, resolution=resolution,
+        cfg, image, prompt, raw, seconds, anchor_path=anchor, model_value=spec["model"],
+        label=label, index=n - 1, store=False, resolution=resolution,
+        dialogue=str(c.get("script") or ""),
     )
     got = Path(str(res.get("path") or raw))
     if got != raw and got.is_file():
@@ -475,7 +524,18 @@ def animate_blocks(
         except Exception as exc:  # noqa: BLE001 - un bloc en échec ne bloque pas les autres
             return pipeline._emit_clip_failure(emit, clip_id, n, exc)
 
-    ok, ko = pipeline._run_parallel(clips, _one, MAX_PARALLEL.get(model, 1))
+    if (model == "omni" and pipeline.ad_voice_chain(ad) and voice_mode == "native"
+            and only_clip_id is None and len(clips) > 1):
+        ok, ko = _animate_voice_chains(cfg, ad, ad_name, clips, all_clips, emit=emit, pacer=pacer,
+                                       folder=folder, resolution=resolution, threshold=threshold)
+    else:
+        for c in clips:
+            if model == "omni":
+                for w in pipeline.omni_plan_warnings(
+                        c.get("scene_n"), str(c.get("script") or ""), str(c.get("video_prompt") or ""), pipeline.ad_wps_for(ad)(_speaker(c))):
+                    _log_detail(f"Omni {w}")
+                    db.log_activity("avatar_omni", w)
+        ok, ko = pipeline._run_parallel(clips, _one, MAX_PARALLEL.get(model, 1))
     assembled = False
     fresh = db.clips_for_ad(ad_id)
     if fresh and all(c.get("status") == "pret" and c.get("mp4_path") for c in fresh):
@@ -488,6 +548,174 @@ def animate_blocks(
         db.set_ad_status(ad_id, "termine" if ok and not ko else "objet_images")
     db.log_activity("avatar_omni", f"Vidéo Avatar IA « {ad_name} » ({model}) : {ok} clips, {ko} en échec.")
     return {"ok": ok, "echec": ko, "assembled": assembled, "ad_id": ad_id, "video_model": model}
+
+
+# ============================================================ Omni : chaîne « voix identique » (EXPÉRIMENTAL)
+# Doc Omni : la voix n'est garantie identique QUE dans une chaîne previous_interaction_id
+# (store=true). Option par pub `ads.omni_voice_chain` (défaut 0). Pour un même personnage, ses
+# blocs sont générés dans UNE chaîne : tour 1 = start frame + réplique 1 ; tours suivants =
+# « Show the same character in the next scene, … » + réplique N, keyframe du bloc N en image de
+# RÉFÉRENCE (sans task="extend"). Max 4 tours / 40 s par chaîne (au-delà : nouvelle chaîne).
+# La vidéo renvoyée par un tour peut être le clip COMPLET ou seulement la SUITE (doc muette) :
+# mesurée (ffprobe) à chaque tour, puis un clip par bloc est découpé aux timecodes mesurés.
+def plan_voice_chains(
+    clips: list[dict[str, Any]], seconds_of: Callable[[dict[str, Any]], int],
+    max_turns: int = pipeline.OMNI_CHAIN_MAX_TURNS, max_seconds: int = pipeline.OMNI_CHAIN_MAX_SECONDS,
+) -> list[list[dict[str, Any]]]:
+    """Chaînes de blocs : par personnage (ordre des blocs conservé), ≤ max_turns tours et
+    ≤ max_seconds s cumulées par chaîne."""
+    by_speaker: dict[int, list[dict[str, Any]]] = {}
+    for c in sorted(clips, key=lambda x: int(x["scene_n"])):
+        by_speaker.setdefault(_speaker(c), []).append(c)
+    chains: list[list[dict[str, Any]]] = []
+    for sp in sorted(by_speaker, key=lambda s: int(by_speaker[s][0]["scene_n"])):
+        cur: list[dict[str, Any]] = []
+        total = 0
+        for c in by_speaker[sp]:
+            s = int(seconds_of(c))
+            if cur and (len(cur) >= max_turns or total + s > max_seconds):
+                chains.append(cur)
+                cur, total = [], 0
+            cur.append(c)
+            total += s
+        if cur:
+            chains.append(cur)
+    return chains
+
+
+def chain_segment(measured: float | None, cum: float, requested: float, first: bool) -> dict[str, Any]:
+    """Où se trouve la partie de CE tour dans la vidéo renvoyée : clip complet (la vidéo contient
+    les tours précédents : durée ≥ cumul + 75 % du tour) → [cum, mesurée] ; sinon suite seule →
+    [0, mesurée]. Durée inconnue (ffprobe absent) → suite seule de la durée demandée."""
+    if measured is None:
+        return {"mode": "continuation", "start": 0.0, "end": float(requested), "measured": None}
+    if not first and cum > 0 and measured >= cum + 0.75 * float(requested):
+        return {"mode": "full", "start": float(cum), "end": float(measured), "measured": measured}
+    return {"mode": "continuation", "start": 0.0, "end": float(measured), "measured": measured}
+
+
+def _chain_log(msg: str) -> None:
+    _log_detail(f"Omni chaîne {msg}")
+    db.log_activity("avatar_omni", f"Chaîne voix identique : {msg}")
+
+
+def _sim_turn_video(c: dict[str, Any], out: Path, seconds: int, label: str) -> None:
+    """Simulation : faux clip ffmpeg (keyframe fixe, durée demandée) = suite seule."""
+    image = "" if pipeline.clip_text_only(c) else str(c.get("image_path") or "")
+    if image and Path(image).is_file() and media.ffmpeg_available():
+        media.make_placeholder_mp4_from_image(image, out, seconds)
+    else:
+        media.make_placeholder_mp4(out, seconds=seconds, label=f"SIMULATION chaine {label}")
+
+
+def _animate_voice_chains(
+    cfg: ProviderConfig, ad: dict[str, Any], ad_name: str, clips: list[dict[str, Any]],
+    all_clips: list[dict[str, Any]], *, emit: UpdateFn, pacer: Any, folder: Path,
+    resolution: str, threshold: float,
+) -> tuple[int, int]:
+    """Anime les blocs en chaînes « voix identique ». Renvoie (ok, échecs). Un tour en échec
+    met en échec la suite de SA chaîne (la chaîne ne peut pas continuer sans lui)."""
+    ad_id = int(ad["id"])
+    spec = config_app.AVATAR_VIDEO_MODELS["omni"]
+    names = pipeline.ad_character_names(ad)
+    sheet_for = pipeline.ad_voice_sheet_for(ad)
+    camera_key, style = pipeline.ad_omni_camera(ad), pipeline.ad_style(ad)
+
+    def seconds_of(c: dict[str, Any]) -> int:
+        return clip_target_seconds(c, "omni", voice_mode="native")
+
+    chains = plan_voice_chains(clips, seconds_of)
+    _chain_log(f"pub {ad_id} : {len(chains)} chaîne(s) — "
+               + " | ".join("blocs " + ", ".join(str(c["scene_n"]) for c in ch) for ch in chains))
+    ok = ko = 0
+    for ci, chain in enumerate(chains, 1):
+        prev_id = ""
+        cum = 0.0
+        broken = ""
+        for k, c in enumerate(chain):
+            n, clip_id = int(c["scene_n"]), int(c["id"])
+            if broken:
+                pipeline._emit_clip_failure(emit, clip_id, n, providers.ProviderError(broken))
+                ko += 1
+                continue
+            try:
+                emit({"scene": n, "phase": "animation", "status": "en_cours",
+                      "message": f"Chaîne {ci} — tour {k + 1}/{len(chain)}"})
+                seconds = seconds_of(c)
+                for w in pipeline.omni_plan_warnings(n, str(c.get("script") or ""),
+                                                     str(c.get("video_prompt") or ""), pipeline.ad_wps_for(ad)(_speaker(c))):
+                    _chain_log(w)
+                sp = _speaker(c)
+                in_frame = pipeline.clip_characters_in_frame(c, ad)
+                part = folder / f"{n}_chaine{ci}_tour{k + 1}.mp4"
+                if k == 0:
+                    image, anchor = omni_block_images(c, ad, all_clips)
+                    prompt = _clip_prompt(c, ad, "omni", (image, anchor))
+                    refs: list[str] = []
+                else:
+                    image = anchor = ""
+                    kf = "" if pipeline.clip_text_only(c) else str(c.get("image_path") or "")
+                    refs = [kf] if kf and Path(kf).is_file() else []
+                    prompt = pipeline.build_omni_block_prompt(
+                        str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt") or ""),
+                        speaker=sp, others_in_frame=[m for m in in_frame if m != sp],
+                        dialogue=str(c.get("script") or ""), voice_sheet=sheet_for(sp), names=names,
+                        scene_desc="" if refs else pipeline.clip_scene_desc(c),
+                        images=providers.omni_sent_references(refs), camera_key=camera_key,
+                        style=style, chain_turn=True)
+                db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
+                               clip_seconds=seconds, error=None)
+                if pacer is not None:
+                    pacer.acquire(seconds * spec["cost_per_second_usd"], lambda w, n=n: emit({
+                        "scene": n, "phase": "attente_tier1", "status": "en_cours",
+                        "message": pipeline.tier1_wait_message(w), "wait_s": round(w)}))
+                if k == 0:
+                    res = providers.omni_generate_video(
+                        cfg, image, prompt, part, seconds, anchor_path=anchor,
+                        model_value=spec["model"], label=ad_name, index=n - 1, store=True,
+                        resolution=resolution, dialogue=str(c.get("script") or ""))
+                else:
+                    res = providers.omni_extend_video(
+                        cfg, prev_id, prompt, part, seconds, model_value=spec["model"],
+                        label=ad_name, index=n - 1, resolution=resolution,
+                        dialogue=str(c.get("script") or ""), reference_paths=refs)
+                got = Path(str(res.get("path") or part))
+                if cfg.dry_run:
+                    _sim_turn_video(c, got, seconds, f"{ci}-{k + 1}")
+                prev_id = str(res.get("interaction_id") or "")
+                seg = chain_segment(media.mp4_duration(got), cum, seconds, k == 0)
+                raw, final = folder / f"{n}_brut.mp4", folder / f"{n}.mp4"
+                if seg["mode"] == "full":   # clip complet → on garde seulement la part de ce tour
+                    media.cut_mp4(got, seg["start"], seg["end"], raw)
+                else:
+                    shutil.copyfile(got, raw)
+                shutil.copyfile(raw, final)
+                cum += seg["end"] - seg["start"]
+                _chain_log(
+                    f"chaîne {ci} tour {k + 1}/{len(chain)} (bloc {n}) : {seconds} s demandées, vidéo "
+                    f"renvoyée {seg['measured'] if seg['measured'] is not None else 'durée inconnue'} s "
+                    f"→ {'clip complet' if seg['mode'] == 'full' else 'suite seule'}, coupe "
+                    f"[{seg['start']:.2f}–{seg['end']:.2f}] s, interaction {prev_id or '?'}, "
+                    f"références {len(refs)}, facturation : {res.get('usage') or 'non renvoyée'}")
+                if not cfg.dry_run:
+                    cost.record_omni_clip(ad_id, seconds)
+                d = _measure_drift(c, raw, folder / f"{n}_frame0.png", threshold)
+                db.update_clip(
+                    clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
+                    drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret",
+                    error=None, speech_cut=0, interaction_id=prev_id,
+                    omni_chain=json.dumps({"chain": ci, "turn": k + 1, "turns": len(chain),
+                                           "source": str(got), **seg}, ensure_ascii=False))
+                emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
+                      "drift_score": d["drift_score"], "drift_flag": bool(d["drift_flag"]),
+                      "mirrored": d["mirrored"], "message": d["note"]})
+                ok += 1
+            except Exception as exc:  # noqa: BLE001 - un tour en échec casse la suite de sa chaîne
+                broken = f"Chaîne {ci} interrompue au bloc {n} — relance la génération."
+                _chain_log(f"échec bloc {n} : {exc!r}")
+                pipeline._emit_clip_failure(emit, clip_id, n, exc)
+                ko += 1
+    return ok, ko
 
 
 def assemble(ad_id: int) -> dict[str, Any]:
@@ -526,6 +754,11 @@ class VideoAnimateIn(BaseModel):
 class OptionsIn(BaseModel):
     video_model: str | None = None   # grok | kling | omni ; "" = réglage global
     voice_mode: str | None = None    # elevenlabs | native
+    # Réglages Omni de la pub (None = inchangé)
+    omni_start_frame_only: bool | None = None   # n'envoyer que la keyframe (pas l'ancre)
+    omni_camera: str | None = None              # "" auto | locked | push_in | handheld
+    omni_auto_turns: bool | None = None         # découpage auto en tours chaînés
+    omni_voice_chain: bool | None = None        # EXPÉRIMENTAL : chaîne « voix identique »
 
 
 def _v2_ad_or_error(ad_id: int) -> dict[str, Any]:
@@ -632,8 +865,18 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
             raise HTTPException(400, "Mode voix indisponible : seule la voix native du modèle "
                                      "vidéo est active (" + " | ".join(config_app.ACTIVE_VOICE_MODES) + ").")
         fields["voice_mode"] = mode
-    if fields:
-        db.set_ad_fields(ad_id, **fields)
+    omni_fields: dict[str, Any] = {}
+    if body.omni_camera is not None:
+        cam = body.omni_camera.strip().lower()
+        if cam and cam not in pipeline.OMNI_CAMERA_LABELS:
+            raise HTTPException(400, "Caméra inconnue (locked | push_in | handheld, ou vide = auto).")
+        omni_fields["omni_camera"] = cam
+    for key in ("omni_start_frame_only", "omni_auto_turns", "omni_voice_chain"):
+        val = getattr(body, key)
+        if val is not None:
+            omni_fields[key] = 1 if val else 0
+    if fields or omni_fields:
+        db.set_ad_fields(ad_id, **fields, **omni_fields)
     fresh = db.get_ad(ad_id) or ad
     if fields:
         model = effective_video_model(fresh)
@@ -644,7 +887,8 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
                 db.update_clip(int(c["id"]), clip_seconds=config_app.avatar_block_clip_seconds(
                     str(c.get("script") or ""), wav, model, mode))
     return {"ok": True, "video_model": effective_video_model(fresh),
-            "voice_mode": voice_mode_of(fresh), "estimate": estimate(fresh)}
+            "voice_mode": voice_mode_of(fresh), "estimate": estimate(fresh),
+            **pipeline.omni_options(fresh)}
 
 
 @router.post("/api/avatar-omni/video/assemble/{ad_id}")

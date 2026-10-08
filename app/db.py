@@ -199,6 +199,16 @@ _MIGRATIONS["ads"].extend([
     ("client_preset_id", "INTEGER"),      # preset client appliqué à la pub (export_dir, persos…)
     ("preset_characters", "TEXT"),        # JSON : persos [{nom, image_ref, description, fiche_voix}]
 ])
+# Réglages Omni par pub (Avatar IA) — ajoutés à la suite (idempotent).
+_MIGRATIONS["ads"].extend([
+    ("omni_start_frame_only", "INTEGER DEFAULT 1"),  # 1 = n'envoyer QUE la keyframe (pas l'ancre)
+    ("omni_camera", "TEXT DEFAULT ''"),              # "" auto | locked | push_in | handheld
+    ("omni_auto_turns", "INTEGER DEFAULT 0"),        # 1 = découpage auto des plans en tours chaînés
+    ("omni_voice_chain", "INTEGER DEFAULT 0"),       # 1 = chaîne « voix identique » (expérimental)
+])
+_MIGRATIONS["clips"].extend([
+    ("omni_chain", "TEXT DEFAULT ''"),   # JSON : place du bloc dans sa chaîne voix identique (coupe)
+])
 
 
 def connect() -> sqlite3.Connection:
@@ -559,6 +569,7 @@ _ALLOWED_AD_COLS = {
 }
 _ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # export de la pub
 _ALLOWED_AD_COLS |= {"client_preset_id", "preset_characters"}   # presets client (tous modes)
+_ALLOWED_AD_COLS |= {"omni_start_frame_only", "omni_camera", "omni_auto_turns", "omni_voice_chain"}
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -717,6 +728,7 @@ _ALLOWED_CLIP_COLS = {
     "drift_score", "drift_flag",
     "anchor_edit",   # Objet animé : surcharge par plan de la retouche de l'ancre (NULL = pub)
     "speech_cut", "extra_seconds",
+    "omni_chain",    # Omni : place du bloc dans sa chaîne « voix identique »
 }
 
 

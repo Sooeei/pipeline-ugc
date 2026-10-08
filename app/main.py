@@ -1353,6 +1353,8 @@ def create_app() -> FastAPI:
         for s in resp["shots"]:
             s.update(avatar_video.clip_v2_fields(clips_by_id.get(int(s["clip_id"])) or {}))
         resp.update(avatar_video.ad_v2_fields(ad))
+        # Omni : réplique > ~7 s (lip-sync peu fiable) / gestes de tête retirés → alertes FR.
+        resp["alerts"].extend(a for a in resp.get("omni_alerts") or [] if a not in resp["alerts"])
         return resp
 
     @app.patch("/api/avatar-omni/bible/{ad_id}")

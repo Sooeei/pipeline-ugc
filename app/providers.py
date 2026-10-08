@@ -1333,8 +1333,9 @@ def _omni_body(
     previous_interaction_id: str = "",
     resolution: str = "",
 ) -> dict[str, Any]:
-    """Corps de POST /interactions : images (plan puis ancre, 2 max ; AUCUNE en mode « texte_seul »
-    ou en extension) + prompt ; sortie vidéo 9:16 à `resolution` (720p par défaut, ou 1080p).
+    """Corps de POST /interactions : images (plan puis ancre, 2 max ; AUCUNE en mode « texte_seul » ;
+    en extension : références éventuelles d'un tour chaîné) + prompt (qui DÉCLARE le rôle de chaque
+    image : prompt_profiles.omni_role_header) ; sortie vidéo 9:16 à `resolution` (720p ou 1080p).
 
     `store=True` : l'interaction est conservée par Google → elle pourra être ÉTENDUE au tour
     suivant (obligatoire pour une chaîne). `previous_interaction_id` : tour d'EXTENSION de la vidéo
@@ -1499,7 +1500,8 @@ def _omni_download_file(uri: str, key: str, out_mp4: str) -> None:
 
 def omni_sent_images(image_path: str | Path, anchor_path: str | Path = "") -> list[prompt_profiles.SentImage]:
     """Images RÉELLEMENT envoyées à Omni, dans l'ordre, avec leur rôle : start frame (image du
-    plan) puis ancre en référence (si différente et présente) ; texte_seul → aucune."""
+    plan) puis ancre en référence (si différente et présente) ; texte_seul → aucune.
+    « Start frame seule » = l'appelant passe anchor_path="" → une seule image."""
     paths: list[str] = []
     if str(image_path or "").strip():
         paths.append(str(image_path))
@@ -1507,6 +1509,15 @@ def omni_sent_images(image_path: str | Path, anchor_path: str | Path = "") -> li
             paths.append(str(anchor_path))
     roles = [prompt_profiles.ROLE_FIRST_FRAME] + [prompt_profiles.ROLE_REFERENCE] * (len(paths) - 1)
     return prompt_profiles.sent_images(paths, roles, prompt_profiles.ROLE_REFERENCE)
+
+
+def omni_sent_references(reference_paths: list[str] | tuple[str, ...] = ()) -> list[prompt_profiles.SentImage]:
+    """Images de RÉFÉRENCE jointes à un tour chaîné (previous_interaction_id) : fichiers présents
+    seulement, OMNI_MAX_INPUT_IMAGES max, toutes en rôle « reference » (jamais une 1re image)."""
+    paths = [str(p) for p in reference_paths or () if str(p or "").strip() and Path(p).is_file()]
+    paths = paths[: config_app.OMNI_MAX_INPUT_IMAGES]
+    return prompt_profiles.sent_images(paths, [prompt_profiles.ROLE_REFERENCE] * len(paths),
+                                       prompt_profiles.ROLE_REFERENCE)
 
 
 def omni_generate_video(
@@ -1597,12 +1608,16 @@ def omni_extend_video(
     index: int = 0,
     resolution: str = "",
     dialogue: str = "",
+    reference_paths: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Tour d'extension Omni : contrôle avant envoi + journal (simulation comprise)."""
-    issues = prompt_profiles.preflight("omni", prompt, images=[], dialogue=dialogue)
+    """Tour d'extension / tour chaîné Omni : contrôle avant envoi + journal (simulation comprise).
+    `reference_paths` = images de RÉFÉRENCE jointes au tour (chaîne « voix identique » : keyframe
+    du plan suivant) — rôles déclarés = omni_sent_references(reference_paths)."""
+    sent = omni_sent_references(reference_paths)
+    issues = prompt_profiles.preflight("omni", prompt, images=sent, dialogue=dialogue)
     res = _omni_extend_video(cfg, previous_interaction_id, prompt, out_mp4, seconds, model_value,
-                             label, index, resolution)
-    gen_trace.record(kind="video", model=model_value, prompt=prompt, images=[],
+                             label, index, resolution, [s["path"] for s in sent])
+    gen_trace.record(kind="video", model=model_value, prompt=prompt, images=sent,
                      params={"seconds": seconds, "resolution": resolution or config_app.OMNI_RESOLUTION,
                              "previous_interaction_id": previous_interaction_id, "extension": True},
                      interaction_id=str(res.get("interaction_id") or ""), dry_run=cfg.dry_run,
@@ -1620,11 +1635,14 @@ def _omni_extend_video(
     label: str = "",
     index: int = 0,
     resolution: str = "",
+    reference_paths: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Tour d'EXTENSION d'une vidéo Omni (même plan, même prise continue) : `previous_interaction_id`
-    = interaction du tour précédent (créée avec store=true), texte seul — Google garde la vidéo, les
-    personnages et la voix. Renvoie {"path", "interaction_id", "usage"} (id stocké : ce tour peut être étendu).
-    Simulation : placeholder + id « SIMU_OMNI_EXT_<n> »."""
+    """Tour d'EXTENSION d'une vidéo Omni : `previous_interaction_id` = interaction du tour
+    précédent (créée avec store=true) — Google garde la vidéo, les personnages et la voix.
+    Sans `task="extend"` (il interdit les références) : le prompt dit « Extend this video » /
+    « Show the same character in the next scene ». `reference_paths` = images de RÉFÉRENCE
+    jointes (0 par défaut : texte seul). Renvoie {"path", "interaction_id", "usage"} (id stocké :
+    ce tour peut être étendu). Simulation : placeholder + id « SIMU_OMNI_EXT_<n> »."""
     out_mp4 = str(out_mp4)
     if cfg.dry_run:
         path = media.make_placeholder_mp4(
@@ -1636,7 +1654,14 @@ def _omni_extend_video(
         raise ProviderError("Clé API Google (Gemini) manquante — ajoute-la dans Réglages.")
     if not previous_interaction_id:
         raise ProviderError("Tour précédent introuvable — relance l'animation de ce plan depuis le début.")
-    body = _omni_body(prompt, [], seconds, model_value, store=True,
+    parts: list[dict[str, Any]] = []
+    for ref in reference_paths or ():
+        try:
+            parts.append(_omni_image_part(ref))
+        except Exception as exc:  # noqa: BLE001 - réf illisible : le prompt la déclare → on stoppe
+            _log_detail(f"Google Omni référence illisible ({ref}) : {exc}")
+            raise ProviderError("Image de référence du plan illisible — régénère son keyframe.") from exc
+    body = _omni_body(prompt, parts, seconds, model_value, store=True,
                       previous_interaction_id=previous_interaction_id, resolution=resolution)
     interaction_id, usage = _omni_run(key, body, out_mp4)
     return {"path": out_mp4, "interaction_id": interaction_id, "usage": usage}

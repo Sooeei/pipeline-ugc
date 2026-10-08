@@ -5181,7 +5181,34 @@ function aoPlancheCompareHtml(s) {
 }
 
 // ---- Génération vidéo v2 : options, estimation, lancement, assemblage ----
+// Réglages Google Omni de la pub : start frame seule, caméra, découpage auto, chaîne voix identique.
+function aoRenderOmniOptions(ad) {
+  const box = $("aoOmniOptions");
+  if (!box || !ad) return;
+  const vm = ad.video_model || (currentSettings && currentSettings.avatar_video_model) || "grok";
+  const omni = !aoIsV2(ad) || vm === "omni";   // ancien pipeline = toujours Omni
+  box.classList.toggle("hidden", !omni);
+  if (!omni) return;
+  $("aoOmniStartFrameOnly").checked = ad.omni_start_frame_only !== false;
+  $("aoOmniCamera").value = ad.omni_camera || "";
+  $("aoOmniAutoTurns").checked = !!ad.omni_auto_turns;
+  $("aoOmniVoiceChain").checked = !!ad.omni_voice_chain;
+  // Découpage en tours : ancien pipeline seulement ; chaîne voix identique : v2 seulement.
+  $("aoOmniAutoTurns").parentElement.classList.toggle("hidden", aoIsV2(ad));
+  $("aoOmniVoiceChain").parentElement.classList.toggle("hidden", !aoIsV2(ad));
+}
+
+if ($("aoOmniStartFrameOnly")) $("aoOmniStartFrameOnly").addEventListener("change", () =>
+  aoPatchOptions({ omni_start_frame_only: $("aoOmniStartFrameOnly").checked }));
+if ($("aoOmniCamera")) $("aoOmniCamera").addEventListener("change", () =>
+  aoPatchOptions({ omni_camera: $("aoOmniCamera").value }));
+if ($("aoOmniAutoTurns")) $("aoOmniAutoTurns").addEventListener("change", () =>
+  aoPatchOptions({ omni_auto_turns: $("aoOmniAutoTurns").checked }));
+if ($("aoOmniVoiceChain")) $("aoOmniVoiceChain").addEventListener("change", () =>
+  aoPatchOptions({ omni_voice_chain: $("aoOmniVoiceChain").checked }));
+
 function aoRenderV2Options(ad) {
+  aoRenderOmniOptions(ad);
   const box = $("aoV2Options");
   if (!box) return;
   const v2 = aoIsV2(ad);
@@ -5200,6 +5227,7 @@ async function aoPatchOptions(body) {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (aoAdState) Object.assign(aoAdState, body);
+    if (aoAdState && "video_model" in body) aoRenderOmniOptions(aoAdState);
     toast("Option enregistrée ✓");
     aoRenderAnimEstimate();
   } catch (e) { toast(e.message); }

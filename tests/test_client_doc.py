@@ -128,17 +128,18 @@ def test_build_omni_prompt_brackets_speaker_and_silent():
     assert "[97 %]" not in p and "97 % des femmes, SPF 50 inclus." in p
     assert f"The speaking character ({P1_EN}) says, spoken in French" in p
     assert f"The other character ({P2_EN}) remains silent" in p
-    assert "same people" in p and p.startswith("<FIRST_FRAME> ")
+    assert "same people" in p and "<IMAGE_REF_0>" in p
+    assert p.startswith("[# Sources <FIRST_FRAME>@Image1] [# References <IMAGE_REF_0>@Image2] ")
 
 
 def test_extension_prompt():
     p = pipeline.build_omni_extension_prompt("He raises four fingers.", "Quatre affaires.",
                                              "a warm voice", 4, speaker=P1_EN, silent=P2_EN)
-    assert p.startswith("Extend this video: the scene continues in the same single unbroken shot, "
-                        "same two people, same set, same voice.")
+    assert p.startswith("Extend this video: the scene continues, same two people, same set, same "
+                        "voice. In a single continuous shot. No scene cuts.")
     assert '[0-4s]' in p and f'({P1_EN}) says, spoken in French, in a warm voice: "Quatre affaires."' in p
-    assert "He raises four fingers." in p and p.endswith("No music. No subtitles.")
-    assert "<FIRST_FRAME>" not in p
+    assert "He raises four fingers." in p and p.endswith("No music. No subtitles. No on-screen text.")
+    assert "<FIRST_FRAME>" not in p and "[#" not in p and "Use Image" not in p   # aucune image envoyée
 
 
 def test_client_director_rules_override_in_system_prompt():
@@ -164,6 +165,7 @@ def _chain_ad(tmp_path, n_segments=3):
     db.set_ad_voice_profile(ad_id, json.dumps({"pace": "naturel"}))
     db.set_ad_personas(ad_id, json.dumps(PERSONAS))
     db.set_ad_bible(ad_id, json.dumps({"character1": P1_EN, "character2": P2_EN, "set": "a counter"}))
+    db.set_ad_fields(ad_id, omni_auto_turns=1)   # option « découpage auto en tours » (défaut : non)
     texts = [f"Voici le segment numéro {i} de ce plan." for i in range(1, n_segments + 1)]
     img = media.make_placeholder_image(tmp_path / "plan.png", "x")
     cid = db.create_clip(ad_id, 1, " ".join(texts), "m", prompt_image="p")
@@ -209,7 +211,9 @@ def test_chain_k_calls_store_previous_id_one_mp4_and_cost(fake_google, tmp_path)
     assert len(b) == 3                                                  # k tours
     assert b[0]["store"] is True and "previous_interaction_id" not in b[0]
     assert b[0]["input"][0]["type"] == "image"                          # tour 1 : l'image du plan
-    assert b[0]["input"][-1]["text"].startswith("<FIRST_FRAME> ")
+    assert b[0]["input"][-1]["text"].startswith("[# Sources <FIRST_FRAME>@Image1] ")
+    assert b[0]["input"][-1]["text"].endswith("Use Image1 as the starting frame.")
+    assert len([p for p in b[0]["input"] if p["type"] == "image"]) == 1      # start frame seule
     for i in (1, 2):                                                    # extensions : texte seul
         assert b[i]["previous_interaction_id"] == f"v1_{i}" and b[i]["store"] is True
         assert [p["type"] for p in b[i]["input"]] == ["text"]
@@ -299,7 +303,7 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         assert r.status_code == 200, r.text
         ad_id = r.json()["ad_id"]
         _wait(c, r.json()["job_id"])
-        db.set_ad_fields(ad_id, pipeline_version=1)   # pub v1 (ancien pipeline Omni)
+        db.set_ad_fields(ad_id, pipeline_version=1, omni_auto_turns=1)   # pub v1 + tours chaînés
         ad = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
         assert len(ad["shots"]) == 10 and ad["bible_text"]
         b2 = ad["shots"][1]
@@ -329,7 +333,9 @@ def test_client_mode_e2e_bible_brackets_and_chain(monkeypatch):
         # Tour 1 + video_prompt (étape Keyframes) : le keyframe porte le visuel, les descriptions
         # des personnages restent dans les tours d'extension.
         every = " ".join([p, *(q for _, q in ext_prompts)])
-        assert f"({P1_EN}) says" in every and f"({P2_EN}) remains silent" in every
+        # Start frame : l'image porte le visuel → pas de redescription des personnages.
+        assert "says, spoken in French" in every and "remains silent" in every
+        assert P1_EN not in every and P2_EN not in every
         assert P1_FR not in every and P2_FR not in every                    # jamais le FR brut
         assert len(ext_prompts) == len(s9["segments"]) - 1
         assert all(prev.startswith("SIMU_OMNI") for prev, _ in ext_prompts)

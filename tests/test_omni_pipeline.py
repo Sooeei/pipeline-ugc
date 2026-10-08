@@ -88,8 +88,10 @@ def test_turn_prompt_timecodes_match_timing():
     p = pipeline.build_omni_turn_prompt(turn, tm, first=True, speaker_desc=P1, speaker_name="Marc",
                                         voice_sheet="a warm voice")
     assert _parse_tc(p) == (1.5, 5.5, 7)
-    assert p.startswith("<FIRST_FRAME> ") and "Marc, the speaking character (a male makeup artist)" in p
-    assert '"Un deux trois quatre cinq six sept huit neuf dix."' in p and "while nodding" in p
+    assert p.startswith("[# Sources <FIRST_FRAME>@Image1] ")
+    assert "Marc, the speaking character (a male makeup artist)" in p
+    assert '"Un deux trois quatre cinq six sept huit neuf dix."' in p
+    assert "nodding" not in p                       # geste de tête retiré (lip-sync)
 
 
 def test_chain_sends_turn_duration_and_coherent_timecodes(fake_google, tmp_path):
@@ -123,7 +125,9 @@ def test_each_turn_uses_its_speaker_voice_and_others_silent(fake_google, tmp_pat
     p1, p2 = (body["input"][-1]["text"] for body in fake_google["bodies"])
     s1, s2 = config_app.voice_sheet(VP_MALE), config_app.voice_sheet(VP_FEMALE)
     assert s1 in p1 and s2 not in p1 and s2 in p2 and s1 not in p2
-    assert f"the speaking character ({P2})" in p2 and f"({P1}) remains silent" in p2
+    # Start frame : noms seulement (l'image porte le visuel), un seul speaker par tour.
+    assert "Lise, the speaking character" in p2 and "The other character (Marc) remains silent" in p2
+    assert P1 not in p2 and P2 not in p2
     assert p1.count(" says, spoken in French") == 1 and p2.count(" says, spoken in French") == 1
 
 
@@ -236,9 +240,17 @@ def test_old_ad_visage_single_voice_text_motion_still_works(fake_google, tmp_pat
     assert ad["personas"]["characters"][0]["en"] == "a woman"
     seg = ad["shots"][0]["segments"]
     assert [s["speaker"] for s in seg] == [1, 1] and seg[0]["pendant"] == "motion 0"
+    # Défaut : découpage auto désactivé → UN appel pour tout le plan (réplique entière, verbatim).
     res = pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "old")
-    assert res["ok"] == 1 and len(fake_google["bodies"]) == 2
-    assert "a woman" in fake_google["bodies"][0]["input"][-1]["text"]
+    assert res["ok"] == 1 and len(fake_google["bodies"]) == 1
+    assert " ".join(texts) in fake_google["bodies"][0]["input"][-1]["text"]
+    assert "previous_interaction_id" not in fake_google["bodies"][0]
+    # Option « découpage auto en tours » : la chaîne de tours d'origine.
+    db.set_ad_fields(ad_id, omni_auto_turns=1)
+    db.update_clip(cid, status="valide")
+    res = pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "old")
+    assert res["ok"] == 1 and len(fake_google["bodies"]) == 3
+    assert fake_google["bodies"][2]["previous_interaction_id"] == "v1_2"
     assert pipeline.select_omni_refs(["visage", "visage2"], [{"path": "v.png", "kind": "visage"}])[0]["path"] == "v.png"
 
 

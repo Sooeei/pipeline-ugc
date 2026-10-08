@@ -9,7 +9,7 @@ import pytest
 import requests
 from fastapi.testclient import TestClient
 
-from app import brain, config_app, cost, db, jobs, pipeline, providers
+from app import brain, config_app, cost, db, jobs, media, pipeline, providers
 from app.main import app
 from app.providers import ProviderConfig, ProviderError
 
@@ -263,24 +263,48 @@ def test_manual_block_too_long_warns_but_not_cut():
 # ============================================================ build_omni_prompt
 def test_build_omni_prompt_structure_and_order():
     dialogue = 'Il dit "wow" et "ok".'
-    p = pipeline.build_omni_prompt("Nods gently.", dialogue, "a warm voice", 7, True)
-    assert p.startswith("<FIRST_FRAME> ")
-    assert "in a single unbroken scene with no scene cuts." in p
+    p = pipeline.build_omni_prompt("Smiles warmly, nods gently.", dialogue, "a warm voice", 7, True)
+    # Rôles des images déclarés EN TÊTE (start frame + ancre en référence) + phrases de fin.
+    assert p.startswith("[# Sources <FIRST_FRAME>@Image1] [# References <IMAGE_REF_0>@Image2] ")
+    assert "In a single continuous shot. No scene cuts." in p
+    assert "Locked off static camera, framing identical to the first frame." in p   # parlé → fixe
     assert "spoken in French" in p and "in a warm voice" in p
     assert '"Il dit “wow” et “ok”."' in p     # verbatim, guillemets internes “ ”
     assert "[1-7s]" in p and "[0-1s]" in p
-    assert "No music." in p
-    assert "No other speakers. No subtitles. No on-screen text." in p
-    idx = [p.index(x) for x in ("<FIRST_FRAME>", "Nods gently.", "[0-1s]", "No other speakers.",
-                                "<IMAGE_REF_0>")]
+    assert "No other speakers. Never mirror the image. No music. No subtitles. No on-screen text." in p
+    assert "nods" not in p.lower() and "Smiles warmly" in p        # geste de tête retiré (lip-sync)
+    assert p.endswith("Use Image1 as the starting frame. Use Image2 as a reference for the video "
+                      "generation. The images should not be used as literal initial frames.")
+    idx = [p.index(x) for x in ("[# Sources", "In a single continuous shot", "Locked off",
+                                "Smiles warmly", "Lips and expression", "[0-1s]", "No other speakers.",
+                                "Use Image1")]
     assert idx == sorted(idx)
 
 
 def test_build_omni_prompt_without_dialogue_and_anchor():
     p = pipeline.build_omni_prompt("Smiles.", "   ", "a voice", 4, False)
-    assert "No dialogue." in p and "[1-" not in p and "No music." in p
-    assert "No other speakers. No subtitles. No on-screen text." in p
-    assert "<IMAGE_REF_0>" not in p
+    assert p.startswith("[# Sources <FIRST_FRAME>@Image1] In a single continuous shot.")
+    assert "No dialogue." in p and "[1-" not in p and "No music. No subtitles. No on-screen text." in p
+    assert "No other speakers." not in p                            # plan muet
+    assert "handheld smartphone UGC" in p                            # muet + auto → UGC
+    assert "<IMAGE_REF_0>" not in p and "References" not in p
+    assert p.endswith("Use Image1 as the starting frame.")
+
+
+def test_build_omni_prompt_text_only_declares_no_image():
+    p = pipeline.build_omni_prompt("Smiles.", "Bonjour.", "a voice", 4, False,
+                                   scene_desc="A woman in a bright kitchen")
+    assert "[#" not in p and "<FIRST_FRAME>" not in p and "Use Image" not in p
+    assert "The scene: A woman in a bright kitchen." in p
+    assert "first frame" not in p and "Locked off static camera." in p
+
+
+def test_build_omni_prompt_camera_choices_and_3d():
+    base = ("Smiles.", "Bonjour.", "a voice", 4, False)
+    assert "Slow, subtle push in" in pipeline.build_omni_prompt(*base, camera_key="push_in")
+    assert "handheld smartphone UGC" in pipeline.build_omni_prompt(*base, camera_key="handheld")
+    p3d = pipeline.build_omni_prompt(*base, camera_key="handheld", style="3d")
+    assert config_app.OMNI_3D_STYLE in p3d and "smartphone UGC" not in p3d
 
 
 def test_voice_sheet_identical_on_all_plans_via_animate(monkeypatch):
@@ -293,15 +317,32 @@ def test_voice_sheet_identical_on_all_plans_via_animate(monkeypatch):
     monkeypatch.setattr(pipeline, "omni_generate_video", fake_omni)
     ad_id, ids = _omni_ad(2, dialogues=["Bonjour à toi.", "Et voilà le résultat final."],
                           voice_profile={**VP, "extra": "slightly husky"})
+    # Images RÉELLES : les rôles déclarés suivent les images réellement envoyées.
+    imgs = [str(media.make_placeholder_image(config_app.MEDIA_DIR / f"sf_{ad_id}_{i}.png", f"p{i}", index=i))
+            for i in (1, 2)]
+    for cid, img in zip(ids, imgs, strict=True):
+        db.update_clip(cid, image_path=img)
     res = pipeline.animate_avatar_omni_clips(_sim(), ad_id, "omni")
     assert res["ok"] == 2
     sheet = config_app.voice_sheet({**VP, "extra": "slightly husky"})
-    (p1, a1, _), (p2, a2, _) = prompts["fake/1.png"], prompts["fake/2.png"]
+    (p1, a1, _), (p2, a2, _) = prompts[imgs[0]], prompts[imgs[1]]
     assert f"in {sheet}:" in p1 and f"in {sheet}:" in p2
-    # Plan 1 = référence : pas d'ancre ; Plan 2 : ancre = image du Plan 1
-    assert "<IMAGE_REF_0>" not in p1 and a1 == ""
-    assert "<IMAGE_REF_0>" in p2 and a2 == "fake/1.png"
+    # « Start frame seule » (défaut) : aucune ancre, une seule image déclarée.
+    for p, a in ((p1, a1), (p2, a2)):
+        assert a == "" and "<IMAGE_REF_0>" not in p
+        assert p.startswith("[# Sources <FIRST_FRAME>@Image1] In a single")
     assert db.get_clip(ids[1])["interaction_id"] == "X"
+    # Option décochée : Plan 1 = référence (pas d'ancre) ; Plan 2 : ancre = image du Plan 1.
+    db.set_ad_fields(ad_id, omni_start_frame_only=0)
+    for cid in ids:
+        db.update_clip(cid, status="valide")
+    prompts.clear()
+    pipeline.animate_avatar_omni_clips(_sim(), ad_id, "omni")
+    (p1, a1, _), (p2, a2, _) = prompts[imgs[0]], prompts[imgs[1]]
+    assert "<IMAGE_REF_0>" not in p1 and a1 == ""
+    assert a2 == imgs[0]
+    assert p2.startswith("[# Sources <FIRST_FRAME>@Image1] [# References <IMAGE_REF_0>@Image2]")
+    assert "Use Image2 as a reference for the video generation." in p2
 
 
 def test_anchor_used_as_reference_for_omni(monkeypatch):
@@ -313,6 +354,7 @@ def test_anchor_used_as_reference_for_omni(monkeypatch):
 
     monkeypatch.setattr(pipeline, "omni_generate_video", fake_omni)
     ad_id, ids = _omni_ad(3)
+    db.set_ad_fields(ad_id, omni_start_frame_only=0)   # option « Start frame seule » décochée
     db.update_clip(ids[1], is_anchor=1)
     pipeline.animate_avatar_omni_clips(_sim(), ad_id, "omni")
     assert seen["fake/1.png"] == "fake/2.png" and seen["fake/3.png"] == "fake/2.png"

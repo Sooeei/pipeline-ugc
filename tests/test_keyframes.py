@@ -241,13 +241,15 @@ def test_start_frame_turn1_uses_video_prompt(tmp_path, monkeypatch):
     turns = [{"text": "Phrase numéro 1.", "speaker": 1, "pendant": "she nods"},
              {"text": "Et la suite.", "speaker": 1}]
     db.update_clip(ids[0], segments=json.dumps(turns), block_n=1, video_prompt="Slow push-in, she talks")
+    db.set_ad_fields(ad_id, omni_auto_turns=1)   # option « découpage auto en tours »
     monkeypatch.setattr(pipeline, "omni_extend_video", lambda cfg, prev, prompt, out, secs, **kw: (
         k.omni.append({"image": "EXT", "prompt": prompt, **kw})
         or {"path": media.make_placeholder_mp4(str(out), seconds=1.0, label="e"), "interaction_id": "Y"}))
     res = pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=True), ad_id, "kf")
     assert res["ok"] == 1 and len(k.omni) == 2
     first = k.omni[0]["prompt"]
-    assert first.startswith("<FIRST_FRAME>") and "Slow push-in, she talks" in first
+    assert first.startswith("[# Sources <FIRST_FRAME>@Image1] ") and "Slow push-in, she talks" in first
+    assert "nods" not in first                     # geste de tête retiré (plan parlé)
     assert '"Phrase numéro 1."' in first   # réplique verbatim
     assert "Slow push-in" not in k.omni[1]["prompt"]
     assert json.loads(db.get_clip(ids[0])["omni_prompt"]) == [first, k.omni[1]["prompt"]]

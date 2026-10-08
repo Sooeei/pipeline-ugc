@@ -81,14 +81,81 @@ def assemble(profile: ModelProfile, blocks: dict[str, str]) -> str:
 
 
 # ---------------------------------------------------------------- profils (remplis par modèle)
-# OMNI — doc officielle gemini-omni-1.1-flash (skill google-gemini/gemini-skills/gemini-omni-flash-api).
+# ================================================================ OMNI (propriété : agent Omni)
+# Doc officielle gemini-omni-1.1-flash (skill google-gemini/gemini-skills/gemini-omni-flash-api) :
+# - rôle des images déclaré EN TÊTE : « [# Sources <FIRST_FRAME>@Image1] [# References
+#   <IMAGE_REF_0>@Image2] » (ImageN = N-ième image envoyée), puis UNE phrase de fin par rôle ;
+# - toujours « In a single continuous shot. No scene cuts. » + audio décrit + interdits ;
+# - avec start frame : on décrit mouvement / caméra / jeu / audio, jamais l'image elle-même ;
+# - voix identique seulement dans une chaîne previous_interaction_id (store=true), +10 s max par
+#   tour, 40 s max au total ; pas de task="extend" (il interdit les images de référence).
+OMNI_SINGLE_SHOT = "In a single continuous shot. No scene cuts."
+OMNI_NEGATIVES = "No music. No subtitles. No on-screen text."
+OMNI_NO_OTHER_SPEAKERS = "No other speakers."
+OMNI_NO_MIRROR = "Never mirror the image."
+OMNI_ROLE_FIRST_FRAME = "Use {img} as the starting frame."
+OMNI_ROLE_REFERENCE = ("Use {imgs} as {a_ref} for the video generation. The images should not be "
+                       "used as literal initial frames.")
+
 OMNI = ModelProfile(
     key="omni", label="Google Omni", model_id="gemini-omni-1.1-flash",
+    anti_defects=(OMNI_SINGLE_SHOT, OMNI_NEGATIVES, OMNI_NO_OTHER_SPEAKERS, OMNI_NO_MIRROR),
     limits={"clip_seconds": (3, 10), "lipsync_reliable_s": 7, "extend_max_s": 10,
-            "chain_max_s": 40, "edit_max_turns": 4},
+            "chain_max_s": 40, "chain_max_turns": 4, "edit_max_turns": 4, "max_input_images": 2,
+            "speakers_per_clip": 1},
     verified_on="2026-10-08",
     sources=("google-gemini/gemini-skills/gemini-omni-flash-api",),
 )
+
+
+def omni_image_tags(images: list[SentImage]) -> list[tuple[str, str, str]]:
+    """(rôle, balise Omni, ImageN) pour chaque image ENVOYÉE, dans l'ordre d'envoi :
+    start frame → <FIRST_FRAME> ; références → <IMAGE_REF_0>, <IMAGE_REF_1>…"""
+    out: list[tuple[str, str, str]] = []
+    n_ref = 0
+    for i, im in enumerate(images or [], 1):
+        if im.get("role") == ROLE_FIRST_FRAME:
+            out.append((ROLE_FIRST_FRAME, "<FIRST_FRAME>", f"Image{i}"))
+        else:
+            out.append((ROLE_REFERENCE, f"<IMAGE_REF_{n_ref}>", f"Image{i}"))
+            n_ref += 1
+    return out
+
+
+def omni_role_header(images: list[SentImage]) -> str:
+    """Déclaration explicite en tête du prompt (aucune image → "")."""
+    tags = omni_image_tags(images)
+    src = " ".join(f"{t}@{img}" for r, t, img in tags if r == ROLE_FIRST_FRAME)
+    refs = " ".join(f"{t}@{img}" for r, t, img in tags if r == ROLE_REFERENCE)
+    out = []
+    if src:
+        out.append(f"[# Sources {src}]")
+    if refs:
+        out.append(f"[# References {refs}]")
+    return " ".join(out)
+
+
+def omni_role_sentences(images: list[SentImage]) -> str:
+    """Phrases de fin officielles, une par rôle (aucune image → "")."""
+    tags = omni_image_tags(images)
+    out = [OMNI_ROLE_FIRST_FRAME.format(img=img) for r, _t, img in tags if r == ROLE_FIRST_FRAME]
+    refs = [img for r, _t, img in tags if r == ROLE_REFERENCE]
+    if refs:
+        names = refs[0] if len(refs) == 1 else ", ".join(refs[:-1]) + f" and {refs[-1]}"
+        out.append(OMNI_ROLE_REFERENCE.format(
+            imgs=names, a_ref="a reference" if len(refs) == 1 else "references"))
+    return " ".join(out)
+
+
+def omni_ref_tag(images: list[SentImage], k: int = 0) -> str:
+    """Balise de la k-ième référence envoyée ("" si absente)."""
+    refs = [t for r, t, _img in omni_image_tags(images) if r == ROLE_REFERENCE]
+    return refs[k] if k < len(refs) else ""
+
+
+def omni_has_first_frame(images: list[SentImage]) -> bool:
+    return any(im.get("role") == ROLE_FIRST_FRAME for im in images or [])
+# ================================================================ fin OMNI
 
 # GROK — xAI Grok Imagine Video 1.5 (image → vidéo, voix + lip-sync natifs).
 GROK = ModelProfile(

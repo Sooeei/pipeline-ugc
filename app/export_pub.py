@@ -43,6 +43,7 @@ AD_CHARACTER_FIELDS: tuple[str, ...] = ("persos", "characters", "personas")
 EXPORTABLE_STATUS = "pret"
 EXPORTABLE_KINDS = ("objet", "mashup", "avatar_omni", "avatar")
 
+_APOSTROPHES = re.compile("['’‘ʼ´`]")   # ' ’ ‘ ʼ ´ `
 _WIN_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
 
@@ -51,8 +52,11 @@ def slugify(text: Any, max_words: int = config_app.EXPORT_SLUG_MAX_WORDS,
             max_chars: int = config_app.EXPORT_SLUG_MAX_CHARS) -> str:
     """Slug ASCII (sans accents), minuscules, mots séparés par des tirets : les `max_words`
     premiers mots, coupé à `max_chars` caractères SANS couper un mot (sauf mot unique trop long).
-    Les didascalies entre crochets (« [rire] ») sont retirées. Vide si rien d'exploitable."""
+    Les didascalies entre crochets (« [rire] ») sont retirées. Les apostrophes (élisions) sont
+    supprimées SANS couper le mot : « aujourd'hui » → aujourdhui, « l'atelier » → latelier,
+    « c'est » → cest. Vide si rien d'exploitable."""
     s = re.sub(r"\[[^\]]*\]", " ", str(text or ""))
+    s = _APOSTROPHES.sub("", s)
     s = s.replace("œ", "oe").replace("Œ", "OE").replace("æ", "ae").replace("Æ", "AE")
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower()
     words = [w for w in re.split(r"[^a-z0-9]+", s) if w][: max(1, int(max_words))]

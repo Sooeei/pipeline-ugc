@@ -37,7 +37,10 @@ def _ad_with_clips(tmp_path, specs, name="Ma pub Jelly", kind="objet", personas=
 # ============================================================ slug / nommage
 def test_slugify_ascii_accents_and_limits():
     assert export_pub.slugify("Encore plein de commandes !") == "encore-plein-de-commandes"
-    assert export_pub.slugify("Été à l'œil, ça déchire grave aujourd'hui") == "ete-a-l-oeil-ca"
+    assert export_pub.slugify("Été à l'œil, ça déchire grave aujourd'hui") == "ete-a-loeil-ca-dechire"
+    # Élisions : l'apostrophe disparaît sans couper le mot (droite ’ ou typographique ’).
+    assert export_pub.slugify("Encore plein de commandes aujourd'hui !") ==         "encore-plein-de-commandes-aujourdhui"
+    assert export_pub.slugify("C’est l’atelier qu'on d'abord") == "cest-latelier-quon-dabord"
     assert export_pub.slugify("[rire] Salut toi") == "salut-toi"
     s = export_pub.slugify("Extraordinairement incroyablement merveilleusement fantastique")
     assert len(s) <= 40 and not s.endswith("-")
@@ -48,7 +51,7 @@ def test_clip_export_name_format():
     ad = {"name": "x", "personas": json.dumps({"characters": [{"n": 1, "name": "Blonde"}]})}
     clip = {"script": "Encore plein de commandes aujourd'hui, c'est fou", "speaker": 1}
     assert (export_pub.clip_export_name(1, 2, clip, ad)
-            == "01_blonde_encore-plein-de-commandes-aujourd.mp4")
+            == "01_blonde_encore-plein-de-commandes-aujourdhui.mp4")
     # Sans réplique : NN_<perso>.mp4
     assert export_pub.clip_export_name(3, 2, {"script": ""}, {"name": "x"}) == "03_plan.mp4"
 

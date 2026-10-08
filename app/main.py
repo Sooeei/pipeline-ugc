@@ -940,9 +940,15 @@ def create_app() -> FastAPI:
     @app.post("/api/avatar-omni/keyframe/mode/{clip_id}")
     def avatar_omni_keyframe_mode(clip_id: int, body: KeyframeModeIn) -> dict[str, Any]:
         """Mode du plan : « start_frame » (keyframe en 1re image Omni) | « texte_seul » (sans image)."""
-        _omni_clip_or_404(clip_id)
+        _clip, _ad = _omni_clip_or_404(clip_id)
         if body.mode not in config_app.OMNI_KEYFRAME_MODES:
             raise HTTPException(400, "Mode inconnu (start_frame | texte_seul).")
+        if (body.mode == "texte_seul" and int(_ad.get("pipeline_version") or 1) == 2
+                and avatar_video.effective_video_model(_ad, load_provider_config()) != "omni"):
+            # v2 : Grok / Kling partent TOUJOURS d'une image → refus tout de suite plutôt qu'au
+            # lancement de la vidéo (409 « texte seul n'existe qu'avec Google Omni »).
+            raise HTTPException(409, "Le mode « texte seul » n'existe qu'avec Google Omni : change "
+                                     "le modèle vidéo de la pub ou garde un keyframe.")
         db.update_clip(clip_id, keyframe_mode=body.mode)
         clip = db.get_clip(clip_id) or {}
         db.set_ad_keyframes_ok(int(clip["ad_id"]), False)

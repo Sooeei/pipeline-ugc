@@ -81,7 +81,8 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (sec === "library") loadLibrary();
     if (sec === "costs") loadCosts();
     if (sec === "settings") loadSettings();
-    if (sec === "new") populateNewPubSelectors();
+    if (sec === "new") { populateNewPubSelectors(); objClientRefresh(); }
+    if (sec === "clients") loadClientsPanel();
   });
 });
 
@@ -651,6 +652,9 @@ async function loadDashboard() {
   $("totalVideos").textContent = d.total_videos ?? "0";
   const ul = $("activityList");
   ul.innerHTML = "";
+  // Stack actuelle : les entrées d'activité liées à Gradium / HeyGen (ancien mode « Avatar ») ne
+  // sont plus affichées sur le tableau de bord (toujours en base).
+  d.activity = (d.activity || []).filter((a) => !/gradium|heygen/i.test(`${a.kind} ${a.message}`));
   (d.activity || []).forEach((a) => {
     const li = document.createElement("li");
     li.innerHTML =
@@ -1396,6 +1400,9 @@ $("objGenImagesBtn").addEventListener("click", async () => {
     return toast(e.message);
   }
   objAdId = res.ad_id;
+  // Client / persos choisis : liés à la pub (persos au format commun, dossier d'export).
+  if (objClientPresetId || objPersos.length)
+    clientPresetLinkAd(objAdId, objClientPresetId, objPersos.map((p) => p.id));
   $("objProgress").classList.remove("hidden");
   initObjProgress(objShots.slice(0, res.generated_now || 1));  // séquentiel : Plan 1 seulement
   pollObjJob(res.job_id, () => loadObjGallery(objAdId));
@@ -3061,6 +3068,7 @@ let aoPresetBible = null;    // bible des persos chargés (preset / bibliothèqu
 let aoPresetOptions = null;  // {video_model, voice_mode} du preset chargé (appliqués à la nouvelle pub)
 let aoCharSlotIds = {};      // perso N → id du personnage de la bibliothèque (preset / « Utiliser »)
 let aoPresetPlanches = {};   // perso N → planche_url (bibliothèque)
+let aoLoadedPresetId = null; // preset client chargé (lié à la pub créée)
 const aoRefObjUrls = new Map();   // File → objectURL (aperçu planche à côté du keyframe)
 const AO_EL_USD_PER_1K = 0.30;    // estimation ElevenLabs ($ / 1000 caractères) — même valeur que le backend
 const AO_VIDEO_MODEL_LABEL = { grok: "Grok Imagine", kling: "Kling 3.0", omni: "Omni (Google)" };
@@ -3961,6 +3969,8 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(aoPresetOptions),
     }).catch(() => { /* pub v1 ou options refusées : sans effet */ });
   }
+  // Preset client chargé : la pub est liée à son client (persos + dossier d'export).
+  if (aoLoadedPresetId) clientPresetLinkAd(aoAdId, aoLoadedPresetId);
   aoShowImgProgress();
   pollSceneJob(res.job_id, {
     ul: "aoSceneProgress", fill: "aoProgFill", count: "aoProgCount", unit: "images",
@@ -5233,6 +5243,7 @@ async function aoLoadPreset() {
       if (ch && $(prefix + "Gender"))
         aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" }));
     }
+    aoLoadedPresetId = p.id;
     msg.textContent = `✓ Preset « ${p.name} » chargé — il ne reste qu'à coller le script.`;
     $("aoScript").focus();
   } catch (e) {
@@ -5322,6 +5333,335 @@ if ($("aoPresetSaveBtn")) {
   });
 }
 
+// ================================================ CLIENTS (presets) & BIBLIOTHÈQUE DE PERSONNAGES
+// Communs à tous les modes. Perso au format {nom, image_ref, description, fiche_voix}.
+let charLibCache = [];          // personnages de la bibliothèque (GET /api/characters)
+let clientLoaded = null;        // preset client ouvert dans l'éditeur (réponse GET /api/presets/{id})
+let objClientPresetId = null;   // client choisi dans le formulaire Objet animé
+let objPersos = [];             // persos de la pub Objet animé [{id, nom, image_ref, description, fiche_voix, file}]
+let objClientRefFiles = [];     // photos de réf ajoutées par le client (retirées si on change de client)
+const CLIENT_PHOTO_KINDS = [["decor", "Décor"], ["produit", "Produit"], ["style", "Style"]];
+
+async function fetchCharLib() {
+  try { charLibCache = (await api("/api/characters")).characters || []; } catch (_) { charLibCache = []; }
+  return charLibCache;
+}
+
+async function fetchPresets() {
+  try { return (await api("/api/presets")).presets || []; } catch (_) { return []; }
+}
+
+function fillPresetSelect(sel, presets, emptyLabel, keep) {
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${esc(emptyLabel)}</option>` +
+    presets.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  const k = keep != null ? String(keep) : "";
+  if ([...sel.options].some((o) => o.value === k)) sel.value = k;
+}
+
+// Lie une pub à son client (persos + dossier d'export) — non bloquant.
+function clientPresetLinkAd(adId, presetId, characterIds) {
+  if (!adId) return;
+  const body = { preset_id: presetId || null };
+  if (Array.isArray(characterIds)) body.character_ids = characterIds;
+  api("/api/ads/" + adId + "/client-preset", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }).catch((e) => toast("Client non lié à la pub : " + e.message));
+}
+
+// ---- Page « Clients & persos »
+async function loadClientsPanel() {
+  await fetchCharLib();
+  renderCharLibGrid();
+  fillPresetSelect($("clientEditSel"), await fetchPresets(), "— Nouveau client —", $("clientEditSel").value);
+  await clientEditLoad($("clientEditSel").value);
+}
+
+function renderCharLibGrid() {
+  const box = $("charLibGrid");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!charLibCache.length) {
+    box.innerHTML = '<p class="muted small">Aucun personnage pour l’instant — crée le premier ci-dessus.</p>';
+    return;
+  }
+  charLibCache.forEach((ch) => {
+    const card = document.createElement("div");
+    card.className = "ao-charlib-card";
+    card.innerHTML =
+      (ch.planche_url ? `<img src="${esc(ch.planche_url)}" alt="${esc(ch.name)}" loading="lazy" />`
+        : `<div class="thumb empty">pas d'image</div>`) +
+      `<div class="ao-charlib-info"><b>${esc(ch.name)}</b>` +
+      (ch.description ? `<span class="muted small">${esc(ch.description)}</span>` : "") +
+      (ch.fiche_voix ? `<span class="muted small">🎙️ ${esc(ch.fiche_voix)}</span>` : "") + `</div>` +
+      `<div class="row"><button class="btn small" data-act="edit" type="button">✏️ Modifier</button>` +
+      `<button class="btn small danger-outline" data-act="del" type="button" title="Supprimer">🗑</button></div>`;
+    card.querySelector('[data-act="edit"]').addEventListener("click", () => charEditFill(ch));
+    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      const ok = await showModal({
+        title: "Supprimer ce personnage ?",
+        message: `Supprimer « ${ch.name} » de la bibliothèque (et son image) ? Les clients qui l'utilisent ne le chargeront plus.`,
+        confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api("/api/characters/" + ch.id, { method: "DELETE" });
+        if (String($("charEditId").value) === String(ch.id)) charEditFill(null);
+        loadClientsPanel();
+      } catch (e) { toast(e.message); }
+    });
+    box.appendChild(card);
+  });
+}
+
+function charEditFill(ch) {
+  $("charEditId").value = ch ? ch.id : "";
+  $("charEditName").value = ch ? ch.name || "" : "";
+  $("charEditDesc").value = ch ? ch.description || "" : "";
+  $("charEditVoice").value = ch ? ch.fiche_voix || "" : "";
+  $("charEditFile").value = "";
+  $("charEditMsg").textContent = ch ? `Modification de « ${ch.name} »` : "";
+  if (ch) $("charEditName").focus();
+}
+
+async function clientEditLoad(id) {
+  clientLoaded = null;
+  if (id) {
+    try { clientLoaded = await api("/api/presets/" + id); } catch (e) { toast(e.message); }
+  }
+  const d = (clientLoaded && clientLoaded.data) || {};
+  $("clientName").value = clientLoaded ? clientLoaded.name : "";
+  $("clientExportDir").value = d.export_dir || "";
+  $("clientProduct").value = d.product || "";
+  $("clientStyle").value = ["realiste", "3d"].includes(d.style) ? d.style : "";
+  $("clientAmbiance").value = d.ambiance || "";
+  $("clientPersona").value = d.persona || "";
+  const ph = $("clientPhotos");
+  ph.innerHTML = "";
+  CLIENT_PHOTO_KINDS.forEach(([k, label]) => {
+    const cell = document.createElement("div");
+    cell.className = "client-photo";
+    cell.innerHTML = `<label>Photo ${esc(label)} <input type="file" accept="image/*" id="clientPhoto_${k}" /></label>` +
+      (d[k + "_url"] ? `<div class="client-photo-cur"><img src="${esc(d[k + "_url"])}" alt="${esc(label)}" />` +
+        `<label class="check"><input type="checkbox" id="clientPhotoKeep_${k}" checked /> garder</label></div>` : "");
+    ph.appendChild(cell);
+  });
+  const cur = {};
+  (d.characters || []).forEach((c) => { cur[Number(c.n)] = c; });
+  const box = $("clientChars");
+  box.innerHTML = "";
+  for (let n = 1; n <= 4; n++) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const opts = `<option value="">—</option>` +
+      charLibCache.map((ch) => `<option value="${esc(ch.id)}">${esc(ch.name)}</option>`).join("");
+    row.innerHTML = `<label class="inline">Perso ${n} <select id="clientChar${n}">${opts}</select></label>` +
+      `<label class="check"><input type="checkbox" id="clientCharSpeaks${n}" /> parle</label>`;
+    box.appendChild(row);
+    const c = cur[n];
+    if (c) $("clientChar" + n).value = String(c.character_id);
+    $("clientCharSpeaks" + n).checked = c ? c.speaks !== false : n === 1;
+  }
+  $("clientDelBtn").disabled = !clientLoaded;
+}
+
+async function clientSave() {
+  const name = $("clientName").value.trim();
+  if (!name) return toast("Donne un nom au client.");
+  const base = Object.assign({}, (clientLoaded && clientLoaded.data) || {});
+  const characters = [];
+  for (let n = 1; n <= 4; n++) {
+    const id = $("clientChar" + n).value;
+    if (id) characters.push({ n, character_id: Number(id), speaks: $("clientCharSpeaks" + n).checked });
+  }
+  const data = Object.assign(base, {
+    characters,
+    export_dir: $("clientExportDir").value.trim(),
+    product: $("clientProduct").value.trim(),
+    style: $("clientStyle").value,
+    ambiance: $("clientAmbiance").value.trim(),
+    persona: $("clientPersona").value.trim(),
+  });
+  const fd = new FormData();
+  fd.append("name", name);
+  CLIENT_PHOTO_KINDS.forEach(([k]) => {
+    const input = $("clientPhoto_" + k);
+    const keep = $("clientPhotoKeep_" + k);
+    if (input && input.files && input.files[0]) fd.append(k, input.files[0], input.files[0].name);
+    if (!(keep && keep.checked)) delete data[k + "_url"];   // décoché / absent → photo retirée
+  });
+  fd.append("data", JSON.stringify(data));
+  try {
+    const p = await api("/api/presets", { method: "POST", body: fd });
+    $("clientMsg").textContent = `✓ Client « ${p.name} » enregistré (${characters.length} perso(s)).`;
+    fillPresetSelect($("clientEditSel"), await fetchPresets(), "— Nouveau client —", p.id);
+    await clientEditLoad(String(p.id));
+    aoLoadPresetList();
+    objClientRefresh();
+  } catch (e) { toast(e.message); }
+}
+
+if ($("charEditSave")) {
+  $("refreshClients").addEventListener("click", loadClientsPanel);
+  $("charEditReset").addEventListener("click", () => charEditFill(null));
+  $("charEditSave").addEventListener("click", async () => {
+    const name = $("charEditName").value.trim();
+    if (!name) return toast("Donne un nom au personnage.");
+    const fd = new FormData();
+    fd.append("name", name);
+    fd.append("description", $("charEditDesc").value.trim());
+    fd.append("fiche_voix", $("charEditVoice").value.trim());
+    const f = $("charEditFile").files && $("charEditFile").files[0];
+    if (f) fd.append("file", f, f.name);
+    const id = $("charEditId").value;
+    try {
+      const ch = await api("/api/characters" + (id ? "/" + id : ""), { method: id ? "PATCH" : "POST", body: fd });
+      charEditFill(null);
+      $("charEditMsg").textContent = `✓ « ${ch.name} » enregistré.`;
+      await loadClientsPanel();
+      aoLoadCharLib();
+      objClientRefresh();
+    } catch (e) { toast(e.message); }
+  });
+  $("clientEditSel").addEventListener("change", (ev) => { $("clientMsg").textContent = ""; clientEditLoad(ev.target.value); });
+  $("clientSaveBtn").addEventListener("click", clientSave);
+  $("clientDelBtn").addEventListener("click", async () => {
+    if (!clientLoaded) return;
+    const ok = await showModal({
+      title: "Supprimer ce client ?",
+      message: `Supprimer « ${clientLoaded.name} » ? Ses personnages restent dans la bibliothèque.`,
+      confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api("/api/presets/" + clientLoaded.id, { method: "DELETE" });
+      if (String(objClientPresetId) === String(clientLoaded.id)) objClientPresetId = null;
+      if (String(aoLoadedPresetId) === String(clientLoaded.id)) aoLoadedPresetId = null;
+      $("clientEditSel").value = "";
+      $("clientMsg").textContent = "Client supprimé.";
+      await loadClientsPanel();
+      aoLoadPresetList("");
+      objClientRefresh();
+    } catch (e) { toast(e.message); }
+  });
+}
+
+// ---- Objet animé : sélecteur « Client » + persos de la bibliothèque
+async function objClientRefresh() {
+  if (!$("objClientSel")) return;
+  fillPresetSelect($("objClientSel"), await fetchPresets(), "— Aucun client —", objClientPresetId);
+  await fetchCharLib();
+  $("objCharLibSel").innerHTML = `<option value="">— Choisir —</option>` +
+    charLibCache.map((ch) => `<option value="${esc(ch.id)}">${esc(ch.name)}</option>`).join("");
+}
+
+function objRemoveRefFile(file) {
+  const i = objRefsFiles.indexOf(file);
+  if (i >= 0) { objRefsFiles.splice(i, 1); objRefsKinds.splice(i, 1); }
+}
+
+function objAddRefFile(file, kind) {
+  objRefsFiles.push(file);
+  objRefsKinds.push(kind);
+}
+
+async function objAddPerso(p) {
+  if (objPersos.some((x) => String(x.id) === String(p.id))) return;
+  const perso = Object.assign({}, p, { file: null });
+  if (p.image_ref) {
+    try {
+      perso.file = await aoUrlToFile(p.image_ref, "perso_" + p.id);
+      objAddRefFile(perso.file, "visage");   // image du perso = réf « Visage » (apparence fidèle)
+    } catch (e) { toast(e.message); }
+  }
+  objPersos.push(perso);
+}
+
+function renderObjPersos() {
+  const box = $("objPersosList");
+  if (!box) return;
+  box.innerHTML = "";
+  objPersos.forEach((p, idx) => {
+    const chip = document.createElement("span");
+    chip.className = "ref-chip on";
+    chip.title = [p.description, p.fiche_voix ? "Voix : " + p.fiche_voix : ""].filter(Boolean).join(" — ");
+    chip.textContent = "👤 " + (p.nom || "Perso") + " ";
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ref-remove-inline";
+    rm.title = "Retirer ce perso de la pub";
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      if (p.file) objRemoveRefFile(p.file);
+      objPersos.splice(idx, 1);
+      renderObjPersos();
+      renderObjRefs();
+    });
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
+}
+
+async function objApplyClient(id) {
+  const msg = $("objClientMsg");
+  // On retire ce que l'ancien client avait ajouté (photos + persos), le reste du formulaire est gardé.
+  objClientRefFiles.forEach(objRemoveRefFile);
+  objClientRefFiles = [];
+  objPersos.forEach((p) => { if (p.file) objRemoveRefFile(p.file); });
+  objPersos = [];
+  objClientPresetId = null;
+  if (!id) {
+    msg.textContent = "";
+    renderObjRefs();
+    renderObjPersos();
+    return;
+  }
+  msg.textContent = "⏳ Chargement du client…";
+  try {
+    const p = await api("/api/presets/" + id);
+    const d = p.data || {};
+    if (d.product) $("objProduct").value = d.product;
+    if (d.ambiance) $("objAmbiance").value = d.ambiance;
+    if (d.persona) $("objPersona").value = d.persona;
+    for (const [k] of CLIENT_PHOTO_KINDS) {
+      if (!d[k + "_url"]) continue;
+      try {
+        const f = await aoUrlToFile(d[k + "_url"], "client_" + k);
+        objAddRefFile(f, k);
+        objClientRefFiles.push(f);
+      } catch (e) { toast(e.message); }
+    }
+    const items = (d.characters || []).slice().sort((a, b) => Number(a.n) - Number(b.n));
+    for (const item of items) {
+      if (item.perso) await objAddPerso(Object.assign({ id: item.character_id }, item.perso));
+    }
+    objClientPresetId = p.id;
+    msg.textContent = `✓ Client « ${p.name} » chargé (${objPersos.length} perso(s))` +
+      (d.export_dir ? ` · export : ${d.export_dir}` : "") + " — il ne reste qu'à coller le script.";
+    $("objScript").focus();
+  } catch (e) {
+    msg.textContent = "";
+    toast(e.message);
+  }
+  renderObjRefs();
+  renderObjPersos();
+}
+
+if ($("objClientSel")) {
+  $("objClientSel").addEventListener("change", (ev) => objApplyClient(ev.target.value));
+  $("objCharLibSel").addEventListener("change", async (ev) => {
+    const ch = charLibCache.find((c) => String(c.id) === ev.target.value);
+    ev.target.value = "";
+    if (!ch) return;
+    await objAddPerso({ id: ch.id, nom: ch.name, image_ref: ch.planche_url, description: ch.description, fiche_voix: ch.fiche_voix });
+    renderObjRefs();
+    renderObjPersos();
+    toast(`« ${ch.name} » ajouté à la pub ✓`);
+  });
+  $("objClientManageBtn").addEventListener("click", () => gotoSection("clients"));
+  objClientRefresh();
+}
+
 // Navigue vers une section en réutilisant le gestionnaire de clic de la barre latérale.
 function gotoSection(sec) {
   const btn = document.querySelector(`.nav-item[data-section="${sec}"]`);
@@ -5344,8 +5684,6 @@ async function maybeOnboarding() {
         "et colle leurs clés dans <b>Réglages</b> :</p>" +
         "<ul style='margin:6px 0 6px 18px'>" +
         "<li><b>Anthropic (Claude)</b> — le « cerveau » qui découpe tes scripts</li>" +
-        "<li><b>Gradium</b> — les voix</li>" +
-        "<li><b>HeyGen</b> — les vidéos avatar</li>" +
         "<li><b>OpenRouter</b> — images (Nano Banana) + vidéos mashup (Kling/Veo)</li>" +
         "<li><b>xAI (Grok)</b> — animation « objet » (voix + lip-sync)</li>" +
         "<li><b>Google (Gemini)</b> — « Avatar IA » Omni (vidéo + voix ; clé Google AI Studio, tier payant)</li>" +

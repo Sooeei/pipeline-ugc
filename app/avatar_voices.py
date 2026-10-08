@@ -232,6 +232,15 @@ def _require_v2(ad: dict[str, Any]) -> None:
                                  "ElevenLabs n'existe que pour les nouvelles pubs.")
 
 
+def _require_elevenlabs_mode(ad: dict[str, Any]) -> None:
+    """Pas d'audio ElevenLabs pour une pub en voix NATIVE (seul mode actif tant qu'ElevenLabs est
+    masqué, cf. config_app.ACTIVE_VOICE_MODES) : la voix vient du modèle vidéo, un audio
+    ElevenLabs serait payé pour rien (et fausserait clip_seconds)."""
+    if config_app.normalize_voice_mode(ad.get("voice_mode")) != "elevenlabs":
+        raise HTTPException(409, "Pub en voix native (voix du modèle vidéo) : l'étape Voix "
+                                 "ElevenLabs est désactivée.")
+
+
 def _preflight(cfg: ProviderConfig, ad: dict[str, Any], targets: list[dict[str, Any]],
                confirm: bool) -> dict[str, Any] | JSONResponse:
     """Clé, voice_id par perso, confirmation de coût. Renvoie l'estimation ou une réponse 400/409."""
@@ -268,6 +277,7 @@ def voices_generate(ad_id: int, body: VoicesGenerateIn) -> Any:
     cfg = _cfg()
     ad = _ad_or_404(ad_id)
     _require_v2(ad)
+    _require_elevenlabs_mode(ad)
     clips = db.clips_for_ad(ad_id)
     if not clips:
         raise HTTPException(400, "Aucun bloc dans cette pub.")
@@ -292,6 +302,7 @@ def voices_regenerate(clip_id: int, body: VoiceConfirmIn) -> Any:
     cfg = _cfg()
     clip, ad = _clip_or_404(clip_id)
     _require_v2(ad)
+    _require_elevenlabs_mode(ad)
     pre = _preflight(cfg, ad, [clip], body.confirm)
     if isinstance(pre, JSONResponse):
         return pre

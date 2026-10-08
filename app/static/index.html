@@ -22,6 +22,7 @@
         <button class="nav-item" data-section="new">✨ Nouvelle pub</button>
         <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
         <button class="nav-item" data-section="costs">💰 Coûts</button>
+        <button class="nav-item" data-section="modeles">🧩 Modèles</button>
         <button class="nav-item" data-section="settings">⚙️ Réglages</button>
       </nav>
       <div class="mode-badge" id="modeBadge">Mode : —</div>
@@ -246,6 +247,11 @@
               <div class="prog-count" id="objAnimProgCount"></div>
               <ul class="scene-progress" id="objAnimSceneProgress"></ul>
             </div>
+            <!-- Agent C : coût réel cumulé + export de la pub (app/static/outils_c.js) -->
+            <div id="objCostBox" class="pub-cost-box hidden"></div>
+            <div class="row">
+              <button class="btn" id="objExportBtn" type="button">📤 Exporter la pub</button>
+            </div>
           </div>
         </div><!-- /objetFlow -->
 
@@ -362,6 +368,11 @@
               <div class="progressbar"><div class="progressbar-fill" id="mashAnimProgFill"></div></div>
               <div class="prog-count" id="mashAnimProgCount"></div>
               <ul class="scene-progress" id="mashAnimSceneProgress"></ul>
+            </div>
+            <!-- Agent C : coût réel cumulé + export de la pub (app/static/outils_c.js) -->
+            <div id="mashCostBox" class="pub-cost-box hidden"></div>
+            <div class="row">
+              <button class="btn" id="mashExportBtn" type="button">📤 Exporter la pub</button>
             </div>
           </div>
         </div><!-- /mashupFlow -->
@@ -761,6 +772,32 @@
         </div>
       </section>
 
+      <!-- ---- MODÈLES (agent C : tableau généré depuis config_app.py + statut des clés) ---- -->
+      <section id="modeles" class="panel">
+        <header class="panel-head">
+          <h1>Modèles <span class="muted" style="font-size:14px;font-weight:400">— quel modèle sert à quoi, à quel prix</span></h1>
+          <div class="head-actions">
+            <button class="btn" id="refreshModeles">↻ Rafraîchir</button>
+          </div>
+        </header>
+        <div class="card-block">
+          <h2>Clés API</h2>
+          <p class="muted small">Les clés ne sont jamais affichées : seulement leur statut. La vérification
+            utilise des requêtes gratuites en lecture ; en mode simulation, aucun appel réseau.</p>
+          <div id="modelesKeys" class="key-status-list"></div>
+          <div class="row">
+            <button class="btn" id="checkKeysBtn" type="button">🔑 Vérifier les clés</button>
+            <span id="checkKeysMsg" class="muted small"></span>
+          </div>
+        </div>
+        <div class="card-block">
+          <h2>Modèles par mode et par étape</h2>
+          <p class="muted small">Tarifs estimés lus dans la configuration de l'app (config_app.py). « ✓ » = modèle
+            actuellement utilisé (choisi dans les Réglages ou imposé).</p>
+          <div id="modelesTable"></div>
+        </div>
+      </section>
+
       <!-- ---- RÉGLAGES ---- -->
       <section id="settings" class="panel">
         <header class="panel-head"><h1>Réglages</h1></header>
@@ -919,6 +956,39 @@
     </main>
   </div>
 
+  <!-- Agent C : fenêtre « Exporter la pub » (avant la modale générique pour qu'elle reste dessous) -->
+  <div id="exportOverlay" class="modal-overlay hidden">
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+      <h3 class="modal-title" id="exportTitle">📤 Exporter la pub</h3>
+      <div id="exportForm">
+        <label>Client <select id="exportClient"><option value="">— aucun —</option></select></label>
+        <label>Dossier d'export du client
+          <input type="text" id="exportDir" placeholder="Ex. D:\clients\Ho My Jelly\IA" />
+        </label>
+        <label>Sous-dossier de la pub
+          <input type="text" id="exportSubdir" placeholder="ADS1_nom-de-la-pub" />
+        </label>
+        <label class="check"><input type="checkbox" id="exportRemember" checked />
+          Mémoriser ce dossier pour ce client</label>
+        <div id="exportDest" class="muted small"></div>
+        <div id="exportConflict" class="hidden">
+          <p class="small">⚠ <b id="exportConflictN"></b> fichier(s) existent déjà dans ce dossier (jamais écrasés) :</p>
+          <label class="check"><input type="radio" name="exportConflict" value="suffix" checked />
+            Copier quand même avec un suffixe (<code>_2</code>, <code>_3</code>…)</label>
+          <label class="check"><input type="radio" name="exportConflict" value="skip" />
+            Ne pas copier ces fichiers (garder ceux déjà présents)</label>
+        </div>
+        <div id="exportFiles" class="export-files"></div>
+      </div>
+      <div id="exportResult" class="hidden"></div>
+      <div class="modal-actions">
+        <button class="btn hidden" id="exportOpenBtn" type="button">📂 Ouvrir le dossier</button>
+        <button class="btn" id="exportCancel" type="button">Fermer</button>
+        <button class="btn primary" id="exportGo" type="button">📤 Exporter</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modale intégrée (remplace les alert/confirm natifs du navigateur) -->
   <div id="modalOverlay" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -933,5 +1003,6 @@
 
   <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>
+  <script src="/static/outils_c.js"></script>
 </body>
 </html>

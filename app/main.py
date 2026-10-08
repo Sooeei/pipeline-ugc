@@ -71,6 +71,11 @@ def create_app() -> FastAPI:
     app.include_router(avatar_voices.router)
     app.include_router(avatar_video.router)
     app.include_router(presets.router)
+    # Agent C : export de la pub par client, coût de la pub (estimé / réel), page « Modèles ».
+    from . import cout_pub, export_pub, modeles
+    app.include_router(export_pub.router)
+    app.include_router(cout_pub.router)
+    app.include_router(modeles.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -108,6 +113,7 @@ def create_app() -> FastAPI:
 
         html = html.replace("/static/app.js", f"/static/app.js?v={_ver('app.js')}")
         html = html.replace("/static/style.css", f"/static/style.css?v={_ver('style.css')}")
+        html = html.replace("/static/outils_c.js", f"/static/outils_c.js?v={_ver('outils_c.js')}")
         return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
     # -------------------------------------------------- RÉGLAGES

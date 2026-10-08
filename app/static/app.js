@@ -1363,6 +1363,7 @@ function renderObjPlan(shots, est) {
     `≈ <b>$${(e.usd_images || 0).toFixed(2)}</b> pour les ${e.shots || shots.length} images ` +
     `<span class="muted">(Nano Banana : gratuit jusqu'à ~500/jour · animation Grok ensuite : ~$${(e.usd_video || 0).toFixed(2)} pour les plans validés)</span>` +
     `<div class="card-sub">Payé seulement en mode réel. En simulation : $0.</div>`;
+  if (window.renderPubEstimate) window.renderPubEstimate("objet", shots, $("objEstimate"));  // agent C
   $("objPlanArea").classList.remove("hidden");
 }
 
@@ -1463,6 +1464,7 @@ async function loadObjGallery(adId) {
   renderOverviewBanner(g, r, "objet", adId);
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(objShotCard(s)));
+  if (window.renderPubRealCost) window.renderPubRealCost(adId, $("objCostBox"));  // agent C
 }
 
 // JALON 3 — bannière « vue d'ensemble » : coût réel cumulé, échecs, reprise, alerte facturation.
@@ -1922,7 +1924,9 @@ function libAdHeader(ad, asset, hasFiles) {
   const dl =
     hasFiles && ad.id != null
       ? `<a class="btn small dl-all" href="/api/ads/${ad.id}/download?asset=${asset}" ` +
-        `title="Toutes les pièces de la pub dans un ZIP, numérotées (1, 2, 3…)">⬇ Télécharger tout (ZIP)</a>`
+        `title="Toutes les pièces de la pub dans un ZIP, numérotées (1, 2, 3…)">⬇ Télécharger tout (ZIP)</a>` +
+        // agent C : export des clips validés dans le dossier du client (outils_c.js)
+        (asset === "video" ? ` <button class="btn small btn-export-pub" type="button" data-ad-id="${ad.id}">📤 Exporter la pub</button>` : "")
       : "";
   return (
     `<div class="lib-ad-head"><h2>${esc(ad.name)} ` +
@@ -2729,6 +2733,7 @@ function renderMashPlan(shots, est) {
       `<b>Coût estimé :</b> ${usd(est.usd_total)} <span class="muted">(images ${usd(est.usd_images)} · ` +
       `animation vidéo ${usd(est.usd_video)} pour les plans validés)</span>`;
   }
+  if (window.renderPubEstimate) window.renderPubEstimate("mashup", shots, $("mashEstimate"));  // agent C
   $("mashPlanArea").classList.remove("hidden");
 }
 
@@ -2822,6 +2827,7 @@ async function loadMashGallery(adId) {
   renderOverviewBanner(g, r, "mashup", adId);
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(mashShotCard(s)));
+  if (window.renderPubRealCost) window.renderPubRealCost(adId, $("mashCostBox"));  // agent C
 }
 
 function mashShotCard(s) {

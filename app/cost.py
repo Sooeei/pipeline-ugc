@@ -449,6 +449,77 @@ def archives_list() -> dict[str, Any]:
     return {"archives": items}
 
 
+def estimate_pub(
+    kind: str, shots: list[dict[str, Any]], *, image_model: str = "",
+    words_per_sec: float | None = None, mashup_model: str = "",
+) -> dict[str, Any]:
+    """Estimation DÉTAILLÉE d'une pub AVANT lancement (agent C), en DOLLARS : 1 keyframe par plan
+    (tarif du modèle d'image CHOISI, COST_USD_PER_IMAGE) + la vidéo de chaque plan sur sa durée
+    estimée. Tous les tarifs viennent de config_app (aucun prix en dur ici).
+
+    - objet  : durée = temps naturel du dialogue (clip_seconds_for_dialogue) × tarif Grok/s
+               + image d'entrée Grok ;
+    - mashup : durée du plan adaptée au modèle (snap_mashup_duration) × tarif du modèle/s.
+    """
+    k = "mashup" if kind == "mashup" else "objet"
+    img_key = image_model or config_app.DEFAULT_OBJET_IMAGE_MODEL
+    usd_img = image_model_usd(img_key)
+    lines: list[dict[str, Any]] = []
+    if k == "objet":
+        rate = config_app.GROK_COST_PER_SECOND_USD
+        per_input = config_app.GROK_COST_USD_PER_INPUT_IMAGE
+        video_model = config_app.OBJET_VIDEO_MODELS[config_app.DEFAULT_OBJET_VIDEO_MODEL]["model"]
+        for i, s in enumerate(shots or [], 1):
+            secs = config_app.clip_seconds_for_dialogue(str(s.get("dialogue") or ""), words_per_sec)
+            lines.append({"n": int(s.get("n") or i), "seconds": secs,
+                          "usd_image": usd_img, "usd_video": secs * rate + per_input})
+    else:
+        mkey = mashup_model or config_app.DEFAULT_MASHUP_VIDEO_MODEL
+        rate = config_app.mashup_cost_per_second(mkey)
+        per_input = 0.0
+        video_model = config_app.mashup_model_cfg(mkey)["model"]
+        for i, s in enumerate(shots or [], 1):
+            secs = config_app.snap_mashup_duration(s.get("duration_s"), mkey)
+            lines.append({"n": int(s.get("n") or i), "seconds": secs,
+                          "usd_image": usd_img, "usd_video": secs * rate})
+    usd_images = sum(x["usd_image"] for x in lines)
+    usd_video = sum(x["usd_video"] for x in lines)
+    for x in lines:
+        x["usd_image"], x["usd_video"] = round(x["usd_image"], 3), round(x["usd_video"], 3)
+    img_cfg = config_app.OBJET_IMAGE_MODELS.get(img_key)
+    return {
+        "kind": k,
+        "shots": len(lines),
+        "seconds_total": sum(x["seconds"] for x in lines),
+        "usd_images": round(usd_images, 2),
+        "usd_video": round(usd_video, 2),
+        "usd_total": round(usd_images + usd_video, 2),
+        "lines": lines,
+        "image_model": img_cfg["model"] if img_cfg else img_key,
+        "video_model": video_model,
+        "tarif_image_usd": usd_img,
+        "tarif_video_usd_par_s": rate,
+        "tarif_image_entree_usd": per_input,
+    }
+
+
+def ad_real_cost(ad_id: int) -> dict[str, Any]:
+    """Coût RÉEL cumulé d'une pub (événements enregistrés après chaque génération réelle),
+    ventilé par service. La simulation n'enregistre rien → 0 $."""
+    agg: dict[str, dict[str, Any]] = {}
+    for r in db.cost_by_service_for_ad(ad_id):
+        s = agg.setdefault(r["service"], {"usd": 0.0, "units": {}})
+        s["usd"] += float(r["usd"] or 0)
+        s["units"][r["unit"]] = {"n": r["n"], "qty": r["qty"] or 0}
+    order = [s for s in _SERVICE_ORDER if s in agg] + [s for s in agg if s not in _SERVICE_ORDER]
+    services = [
+        {"service": s, "label": _SERVICE_LABELS.get(s, s),
+         "units": _units_label(s, agg[s]["units"]), "usd": round(agg[s]["usd"], 2)}
+        for s in order
+    ]
+    return {"usd": round(sum(x["usd"] for x in agg.values()), 2), "services": services}
+
+
 def archive_detail(archive_id: int) -> dict[str, Any] | None:
     """Détail complet d'une archive : métadonnées + rapport (par service / pub / total)."""
     a = db.get_cost_archive(archive_id)

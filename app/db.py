@@ -171,6 +171,14 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "cost_events": [("archive_id", "INTEGER")],
 }
 
+# Export de la pub (agent C) : dernière destination utilisée PAR PUB (mémorisée et pré-remplie).
+# Ajout à la suite (idempotent : init_db ne crée que les colonnes absentes).
+_MIGRATIONS["ads"] += [
+    ("export_dir", "TEXT DEFAULT ''"),        # dossier client de base (ex. D:\clients\X\IA)
+    ("export_subdir", "TEXT DEFAULT ''"),     # sous-dossier de la pub (ex. ADS3_ma-pub)
+    ("export_preset_id", "INTEGER"),          # preset client choisi pour l'export (export_dir)
+]
+
 
 def connect() -> sqlite3.Connection:
     config_app.ensure_dirs()
@@ -507,6 +515,7 @@ _ALLOWED_AD_COLS = {
     "pipeline_version", "voice_mode", "video_model", "voices_ok",
     "final_path", "final_audio_path",
 }
+_ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # export de la pub
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -987,6 +996,23 @@ def recent_activity(limit: int = 20) -> list[dict[str, Any]]:
     try:
         rows = con.execute(
             "SELECT ts, kind, message FROM activity ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- coût réel PAR PUB (agent C)
+def cost_by_service_for_ad(ad_id: int) -> list[dict[str, Any]]:
+    """Coût RÉEL cumulé d'UNE pub, ventilé par (service, unité), archives COMPRISES (le coût
+    d'une pub ne doit pas « disparaître » quand on archive la période des Coûts)."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT service, unit, COUNT(*) AS n, COALESCE(SUM(qty),0) AS qty, "
+            "COALESCE(SUM(usd),0) AS usd, COALESCE(SUM(credits),0) AS credits "
+            "FROM cost_events WHERE ad_id=? GROUP BY service, unit",
+            (ad_id,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

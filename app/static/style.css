@@ -555,3 +555,21 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 #aoFinalLinks { gap: 8px; flex-wrap: wrap; }
 .ao-lib-media.v2 { grid-template-columns: 1fr 1fr 1fr; }
 .ao-lib-final { gap: 8px; margin: 4px 0 8px; }
+
+/* ---------- Agent C : export de la pub, coût d'une pub, page Modèles ---------- */
+.modal.wide { max-width: 720px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.modal.wide .modal-body, #exportResult { white-space: normal; }
+.export-files ul { margin: 4px 0 10px; padding-left: 18px; max-height: 220px; overflow-y: auto; font-size: 13px; }
+.pub-cost-est { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.pub-cost-est .cost-table { margin: 6px 0; font-size: 13px; }
+.pub-cost-box { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.pub-cost-services { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.key-status-list { display: grid; gap: 8px; margin: 8px 0 12px; }
+.key-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.key-status .key-name { min-width: 260px; }
+.key-status .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+.key-status .badge.ok { color: #0c1a10; background: var(--ok); font-weight: 600; border-color: transparent; }
+.key-status .badge.ko { color: #1a0c0c; background: var(--err); font-weight: 600; border-color: transparent; }
+.key-status .badge.warn { color: #1a1200; background: var(--warn); font-weight: 600; border-color: transparent; }
+.modeles-table tr.inactif td { color: var(--muted); }
+.modeles-table td code { font-size: 12px; }

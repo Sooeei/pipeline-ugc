@@ -869,6 +869,16 @@ def voice_extra_warning(profile: Any, product: str = "") -> str:
     return (f"Fiche voix : « {extra} » ressemble à un nom de marque/produit — il n'est PAS envoyé "
             "à Google. Mets plutôt une consigne de voix (ex. « légèrement voilée »).")
 
+# ---------- Export de la pub (agent C, app/export_pub.py) ----------
+# Dossier d'export proposé par défaut pour un client (nom de preset normalisé : minuscules, sans
+# accents) quand son preset n'a pas encore d'`export_dir`. Le sous-dossier ADSx_<pub> est ajouté.
+EXPORT_DIR_DEFAULTS: dict[str, str] = {
+    "oh my jelly": r"D:\clients\Ho My Jelly\IA",
+    "ho my jelly": r"D:\clients\Ho My Jelly\IA",
+}
+EXPORT_SLUG_MAX_WORDS = 5     # début de réplique dans le nom de fichier : ~5 premiers mots…
+EXPORT_SLUG_MAX_CHARS = 40    # … et 40 caractères max
+
 # En mode simulation, on ne touche à aucune API et on ne dépense aucun crédit.
 # Par défaut ON (True) tant que les vraies clés n'ont pas été testées.
 DEFAULT_DRY_RUN = True

@@ -268,6 +268,9 @@ def _clean_preset_data(data: dict[str, Any]) -> dict[str, Any]:
         out["voice_mode"] = config_app.normalize_voice_mode(data.get("voice_mode"))
     if data.get("video_model"):
         out["video_model"] = config_app.normalize_avatar_video_model(data.get("video_model"))
+    # Dossier d'export du client (bouton « Exporter la pub », app/export_pub.py).
+    if _clean_text(data.get("export_dir"), 500):
+        out["export_dir"] = _clean_text(data.get("export_dir"), 500)
     for kind in _PRESET_PHOTO_KINDS:   # URL conservée seulement si elle pointe sur nos médias
         url = str(data.get(f"{kind}_url") or "")
         if url.startswith("/media/presets/"):

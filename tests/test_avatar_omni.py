@@ -455,12 +455,14 @@ def test_regenerate_image_passes_character_ref(monkeypatch, kind, route, prefix)
         assert r.status_code == 200, r.text
         _wait(c, r.json()["job_id"])
         prompt, refs = calls[-1]
-        assert prompt.startswith(prefix) and refs[0] == "fake/1.png"
+        # Le préfixe est le bloc « rôles des images » de la fiche Nano Banana (espaces de fin
+        # retirés, blocs séparés par une ligne vide).
+        assert prompt.startswith(prefix.rstrip()) and refs[0] == "fake/1.png"
         # régénère la référence elle-même → pas de character_ref ni de préfixe
         r = c.post(f"{route}/{ids[0]}", json={})
         _wait(c, r.json()["job_id"])
         prompt, refs = calls[-1]
-        assert not prompt.startswith(prefix) and "fake/1.png" not in refs
+        assert not prompt.startswith(prefix.rstrip()) and "fake/1.png" not in refs
 
 
 def test_regenerate_image_uses_anchor_as_reference(monkeypatch):

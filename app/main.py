@@ -38,6 +38,7 @@ from . import (
     media,
     pipeline,
     presets,
+    prompt_profiles,
 )
 from . import providers as prov
 from .settings_service import load_provider_config
@@ -531,15 +532,18 @@ def create_app() -> FastAPI:
         if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
             raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
         desc = config_app.objet_style_desc(key)
-        prompt = brain.scrub_brand_names(
-            f"A cute friendly mascot character of a generic product bottle in {desc}, big soulful "
-            f"expressive eyes and a clearly visible expressive mouth, on a clean kitchen counter, "
-            f"vertical 9:16. No text, letters or watermark on the image."
-        )
+        # Fiche Nano Banana Pro : sujet (+ mascotte posée, ombre de contact) → interdits.
+        prompt = brain.scrub_brand_names(prompt_profiles.nano_banana_prompt({
+            prompt_profiles.B_SUBJECT: (
+                f"A cute friendly mascot character of a generic product bottle in {desc}, big soulful "
+                f"expressive eyes and a clearly visible expressive mouth, on a clean kitchen counter, "
+                f"vertical 9:16. {prompt_profiles.NB_GROUNDING}"),
+            prompt_profiles.B_NEGATIVES: "No text, letters or watermark on the image.",
+        }))
         try:
             path = prov.nano_banana_generate_image(
                 cfg, prompt, [], out, label="Aperçu style",
-                subtitle=config_app.OBJET_STYLES[key]["label"],
+                subtitle=config_app.OBJET_STYLES[key]["label"], image_roles=[],
             )
         except prov.ProviderError as exc:
             raise HTTPException(502, str(exc)) from exc  # message fournisseur déjà clair

@@ -711,9 +711,23 @@ def _short_response(data: Any, limit: int = 1200) -> str:
     return txt[:limit]
 
 
+def _enforce_preflight(cfg: ProviderConfig, issues: list[prompt_profiles.PreflightIssue]) -> None:
+    """Applique le contrôle avant envoi : avertissements → app.log (le journal des générations
+    les garde aussi) ; une issue « error » BLOQUE l'envoi RÉEL (ProviderError FR, aucun crédit
+    dépensé) mais jamais en simulation, où elle est seulement journalisée."""
+    for i in issues:
+        _log_detail(f"Contrôle avant envoi [{i.get('level')}/{i.get('code')}] : {i.get('message')}")
+    errors = [i for i in issues if i.get("level") == "error"]
+    if errors and not cfg.dry_run:
+        raise ProviderError("Envoi bloqué avant génération (aucun crédit dépensé) : "
+                            + " ".join(str(e.get("message") or "") for e in errors))
+
+
 def nano_banana_final_prompt(prompt_image: str) -> str:
-    """Texte EXACT envoyé à Nano Banana (prompt du plan + consigne de format)."""
-    return f"{prompt_image}\n\nOutput a vertical 9:16 (1K) image."
+    """Texte EXACT envoyé à Nano Banana : prompt du plan puis consigne de format, assemblés
+    dans l'ordre de la fiche Nano Banana Pro."""
+    return prompt_profiles.nano_banana_prompt({prompt_profiles.B_SUBJECT: prompt_image,
+                                               prompt_profiles.B_OUTPUT_FORMAT: prompt_profiles.NB_OUTPUT_FORMAT})
 
 
 def nano_banana_model_id(cfg: ProviderConfig) -> str:
@@ -740,6 +754,7 @@ def nano_banana_generate_image(
     sent = prompt_profiles.sent_images(refs, image_roles, prompt_profiles.ROLE_REFERENCE)
     final = nano_banana_final_prompt(prompt_image)
     issues = prompt_profiles.preflight("nano_banana_pro", final, images=sent)
+    _enforce_preflight(cfg, issues)
     path = _nano_banana_generate_image(cfg, prompt_image, refs, out_path, label, subtitle, index)
     gen_trace.record(kind="image", model=nano_banana_model_id(cfg), prompt=final, images=sent,
                      params={"aspect": "9:16", "size": "1K"}, dry_run=cfg.dry_run,
@@ -963,6 +978,7 @@ def grok_generate_video(
     envoyée est TOUJOURS la start frame. `dialogue` = réplique attendue (contrôle d'intégrité)."""
     sent = prompt_profiles.sent_images([str(image_path)], None, prompt_profiles.ROLE_FIRST_FRAME)
     issues = prompt_profiles.preflight("grok", prompt_motion, images=sent, dialogue=dialogue)
+    _enforce_preflight(cfg, issues)
     path = _grok_generate_video(cfg, image_path, prompt_motion, out_mp4, model_value, seconds,
                                 label, index, resolution)
     gen_trace.record(kind="video", model=model_value, prompt=prompt_motion, images=sent,
@@ -1526,6 +1542,7 @@ def omni_generate_video(
     """Génère une vidéo Omni : contrôle avant envoi + journal (simulation comprise)."""
     sent = omni_sent_images(image_path, anchor_path)
     issues = prompt_profiles.preflight("omni", prompt, images=sent, dialogue=dialogue)
+    _enforce_preflight(cfg, issues)
     res = _omni_generate_video(cfg, image_path, prompt, out_mp4, seconds, anchor_path, model_value,
                                label, index, store, resolution)
     gen_trace.record(kind="video", model=model_value, prompt=prompt, images=sent,
@@ -1600,6 +1617,7 @@ def omni_extend_video(
 ) -> dict[str, Any]:
     """Tour d'extension Omni : contrôle avant envoi + journal (simulation comprise)."""
     issues = prompt_profiles.preflight("omni", prompt, images=[], dialogue=dialogue)
+    _enforce_preflight(cfg, issues)
     res = _omni_extend_video(cfg, previous_interaction_id, prompt, out_mp4, seconds, model_value,
                              label, index, resolution)
     gen_trace.record(kind="video", model=model_value, prompt=prompt, images=[],

@@ -59,6 +59,12 @@ def sent_images(paths: list[str], roles: list[str] | None, default_role: str) ->
 
 
 # ---------------------------------------------------------------- fiche d'un modèle
+# Combinaison interdite : (motif A, motif B, message FR). Motifs regex anglais, insensibles à la
+# casse, cherchés HORS dialogue ; une occurrence niée (« no music », « without a pan ») ne compte
+# pas. Les combinaisons génériques vivent dans app/prompt_checks.py ; un profil peut en ajouter.
+ForbiddenCombination = tuple[str, str, str]
+
+
 @dataclass(frozen=True)
 class ModelProfile:
     key: str                                   # "omni" | "grok" | "nano_banana_pro"
@@ -69,15 +75,30 @@ class ModelProfile:
     limits: dict[str, Any] = field(default_factory=dict)
     verified_on: str = ""                      # date de vérification des limites / prix
     sources: tuple[str, ...] = ()
+    # --- champs génériques du contrôle avant envoi (app/prompt_checks.py) ---
+    max_images: int | None = None              # nb max d'images par appel (None = pas de contrôle)
+    prompt_words: tuple[int, int] = (60, 150)  # longueur raisonnable HORS dialogue (avertissement)
+    forbidden_combinations: tuple[ForbiddenCombination, ...] = ()
+    allowed_roles: tuple[str, ...] = IMAGE_ROLES   # rôles d'images acceptés par ce modèle
+    rules: tuple[str, ...] = ()                # fiche lisible (FR) : consignes de rédaction
+    # --- mise en forme d'assemble() ---
+    block_separator: str = " "                 # séparateur entre blocs
+    collapse_whitespace: bool = True           # False : garde les sauts de ligne INTERNES d'un bloc
+
+
+def _clean_block(profile: ModelProfile, text: Any) -> str:
+    raw = str(text or "")
+    return " ".join(raw.split()) if profile.collapse_whitespace else raw.strip()
 
 
 def assemble(profile: ModelProfile, blocks: dict[str, str]) -> str:
-    """Prompt final : blocs non vides dans l'ordre fixe du modèle, séparés par une espace.
-    Un bloc inconnu du profil est ajouté à la fin (jamais perdu)."""
-    out = [" ".join(str(blocks[k]).split()) for k in profile.block_order if str(blocks.get(k) or "").strip()]
-    out += [" ".join(str(v).split()) for k, v in blocks.items()
+    """Prompt final : blocs non vides dans l'ordre fixe du modèle, séparés par
+    `profile.block_separator` (une espace par défaut). Un bloc inconnu du profil est ajouté à
+    la fin (jamais perdu)."""
+    out = [_clean_block(profile, blocks[k]) for k in profile.block_order if str(blocks.get(k) or "").strip()]
+    out += [_clean_block(profile, v) for k, v in blocks.items()
             if k not in profile.block_order and str(v or "").strip()]
-    return " ".join(out)
+    return profile.block_separator.join(out)
 
 
 # ---------------------------------------------------------------- profils (remplis par modèle)
@@ -98,11 +119,70 @@ GROK = ModelProfile(
 )
 
 # NANO BANANA PRO — google/gemini-3-pro-image-preview via OpenRouter (keyframes / start frames).
+# Ordre des blocs (image) : rôles des images (légende des réfs, retouche d'ancre, réf principale,
+# cohérence) → cadrage → sujet (description du plan + objet posé) → interdits → format de sortie.
+# Les blocs propres à la vidéo (plan unique, jeu, audio, phrases de rôle) restent vides.
+B_OUTPUT_FORMAT = "output_format"    # Nano Banana : consigne de format, toujours en dernier
+
+NB_OUTPUT_FORMAT = "Output a vertical 9:16 (1K) image."
+# Start frames (anglais, collés tels quels) :
+NB_GROUNDING = "The object rests on a real surface with a soft contact shadow, never floating."
+NB_FRAMING_SPOKEN = "spoken"         # plan parlé
+NB_FRAMING_PRODUCT = "product"       # plan produit / macro
+NB_FRAMING_WIDE = "wide"             # plan large
+NB_FRAMINGS: dict[str, str] = {
+    NB_FRAMING_SPOKEN: "Framing: close-up or tight medium shot of the speaking character, "
+                       "mouth clearly visible.",
+    NB_FRAMING_PRODUCT: "Framing: close-up product shot, the product large and sharp in frame.",
+    NB_FRAMING_WIDE: "Framing: wide shot showing the whole scene.",
+}
+NB_NO_FOREIGN_TEXT_REF1 = "No text, labels or logos that are not on reference image 1."
+NB_NO_FOREIGN_TEXT_REFS = "No text, labels or logos that are not on the reference images."
+NB_NO_TEXT = "No text, labels or logos."
+
 NANO_BANANA_PRO = ModelProfile(
     key="nano_banana_pro", label="Nano Banana Pro", model_id="google/gemini-3-pro-image-preview",
-    limits={"usd_per_image": 0.134},
+    block_order=(*BLOCK_ORDER, B_OUTPUT_FORMAT),
+    anti_defects=(NB_GROUNDING, NB_NO_FOREIGN_TEXT_REF1),
+    limits={
+        "usd_per_image": 0.134,               # 1K/2K = 1120 tokens × 0,00012 $ (OpenRouter)
+        "usd_per_image_4k": 0.24,             # 4K = 2000 tokens
+        "max_ref_images": 14,                 # total accepté par Google
+        "max_object_refs_hifi": 6,            # objets reproduits en haute fidélité
+        "max_character_refs": 5,              # personnes / persos (cohérence)
+        "max_style_refs": 3,
+        "sizes": ("1K", "2K", "4K"),          # l'app demande du 1K
+        "aspect": "9:16",
+    },
     verified_on="2026-10-08",
+    sources=(
+        "https://ai.google.dev/gemini-api/docs/image-generation — Gemini 3 Pro Image : jusqu'à 14 "
+        "images de référence (6 objets haute fidélité, 5 personnages, 3 styles)",
+        "GET https://openrouter.ai/api/v1/models — google/gemini-3-pro-image-preview : entrée "
+        "text+image, image_output 0,00012 $/token, aucune limite d'images par requête annoncée",
+    ),
+    max_images=14,
+    # Les prompts image portent la légende des réfs (et la bible Avatar IA) : plage plus large.
+    prompt_words=(30, 250),
+    allowed_roles=(ROLE_ANCHOR, ROLE_MAIN_REF, ROLE_CHARACTER, ROLE_REFERENCE),
+    rules=(
+        "Rôle de chaque image nommé en tête (« reference image N = … ») ; l'ancre à retoucher et "
+        "la réf principale sont toujours l'image 1.",
+        "Un seul plan, décrit en anglais ; aucun nom de marque ni de studio.",
+        "Objets et mascottes posés sur une vraie surface avec une ombre de contact douce.",
+        "Cadrage selon le type de plan : parlé → gros plan / médium serré bouche visible ; "
+        "produit → gros plan produit ; plan large → wide.",
+        "Aucun texte, étiquette ni logo absent de la référence 1.",
+    ),
+    block_separator="\n\n",
+    collapse_whitespace=False,
 )
+
+
+def nano_banana_prompt(blocks: dict[str, str]) -> str:
+    """Prompt image Nano Banana assemblé dans l'ordre fixe de sa fiche (blocs séparés par une
+    ligne vide, sauts de ligne internes conservés)."""
+    return assemble(NANO_BANANA_PRO, blocks)
 
 PROFILES: dict[str, ModelProfile] = {p.key: p for p in (OMNI, GROK, NANO_BANANA_PRO)}
 

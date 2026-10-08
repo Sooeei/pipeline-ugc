@@ -333,7 +333,9 @@ class ExportIn(BaseModel):
 def export_preview(ad_id: int, export_dir: str = "", subdir: str = "",
                    preset_id: int | None = None) -> dict[str, Any]:
     ad = _get_ad_or_404(ad_id)
-    pid = preset_id if preset_id is not None else ad.get("export_preset_id")
+    # Client : choisi à l'export > dernier client d'export > client lié à la pub (preset client).
+    pid = preset_id if preset_id is not None else (
+        ad.get("export_preset_id") or ad.get("client_preset_id"))
     base = export_dir.strip() or default_export_dir(ad, pid)
     # Sous-dossier mémorisé seulement s'il appartient au même dossier client.
     sub = subdir.strip() or (

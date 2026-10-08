@@ -178,6 +178,16 @@ _MIGRATIONS["ads"] += [
     ("export_subdir", "TEXT DEFAULT ''"),     # sous-dossier de la pub (ex. ADS3_ma-pub)
     ("export_preset_id", "INTEGER"),          # preset client choisi pour l'export (export_dir)
 ]
+# Presets client (tous modes) + bibliothèque de personnages — ajoutés à la suite (idempotent).
+_MIGRATIONS.setdefault("characters", []).extend([
+    # Fiche voix TEXTE libre du perso (« femme 30 ans, voix posée, accent du Sud… ») : format
+    # perso commun {nom, image_ref, description, fiche_voix}. voice_profile (JSON) reste à côté.
+    ("fiche_voix", "TEXT DEFAULT ''"),
+])
+_MIGRATIONS["ads"].extend([
+    ("client_preset_id", "INTEGER"),      # preset client appliqué à la pub (export_dir, persos…)
+    ("preset_characters", "TEXT"),        # JSON : persos [{nom, image_ref, description, fiche_voix}]
+])
 
 
 def connect() -> sqlite3.Connection:
@@ -537,6 +547,7 @@ _ALLOWED_AD_COLS = {
     "anchor_edit", "characters",   # Objet animé : retouche de l'ancre + persos parlants
 }
 _ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # export de la pub
+_ALLOWED_AD_COLS |= {"client_preset_id", "preset_characters"}   # presets client (tous modes)
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -947,7 +958,8 @@ def count_clips(status: str | None = None) -> int:
 
 
 # ---------------------------------------------------------------- personnages (bibliothèque)
-_CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible"}
+_CHARACTER_COLS = {"name", "description", "planche_path", "voice_id", "voice_profile", "bible",
+                   "fiche_voix"}
 
 
 def _now_iso() -> str:
@@ -956,15 +968,17 @@ def _now_iso() -> str:
 
 def create_character(
     name: str, description: str = "", planche_path: str = "", voice_id: str = "",
-    voice_profile: str = "", bible: str = "",
+    voice_profile: str = "", bible: str = "", fiche_voix: str = "",
 ) -> int:
-    """Crée un personnage réutilisable. `voice_profile` = fiche voix en JSON (str)."""
+    """Crée un personnage réutilisable. `voice_profile` = fiche voix en JSON (str) ;
+    `fiche_voix` = fiche voix en texte libre."""
     con = connect()
     try:
         cur = con.execute(
             "INSERT INTO characters(name, description, planche_path, voice_id, voice_profile, "
-            "bible, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (name, description, planche_path, voice_id, voice_profile, bible, _now_iso()),
+            "bible, fiche_voix, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, description, planche_path, voice_id, voice_profile, bible, fiche_voix,
+             _now_iso()),
         )
         con.commit()
         return int(cur.lastrowid or 0)

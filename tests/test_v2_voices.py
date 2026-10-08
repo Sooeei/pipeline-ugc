@@ -118,9 +118,17 @@ def test_subscription_and_dry_run_helpers(monkeypatch):
 
 
 # ============================================================ job voix + endpoints
+@pytest.fixture
+def elevenlabs_on(monkeypatch):
+    """Réactive le mode voix ElevenLabs (masqué dans l'app, code conservé) pour tester l'étape
+    Voix : sans lui, les endpoints Voix refusent (409) une pub en voix native."""
+    monkeypatch.setattr(config_app, "ACTIVE_VOICE_MODES", ("native", "elevenlabs"))
+
+
 def _v2_ad(voice_id="voixA"):
     ad_id = db.create_ad("pubv2", "", "[]", kind="avatar_omni")
-    db.set_ad_fields(ad_id, pipeline_version=2, video_model="kling", voice_profiles=json.dumps(
+    db.set_ad_fields(ad_id, pipeline_version=2, video_model="kling", voice_mode="elevenlabs",
+                     voice_profiles=json.dumps(
         {"1": {"voice_id": voice_id}, "2": {"voice_id": voice_id + "2"}}))
     c1 = db.create_clip(ad_id, 1, "Bonjour, c'est moi qui parle en premier ici.", "")
     c2 = db.create_clip(ad_id, 2, "Et moi je réponds juste après.", "")
@@ -161,7 +169,7 @@ def _wait(job_id):
     raise AssertionError("job pas terminé")
 
 
-def test_endpoints_validate_all_dialogue_and_voice_invalidation():
+def test_endpoints_validate_all_dialogue_and_voice_invalidation(elevenlabs_on):
     ad_id, c1, c2 = _v2_ad()
     with TestClient(app) as c:
         c.post("/api/settings", json={"dry_run": True})
@@ -198,7 +206,7 @@ def test_endpoints_validate_all_dialogue_and_voice_invalidation():
         assert c.get("/api/elevenlabs/preview/simuVoixFemme01").status_code == 200
 
 
-def test_generate_requires_confirm_outside_dry_run_and_v2(monkeypatch):
+def test_generate_requires_confirm_outside_dry_run_and_v2(monkeypatch, elevenlabs_on):
     ad_id, _c1, _c2 = _v2_ad()
     monkeypatch.setattr(avatar_voices, "_cfg",
                         lambda: ProviderConfig(dry_run=False, elevenlabs_api_key="k"))

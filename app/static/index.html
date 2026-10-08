@@ -14,13 +14,14 @@
         <div class="logo">▶</div>
         <div>
           <div class="brand-title">Pipeline UGC</div>
-          <div class="brand-sub">Gradium → HeyGen</div>
+          <div class="brand-sub">Studio de pubs IA</div>
         </div>
       </div>
       <nav>
         <button class="nav-item active" data-section="dashboard">📊 Tableau de bord</button>
         <button class="nav-item" data-section="new">✨ Nouvelle pub</button>
         <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
+        <button class="nav-item" data-section="clients">👥 Clients &amp; persos</button>
         <button class="nav-item" data-section="costs">💰 Coûts</button>
         <button class="nav-item" data-section="modeles">🧩 Modèles</button>
         <button class="nav-item" data-section="settings">⚙️ Réglages</button>
@@ -156,6 +157,20 @@
 
         <!-- ============ FLUX OBJET ANIMÉ ============ -->
         <div id="objetFlow" class="hidden">
+          <!-- Preset client : refs, persos, ambiance, produit, dossier d'export → il ne reste que le script -->
+          <div class="card-block ao-presets" id="objClientBox">
+            <div class="row">
+              <label class="inline">👤 Client
+                <select id="objClientSel"><option value="">— Aucun client —</option></select>
+              </label>
+              <label class="inline">Ajouter un perso de la bibliothèque
+                <select id="objCharLibSel"><option value="">— Choisir —</option></select>
+              </label>
+              <button class="btn small" id="objClientManageBtn" type="button">👥 Gérer clients &amp; persos</button>
+            </div>
+            <div id="objClientMsg" class="muted small"></div>
+            <div id="objPersosList" class="obj-persos"></div>
+          </div>
           <h2>2. Ton produit</h2>
           <div class="row grid2">
             <label>Nom du produit <span class="muted">(optionnel)</span>
@@ -738,6 +753,67 @@
         <div class="lib-panel hidden" data-libpanel="avatar_omni"><div id="libAvatarOmniContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="voices"><div id="libVoicesContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
+      </section>
+
+      <!-- ---- CLIENTS (presets) & BIBLIOTHÈQUE DE PERSONNAGES (tous modes) ---- -->
+      <section id="clients" class="panel">
+        <header class="panel-head">
+          <h1>Clients &amp; personnages</h1>
+          <button class="btn" id="refreshClients">↻ Rafraîchir</button>
+        </header>
+        <p class="muted">Un <b>client</b> (preset) regroupe ses personnages, ses photos de réf (décor, produit, style),
+          son ambiance et son dossier d'export. Choisis-le dans <b>Objet animé</b> ou <b>Avatar IA</b> : il ne reste
+          qu'à coller le script. Les <b>personnages</b> sont réutilisables entre pubs et clients.</p>
+
+        <h2>Personnages</h2>
+        <div class="card-block" id="charEditor">
+          <input type="hidden" id="charEditId" value="" />
+          <div class="row grid2">
+            <label>Nom <input type="text" id="charEditName" maxlength="80" placeholder="Ex. Julie, la tasse Mug…" /></label>
+            <label>Image de réf (planche / visage)
+              <input type="file" id="charEditFile" accept="image/*" />
+            </label>
+          </div>
+          <label>Description (apparence, rôle)
+            <textarea id="charEditDesc" rows="2" placeholder="Ex. femme 35 ans, cheveux châtains, pull crème…"></textarea>
+          </label>
+          <label>Fiche voix (texte)
+            <textarea id="charEditVoice" rows="2" placeholder="Ex. voix féminine posée, chaleureuse, légèrement souriante, débit naturel…"></textarea>
+          </label>
+          <div class="row">
+            <button class="btn primary" id="charEditSave" type="button">💾 Enregistrer le personnage</button>
+            <button class="btn" id="charEditReset" type="button">Nouveau</button>
+            <span id="charEditMsg" class="muted small"></span>
+          </div>
+        </div>
+        <div id="charLibGrid" class="ao-charlib-list"></div>
+
+        <h2>Clients (presets)</h2>
+        <div class="row">
+          <select id="clientEditSel"><option value="">— Nouveau client —</option></select>
+          <button class="btn small danger-outline" id="clientDelBtn" type="button" title="Supprimer ce client">🗑 Supprimer</button>
+        </div>
+        <div class="card-block" id="clientEditor">
+          <div class="row grid2">
+            <label>Nom du client <input type="text" id="clientName" maxlength="80" /></label>
+            <label>Dossier d'export <input type="text" id="clientExportDir" maxlength="500" placeholder="Ex. D:\Clients\Liberty\Exports" /></label>
+          </div>
+          <div class="row grid2">
+            <label>Produit <input type="text" id="clientProduct" /></label>
+            <label>Style visuel
+              <select id="clientStyle"><option value="">—</option><option value="realiste">Réaliste</option><option value="3d">3D animée</option></select>
+            </label>
+          </div>
+          <label>Ambiance / contexte <textarea id="clientAmbiance" rows="2"></textarea></label>
+          <label>Persona / cible <textarea id="clientPersona" rows="2"></textarea></label>
+          <div class="row grid2" id="clientPhotos"></div>
+          <h3>Personnages du client</h3>
+          <div id="clientChars"></div>
+          <div class="row">
+            <button class="btn primary" id="clientSaveBtn" type="button">💾 Enregistrer le client</button>
+            <span id="clientMsg" class="muted small"></span>
+          </div>
+        </div>
       </section>
 
       <!-- ---- COÛTS / DÉPENSES ---- -->

@@ -540,6 +540,15 @@ label.check.disabled { opacity: .45; cursor: not-allowed; }
 .ao-charlib-info { display: flex; flex-direction: column; overflow-wrap: anywhere; }
 .ao-charlib-card .row { gap: 4px; flex-wrap: wrap; align-items: center; }
 .ao-charlib-card select { margin: 0; font-size: 12px; }
+/* Clients (presets) & personnages — tous modes */
+label.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+label.inline select { margin: 0; min-width: 160px; }
+.obj-persos { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.ref-remove-inline { background: none; border: 0; color: inherit; cursor: pointer; font-size: 14px; padding: 0 2px; }
+.client-photo { display: flex; flex-direction: column; gap: 4px; }
+.client-photo-cur { display: flex; align-items: center; gap: 8px; }
+.client-photo-cur img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; background: #000; }
+#clientChars .row { gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
 /* Voice ID ElevenLabs dans les fiches voix */
 .ao-elv { grid-column: 1 / -1; }
 .ao-elv-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }

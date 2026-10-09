@@ -31,6 +31,10 @@ B_PERFORMANCE = "performance"        # jeu (expression, lip-sync, qui parle)
 B_AUDIO = "audio"                    # audio / dialogue (dialogue VERBATIM)
 B_NEGATIVES = "negatives"            # interdits (No music. No subtitles…)
 B_ROLE_SENTENCES = "role_sentences"  # phrases de fin par rôle d'image (Omni)
+# Fiche produit (Nano Banana) : bloc DÉDIÉ placé juste après le sujet (app/product_sheet.py) —
+# « PRODUCT (match exactly): … Never: … No text, logo or label on the product. ». Texte
+# canonique écrit par l'utilisateur : hors du compteur de mots du contrôle avant envoi.
+B_PRODUCT_SHEET = "product_sheet"
 
 BLOCK_ORDER: tuple[str, ...] = (
     B_IMAGE_ROLES, B_SINGLE_SHOT, B_CAMERA, B_SUBJECT, B_PERFORMANCE, B_AUDIO, B_NEGATIVES,
@@ -43,7 +47,12 @@ ROLE_REFERENCE = "reference"         # référence (perso, ancre, produit) — j
 ROLE_ANCHOR = "anchor"               # Nano Banana : image ancre à RETOUCHER (image 1)
 ROLE_MAIN_REF = "main_ref"           # Nano Banana : réf principale produit (prime sur le reste)
 ROLE_CHARACTER = "character"         # Nano Banana : réf d'un personnage
-IMAGE_ROLES = (ROLE_FIRST_FRAME, ROLE_REFERENCE, ROLE_ANCHOR, ROLE_MAIN_REF, ROLE_CHARACTER)
+# Deux ancres de cohérence DISTINCTES (plans validés), chacune avec son rôle déclaré :
+ROLE_CHARACTER_ANCHOR = "character_anchor"   # ancre perso : « keep the person identical »
+ROLE_PRODUCT_ANCHOR = "product_anchor"       # ancre produit : « keep the product identical »
+ROLE_PRODUCT = "product"             # photo de la fiche produit (face / profil / usage / packaging)
+IMAGE_ROLES = (ROLE_FIRST_FRAME, ROLE_REFERENCE, ROLE_ANCHOR, ROLE_MAIN_REF, ROLE_CHARACTER,
+               ROLE_CHARACTER_ANCHOR, ROLE_PRODUCT_ANCHOR, ROLE_PRODUCT)
 
 
 class SentImage(TypedDict):
@@ -200,9 +209,14 @@ GROK = ModelProfile(
 
 # NANO BANANA PRO — google/gemini-3-pro-image-preview via OpenRouter (keyframes / start frames).
 # Ordre des blocs (image) : rôles des images (légende des réfs, retouche d'ancre, réf principale,
-# cohérence) → cadrage → sujet (description du plan + objet posé) → interdits → format de sortie.
-# Les blocs propres à la vidéo (plan unique, jeu, audio, phrases de rôle) restent vides.
+# cohérence) → cadrage → sujet (description du plan + objet posé) → fiche produit → interdits →
+# format de sortie. Les blocs propres à la vidéo (plan unique, jeu, audio, phrases de rôle)
+# restent vides.
 B_OUTPUT_FORMAT = "output_format"    # Nano Banana : consigne de format, toujours en dernier
+NB_BLOCK_ORDER: tuple[str, ...] = (
+    B_IMAGE_ROLES, B_SINGLE_SHOT, B_CAMERA, B_SUBJECT, B_PRODUCT_SHEET, B_PERFORMANCE, B_AUDIO,
+    B_NEGATIVES, B_ROLE_SENTENCES, B_OUTPUT_FORMAT,
+)
 
 NB_OUTPUT_FORMAT = "Output a vertical 9:16 (1K) image."
 # Start frames (anglais, collés tels quels) :
@@ -222,7 +236,7 @@ NB_NO_TEXT = "No text, labels or logos."
 
 NANO_BANANA_PRO = ModelProfile(
     key="nano_banana_pro", label="Nano Banana Pro", model_id="google/gemini-3-pro-image-preview",
-    block_order=(*BLOCK_ORDER, B_OUTPUT_FORMAT),
+    block_order=NB_BLOCK_ORDER,
     anti_defects=(NB_GROUNDING, NB_NO_FOREIGN_TEXT_REF1),
     limits={
         "usd_per_image": 0.134,               # 1K/2K = 1120 tokens × 0,00012 $ (OpenRouter)
@@ -244,7 +258,8 @@ NANO_BANANA_PRO = ModelProfile(
     max_images=14,
     # Les prompts image portent la légende des réfs (et la bible Avatar IA) : plage plus large.
     prompt_words=(30, 250),
-    allowed_roles=(ROLE_ANCHOR, ROLE_MAIN_REF, ROLE_CHARACTER, ROLE_REFERENCE),
+    allowed_roles=(ROLE_ANCHOR, ROLE_MAIN_REF, ROLE_CHARACTER, ROLE_REFERENCE,
+                   ROLE_CHARACTER_ANCHOR, ROLE_PRODUCT_ANCHOR, ROLE_PRODUCT),
     rules=(
         "Rôle de chaque image nommé en tête (« reference image N = … ») ; l'ancre à retoucher et "
         "la réf principale sont toujours l'image 1.",
@@ -253,6 +268,10 @@ NANO_BANANA_PRO = ModelProfile(
         "Cadrage selon le type de plan : parlé → gros plan / médium serré bouche visible ; "
         "produit → gros plan produit ; plan large → wide.",
         "Aucun texte, étiquette ni logo absent de la référence 1.",
+        "Produit visible → fiche produit du client en bloc dédié après le sujet (« PRODUCT (match "
+        "exactly): … Never: … ») + ses photos face, profil, usage (packaging si demandé).",
+        "Deux ancres distinctes : « character anchor: keep the person identical » / « product "
+        "anchor: keep the product identical ».",
     ),
     block_separator="\n\n",
     collapse_whitespace=False,

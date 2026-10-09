@@ -222,6 +222,14 @@ _MIGRATIONS["clips"].extend([
     ("offscreen", "INTEGER DEFAULT 0"),     # 1 = voix HORS CHAMP de `speaker` : la personne visible se tait
     ("target_seconds", "REAL"),             # durée cible du plan (timecodes du découpage client)
 ])
+# Produit et réfs (idempotent) :
+# - ads.product_sheet          : JSON fiche produit de la pub (copiée du preset client, éditable) ;
+# - clips.is_product_anchor    : 1 = ANCRE PRODUIT de la pub (une seule) ; `is_anchor` reste
+#                                l'ANCRE PERSO (l'ancienne ancre unique devient donc l'ancre perso) ;
+# - ref_images.position        : ordre choisi par l'utilisateur (NULL = ordre d'ajout = id).
+_MIGRATIONS["ads"].append(("product_sheet", "TEXT DEFAULT ''"))
+_MIGRATIONS["clips"].append(("is_product_anchor", "INTEGER DEFAULT 0"))
+_MIGRATIONS["ref_images"].append(("position", "INTEGER"))
 
 
 def connect() -> sqlite3.Connection:
@@ -610,6 +618,7 @@ _ALLOWED_AD_COLS = {
 _ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # export de la pub
 _ALLOWED_AD_COLS |= {"client_preset_id", "preset_characters"}   # presets client (tous modes)
 _ALLOWED_AD_COLS |= {"omni_start_frame_only", "omni_camera", "omni_auto_turns", "omni_voice_chain"}
+_ALLOWED_AD_COLS |= {"product_sheet"}   # fiche produit de la pub (app/product_sheet.py)
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -663,14 +672,27 @@ def get_clip(clip_id: int) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------- images de référence
+# Ordre des réfs : position choisie par l'utilisateur (réordonnées dans « Réfs de la pub »),
+# sinon ordre d'ajout (id). Partagé par toutes les lectures → les générations suivent cet ordre.
+_REF_ORDER = "ORDER BY COALESCE(position, id), id"
+
+
 def add_ref_image(ad_id: int, path: str, kind: str = "") -> int:
     con = connect()
     try:
         cur = con.execute(
             "INSERT INTO ref_images(ad_id, path, kind) VALUES(?, ?, ?)", (ad_id, path, kind)
         )
+        new_id = int(cur.lastrowid or 0)
+        # En fin de liste, même après un réordonnancement (positions 1..n).
+        row = con.execute(
+            "SELECT MAX(COALESCE(position, id)) AS m FROM ref_images WHERE ad_id=? AND id<>?",
+            (ad_id, new_id),
+        ).fetchone()
+        top = int(row["m"] or 0) if row else 0
+        con.execute("UPDATE ref_images SET position=? WHERE id=?", (max(top + 1, new_id), new_id))
         con.commit()
-        return int(cur.lastrowid or 0)
+        return new_id
     finally:
         con.close()
 
@@ -679,7 +701,7 @@ def list_ref_images(ad_id: int) -> list[str]:
     con = connect()
     try:
         rows = con.execute(
-            "SELECT path FROM ref_images WHERE ad_id=? ORDER BY id", (ad_id,)
+            f"SELECT path FROM ref_images WHERE ad_id=? {_REF_ORDER}", (ad_id,)
         ).fetchall()
         return [r["path"] for r in rows]
     finally:
@@ -687,15 +709,78 @@ def list_ref_images(ad_id: int) -> list[str]:
 
 
 def list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]:
-    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main}]."""
+    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main}], dans l'ordre choisi."""
     con = connect()
     try:
         rows = con.execute(
             "SELECT id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main "
-            "FROM ref_images WHERE ad_id=? ORDER BY id",
+            f"FROM ref_images WHERE ad_id=? {_REF_ORDER}",
             (ad_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def get_ref_image(ad_id: int, ref_id: int) -> dict[str, Any] | None:
+    con = connect()
+    try:
+        row = con.execute(
+            "SELECT id, ad_id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main "
+            "FROM ref_images WHERE ad_id=? AND id=?", (ad_id, ref_id),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def set_ref_kind(ad_id: int, ref_id: int, kind: str) -> None:
+    """Change le type d'une réf (visage1..4 / produit / decor / style / plancheN / '' sans type)."""
+    con = connect()
+    try:
+        con.execute("UPDATE ref_images SET kind=? WHERE ad_id=? AND id=?", (kind, ad_id, ref_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def delete_ref_image(ad_id: int, ref_id: int) -> str | None:
+    """Retire une réf de la pub ; renvoie son chemin (None si absente). Le fichier n'est PAS
+    supprimé ici (il peut servir ailleurs : image de perso, autre réf)."""
+    con = connect()
+    try:
+        row = con.execute("SELECT path FROM ref_images WHERE ad_id=? AND id=?",
+                          (ad_id, ref_id)).fetchone()
+        if not row:
+            return None
+        con.execute("DELETE FROM ref_images WHERE ad_id=? AND id=?", (ad_id, ref_id))
+        con.commit()
+        return str(row["path"])
+    finally:
+        con.close()
+
+
+def count_ref_path(path: str) -> int:
+    """Nombre de réfs (toutes pubs) qui pointent sur ce fichier."""
+    con = connect()
+    try:
+        row = con.execute("SELECT COUNT(*) AS n FROM ref_images WHERE path=?", (path,)).fetchone()
+        return int(row["n"]) if row else 0
+    finally:
+        con.close()
+
+
+def reorder_ref_images(ad_id: int, ref_ids: list[int]) -> None:
+    """Nouvel ordre des réfs : `ref_ids` d'abord (dans cet ordre), puis les réfs non citées dans
+    leur ordre actuel. Les ids étrangers à la pub sont ignorés."""
+    current = [int(r["id"]) for r in list_ref_images_typed(ad_id)]
+    wanted = [i for i in dict.fromkeys(int(x) for x in ref_ids) if i in current]
+    order = wanted + [i for i in current if i not in wanted]
+    con = connect()
+    try:
+        for pos, rid in enumerate(order, 1):
+            con.execute("UPDATE ref_images SET position=? WHERE ad_id=? AND id=?", (pos, ad_id, rid))
+        con.commit()
     finally:
         con.close()
 
@@ -774,6 +859,7 @@ _ALLOWED_CLIP_COLS = {
     "speech_cut", "extra_seconds",
     "omni_chain",    # Omni : place du bloc dans sa chaîne « voix identique »
     "excluded", "variant", "variant_label", "offscreen", "target_seconds",
+    "is_product_anchor",   # ancre PRODUIT (is_anchor = ancre perso)
 }
 
 

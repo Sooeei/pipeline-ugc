@@ -281,8 +281,9 @@ def omni_block_images(
     if pipeline.ad_start_frame_only(ad) or not image:
         return image, ""
     clips = all_clips if all_clips is not None else db.clips_for_ad(int(ad["id"]))
-    ref = pipeline.consistency_ref(clips, statuses=("valide", "pret", "echec"))
-    if ref is None or int(ref["id"]) == int(c["id"]):
+    # Ancre perso, ou ancre produit pour un bloc produit seul (pipeline.anchor_for_plan).
+    ref = pipeline.anchor_for_plan(clips, c, statuses=("valide", "pret", "echec"))
+    if ref is None:
         return image, ""
     return image, str(ref.get("image_path") or "")
 

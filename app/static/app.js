@@ -1232,25 +1232,33 @@ function planRefsControls(s, opts = REF_KIND_OPTS) {
     });
     wrap.appendChild(chip);
   });
-  // Ancre de cohérence : seulement pertinent si le plan a une image.
+  // Deux ancres de cohérence (seulement si le plan a une image) : ⚓ perso (personne / look) et
+  // 📦 produit (plans produit). Une de chaque par pub ; l'une n'écrase jamais l'autre.
   if (s.image_url) {
-    const anchor = document.createElement("button");
-    anchor.type = "button";
-    anchor.className = "ref-chip anchor" + (s.is_anchor ? " on" : "");
-    anchor.title = "Utiliser ce plan comme ancre de cohérence (personnage/look de référence)";
-    anchor.textContent = s.is_anchor ? "⚓ Ancre" : "⚓";
-    anchor.addEventListener("click", async () => {
-      try {
-        const res = await api("/api/clips/" + s.clip_id + "/anchor", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ is_anchor: !s.is_anchor }),
-        });
-        s.is_anchor = res.is_anchor;
-        anchor.classList.toggle("on", s.is_anchor);
-        anchor.textContent = s.is_anchor ? "⚓ Ancre" : "⚓";
-      } catch (e) { toast(e.message); }
+    [["perso", "is_anchor", "⚓ perso", "Ancre PERSO : la personne / le look de référence des plans suivants"],
+     ["produit", "is_product_anchor", "📦 ancre produit", "Ancre PRODUIT : le produit de référence (plans produit seul, et ajoutée quand le produit est visible)"],
+    ].forEach(([kind, key, label, title], i) => {
+      const anchor = document.createElement("button");
+      anchor.type = "button";
+      anchor.className = "ref-chip" + (i === 0 ? " anchor" : " anchor-prod") + (s[key] ? " on" : "");
+      anchor.title = title;
+      anchor.textContent = label;
+      anchor.addEventListener("click", async () => {
+        try {
+          const res = await api("/api/clips/" + s.clip_id + "/anchor", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ is_anchor: !s[key], kind }),
+          });
+          s.is_anchor = !!res.is_anchor;
+          s.is_product_anchor = !!res.is_product_anchor;
+          anchor.classList.toggle("on", !!s[key]);
+          // Une seule ancre de chaque type par pub : on retire la marque sur les autres cartes.
+          if (s[key]) document.querySelectorAll(".ref-chip." + (i === 0 ? "anchor" : "anchor-prod") + ".on")
+            .forEach((b) => { if (b !== anchor) b.classList.remove("on"); });
+        } catch (e) { toast(e.message); }
+      });
+      wrap.appendChild(anchor);
     });
-    wrap.appendChild(anchor);
   }
   return wrap;
 }
@@ -1523,6 +1531,8 @@ async function loadObjGallery(adId) {
   const g = $("objGallery");
   renderOverviewBanner(g, r, "objet", adId);
   renderObjAdPanel(r, adId);
+  // Produit et réfs : fiche produit de la pub + « Réfs de la pub » (produit_refs.js).
+  if (window.renderAdProductAndRefs) window.renderAdProductAndRefs($("objProductRefs"), adId, () => loadObjGallery(adId));
   g.innerHTML = "";
   (r.shots || []).forEach((s) => g.appendChild(objShotCard(s)));
   if (window.renderPubRealCost) window.renderPubRealCost(adId, $("objCostBox"));  // agent C
@@ -4377,6 +4387,8 @@ async function loadAoGallery(adId) {
   $("aoKfMsg").innerHTML = "";
   if (r.personas) aoPersonas = r.personas;   // noms des personnages (tours, réfs, fiches voix)
   aoRenderBible(r.bible);
+  // Produit et réfs : fiche produit de la pub + « Réfs de la pub » (produit_refs.js).
+  if (window.renderAdProductAndRefs) window.renderAdProductAndRefs($("aoProductRefs"), adId);
   aoRenderVoiceBlock(r);
   aoAdState = r;
   aoRenderVoicesStep(r);
@@ -5843,6 +5855,9 @@ async function clientEditLoad(id) {
     });
   }
   $("clientDelBtn").disabled = !clientLoaded;
+  // Fiche produit du client (produit_refs.js) : copiée dans chaque pub à l'application du client.
+  if (window.renderProductSheetEditor)
+    window.renderProductSheetEditor($("clientProductSheet"), clientLoaded ? "/api/presets/" + clientLoaded.id : null);
 }
 
 async function clientSave() {

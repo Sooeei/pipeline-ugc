@@ -37,3 +37,7 @@ dist/
 refs_atelier/
 refs_jelly/
 refs_test_bouton/
+
+# --- images client (pas du code) et extractions temporaires ---
+refs_*/
+tmp_frames/

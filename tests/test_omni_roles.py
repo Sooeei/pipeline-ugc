@@ -304,4 +304,5 @@ def test_chain_off_by_default_one_call_per_block(fake_google):
     ad_id, _ = _v2_ad(3)
     avatar_video.animate_blocks(REAL, ad_id, "nochain")
     assert len(fake_google) == 3 and all("previous_interaction_id" not in b for b in fake_google)
-    assert all(b["store"] is False for b in fake_google)
+    # Hors chaîne : pas d'extension (store=true seulement imposé par la livraison URI).
+    assert all(b["store"] is True for b in fake_google)

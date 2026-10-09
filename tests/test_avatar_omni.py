@@ -590,7 +590,8 @@ def test_omni_base64_response_writes_mp4(monkeypatch, omni_env, capsys):
     body = sent["json"]
     assert sent["url"] == f"{config_app.OMNI_API_BASE}/interactions"
     assert sent["headers"]["x-goog-api-key"] == KEY and sent["timeout"] == 600
-    assert body["model"] == "gemini-omni-1.1-flash" and body["store"] is False
+    # Livraison par URI : store=true exigé par Google, même pour un appel simple.
+    assert body["model"] == "gemini-omni-1.1-flash" and body["store"] is True
     rf = body["response_format"]
     assert rf == {"type": "video", "aspect_ratio": "9:16", "resolution": "720p", "delivery": "uri",
                   "duration": "7s"}   # VideoResponseFormat.duration envoyée (OMNI_SEND_DURATION)

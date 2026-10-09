@@ -1468,7 +1468,8 @@ def _omni_body(
         "model": model_value,
         "input": parts,
         "response_format": response_format,
-        "store": bool(store),
+        # Livraison par URI : Google exige store=true (sinon 400 « store=true is required »).
+        "store": bool(store) or response_format.get("delivery") == "uri",
     }
     if previous_interaction_id:
         body["previous_interaction_id"] = previous_interaction_id

@@ -386,3 +386,13 @@ def test_relaunch_quota_counts_all_turns(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text
         assert r.json()["requests"] == 2
         _wait(c, r.json()["job_id"])
+
+
+def test_omni_body_store_true_when_video_delivered_by_uri():
+    """Google renvoie 400 « store=true is required when response format has video delivery set to
+    URI » : dès que la vidéo est livrée par URI, le corps envoyé porte store=true (1 seul appel
+    compris), sans changer le reste."""
+    body = providers._omni_body("txt", [], 5)
+    assert body["response_format"]["delivery"] == "uri" and body["store"] is True
+    assert providers._omni_body("txt", [], 5, store=True)["store"] is True
+    assert "previous_interaction_id" not in body

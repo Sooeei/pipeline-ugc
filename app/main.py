@@ -156,6 +156,10 @@ def create_app() -> FastAPI:
     # Traçabilité : journal des générations, feedback gardé / rejeté, page Stats.
     from . import trace_api
     app.include_router(trace_api.router)
+    # Produit et réfs : fiche produit (client / pub), gestion des réfs après création.
+    from . import ad_refs, product_sheet
+    app.include_router(product_sheet.router)
+    app.include_router(ad_refs.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -921,19 +925,27 @@ def create_app() -> FastAPI:
 
     @app.post("/api/clips/{clip_id}/anchor")
     def clip_set_anchor(clip_id: int, body: AnchorIn) -> dict[str, Any]:
-        """Désigne (ou retire) ce plan comme ANCRE de cohérence. Une seule ancre par pub :
-        l'activer désactive les autres."""
+        """Désigne (ou retire) ce plan comme ANCRE de cohérence, de type « perso » (défaut,
+        clips.is_anchor) ou « produit » (clips.is_product_anchor). Une ancre de chaque type par
+        pub : l'activer désactive les autres ancres DU MÊME TYPE (l'ancre perso n'est jamais
+        écrasée par un plan produit)."""
         clip = db.get_clip(clip_id)
         if clip is None:
             raise HTTPException(404, "Plan introuvable.")
+        kind = (body.kind or "perso").strip().lower()
+        if kind not in ("perso", "produit"):
+            raise HTTPException(400, "Type d'ancre : « perso » ou « produit ».")
+        col = "is_product_anchor" if kind == "produit" else "is_anchor"
         if body.is_anchor and not clip.get("image_path"):
             raise HTTPException(400, "Ce plan n'a pas d'image : impossible d'en faire une ancre.")
         if body.is_anchor:
             for c in db.clips_for_ad(int(clip["ad_id"])):
-                if int(c["id"]) != clip_id and c.get("is_anchor"):
-                    db.update_clip(int(c["id"]), is_anchor=0)
-        db.update_clip(clip_id, is_anchor=1 if body.is_anchor else 0)
-        return {"ok": True, "is_anchor": body.is_anchor}
+                if int(c["id"]) != clip_id and c.get(col):
+                    db.update_clip(int(c["id"]), **{col: 0})
+        db.update_clip(clip_id, **{col: 1 if body.is_anchor else 0})
+        clip = db.get_clip(clip_id) or {}
+        return {"ok": True, "kind": kind, "is_anchor": bool(clip.get("is_anchor")),
+                "is_product_anchor": bool(clip.get("is_product_anchor"))}
 
     @app.post("/api/objet/animate/{ad_id}")
     def objet_animate(ad_id: int, body: AnimateIn) -> dict[str, Any]:
@@ -2076,6 +2088,7 @@ class StylePreviewIn(BaseModel):
 
 class AnchorIn(BaseModel):
     is_anchor: bool = True        # marque ce plan validé comme ancre de cohérence (jalon 2c)
+    kind: str = "perso"           # « perso » (is_anchor) | « produit » (is_product_anchor)
 
 
 class ObjetAdSettingsIn(BaseModel):
@@ -3030,6 +3043,7 @@ def _ad_shots_response(
             "error": c.get("error"),
             "refs_needed": pipeline._norm_refs_needed(c.get("refs_needed")) or [],
             "is_anchor": bool(c.get("is_anchor")),
+            "is_product_anchor": bool(c.get("is_product_anchor")),
         }
         for c in clips
     ]
@@ -3178,6 +3192,8 @@ def _run_consistency(
     targets = [
         c for c in clips
         if c["id"] != ref["id"] and str(c.get("prompt_image") or "").strip()
+        # L'ancre PRODUIT fait foi pour les plans produit : jamais régénérée par ce lot.
+        and not c.get("is_product_anchor")
         # Objet : une image UPLOADÉE par l'utilisateur n'est jamais écrasée par ce lot.
         and not (kind == "objet" and (c.get("keyframe_source") or "") == "upload")
     ]

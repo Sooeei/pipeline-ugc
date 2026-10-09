@@ -166,7 +166,7 @@ def test_omni_images_name_roles_and_record_refs_sent(monkeypatch):
     assert prompt.startswith("REFERENCE IMAGES (in order): reference image 1 = character 1's face")
     assert "reference image 2 = character 2's face" in prompt
     assert "reference image 3 = the client's product" in prompt
-    assert "reference image 4 = the validated previous shot" in prompt
+    assert "reference image 4 = character anchor: keep the person identical" in prompt
     # plan parlé → cadrage serré ; puis interdits (fiche Nano Banana) + suffixe filtre Google
     assert "Framing: close-up or tight medium shot" in prompt
     assert prompt.endswith("SHOT\n\nNo text, labels or logos that are not on the reference images."

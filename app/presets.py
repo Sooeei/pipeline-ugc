@@ -39,7 +39,7 @@ _EXPORT_DIR_MAX = 500
 PRESET_AD_SETTINGS = ("video_model", "accent_region", "resolution", "omni_camera")
 CAMERA_AUTO = "auto"
 # Clés conservées lors d'une mise à jour qui ne les envoie pas (formulaires partiels).
-_PRESET_KEPT_KEYS = ("export_dir", "persona", "voice_mode", *PRESET_AD_SETTINGS)
+_PRESET_KEPT_KEYS = ("export_dir", "persona", "voice_mode", "product_sheet", *PRESET_AD_SETTINGS)
 
 
 # ---------------------------------------------------------------- utilitaires
@@ -370,6 +370,11 @@ def _clean_preset_data(data: dict[str, Any]) -> dict[str, Any]:
     # Dossier d'export du client (bouton « Exporter la pub », app/export_pub.py).
     if _clean_text(data.get("export_dir"), 500):
         out["export_dir"] = _clean_text(data.get("export_dir"), 500)
+    # Fiche produit du client (texte ; photos = fichiers fiche_<angle>.* du preset).
+    if isinstance(data.get("product_sheet"), dict):
+        from . import product_sheet
+
+        out["product_sheet"] = product_sheet.clean_text_fields(data["product_sheet"])
     for kind in _PRESET_PHOTO_KINDS:   # URL conservée seulement si elle pointe sur nos médias
         url = str(data.get(f"{kind}_url") or "")
         if url.startswith("/media/presets/"):
@@ -613,12 +618,17 @@ def apply_preset_to_ad(ad_id: int, preset_id: int | None,
     """Lie la pub à son client (ads.client_preset_id) et lui applique des persos : ceux du preset,
     ou — si `character_ids` est fourni (persos choisis/ajoutés dans le formulaire) — ceux-là.
     Valable pour TOUS les modes (Objet animé, Avatar IA…). Avatar IA : les réglages par client
-    (modèle vidéo, accent, résolution, caméra) sont copiés sur la pub (apply_preset_settings)."""
+    (modèle vidéo, accent, résolution, caméra) sont copiés sur la pub (apply_preset_settings) ;
+    la fiche produit du client est copiée dans la pub (app/product_sheet.py)."""
     warnings: list[str] = []
     if preset_id:
+        from . import product_sheet
+
         _get_preset_or_404(preset_id)
         db.set_ad_fields(int(ad_id), client_preset_id=int(preset_id))
         warnings = apply_preset_settings(ad_id, preset_id)
+        # Fiche produit du client COPIÉE dans la pub (si elle n'en a pas déjà une), éditable ensuite.
+        product_sheet.copy_preset_sheet_to_ad(int(preset_id), int(ad_id))
     persos = library_persos(character_ids) if character_ids is not None else (
         preset_persos(preset_id) if preset_id else [])
     apply_preset_characters(ad_id, persos)

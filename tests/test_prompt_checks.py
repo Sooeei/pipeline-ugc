@@ -279,7 +279,7 @@ def test_avatar_omni_roles(monkeypatch):
                                      "refs_needed": ["visage1", "produit"]}], character_ref="a.png")
     c = calls[-1]
     assert c["refs"] == ["pl1.png", "v1.png", "p.png", "a.png"]
-    assert c["roles"] == [pp.ROLE_CHARACTER, pp.ROLE_CHARACTER, pp.ROLE_REFERENCE, pp.ROLE_REFERENCE]
+    assert c["roles"] == [pp.ROLE_CHARACTER, pp.ROLE_CHARACTER, pp.ROLE_REFERENCE, pp.ROLE_CHARACTER_ANCHOR]
     assert pp.NB_NO_FOREIGN_TEXT_REFS in c["prompt"] and pp.NB_GROUNDING not in c["prompt"]
     assert json.loads(db.get_clip(cid)["refs_sent"])[0]["kind"] == "planche1"
 

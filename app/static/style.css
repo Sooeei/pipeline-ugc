@@ -645,3 +645,21 @@ label.inline select { margin: 0; min-width: 160px; }
 .st-bar { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; }
 .st-bar i { display: block; height: 100%; background: var(--accent); }
 .st-reasons .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- Produit et réfs : fiche produit, « Réfs de la pub », ancre produit (produit_refs.js) ---- */
+.product-refs { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; }
+.ps-box label { display: block; margin: 6px 0; }
+.ps-box textarea, .ps-box input[type="text"] { width: 100%; }
+.ps-head { margin-bottom: 6px; }
+.ps-photos { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.ps-photo { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.ps-photo img, .ps-photo .thumb, .ref-row img, .ref-row .thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.ps-photo .thumb, .ref-row .thumb { display: flex; align-items: center; justify-content: center; font-size: 10px; }
+.ps-preview code { white-space: pre-wrap; }
+.ps-box .warn, .refs-box .warn { font-size: 12px; color: var(--warn); margin-top: 4px; }
+.refs-list { display: flex; flex-direction: column; gap: 6px; }
+.ref-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ref-row.main img { outline: 2px solid var(--warn, #d98a2b); }
+.ref-row .ref-n { font-size: 12px; color: var(--muted); min-width: 16px; text-align: center; }
+.ref-row .star.on { background: var(--warn, #d98a2b); color: #1a1200; }
+.ref-chip.anchor-prod.on { background: var(--accent-2, #2bb39a); color: #001a14; border-color: transparent; }

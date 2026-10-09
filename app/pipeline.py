@@ -27,6 +27,7 @@ from . import (
     lipsync_rules,
     media,
     omni_timing,
+    product_sheet,
     prompt_profiles,
     voice_i18n,
 )
@@ -412,9 +413,10 @@ _CONSISTENCY_BY_KIND = {
 def consistency_ref(
     clips: list[dict[str, Any]], statuses: tuple[str, ...] = ("valide",),
 ) -> dict[str, Any] | None:
-    """Plan de RÉFÉRENCE (cohérence) : l'ANCRE choisie (jalon 2c) si elle a une image et un statut
-    dans `statuses`, sinon le premier plan (par numéro) de ce statut avec image (typiquement le
-    Plan 1 validé). Partagé par main (uniformiser / régénérer / reprendre) et l'animation Omni."""
+    """ANCRE PERSO (cohérence) : l'ANCRE choisie (jalon 2c, clips.is_anchor) si elle a une image
+    et un statut dans `statuses`, sinon le premier plan (par numéro) de ce statut avec image
+    (typiquement le Plan 1 validé) — jamais l'ANCRE PRODUIT (un plan produit n'écrase pas l'ancre
+    perso). Partagé par main (uniformiser / régénérer / reprendre) et l'animation Omni."""
     eligible = [
         c for c in sorted(clips, key=lambda c: int(c["scene_n"]))
         if c.get("status") in statuses and c.get("image_path")
@@ -422,7 +424,29 @@ def consistency_ref(
     for c in eligible:
         if c.get("is_anchor"):
             return c
+    eligible = [c for c in eligible if not c.get("is_product_anchor")]
     return eligible[0] if eligible else None
+
+
+def product_anchor(clips: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """ANCRE PRODUIT de la pub (clips.is_product_anchor, avec image), None si aucune."""
+    for c in sorted(clips, key=lambda c: int(c["scene_n"])):
+        if c.get("is_product_anchor") and c.get("image_path"):
+            return c
+    return None
+
+
+def anchor_for_plan(
+    clips: list[dict[str, Any]], clip: dict[str, Any], statuses: tuple[str, ...] = ("valide",),
+) -> dict[str, Any] | None:
+    """Ancre de cohérence d'UN plan pour la vidéo (Omni) : plan PRODUIT SEUL avec une ancre produit
+    → l'ancre produit ; sinon l'ancre perso. Jamais le plan lui-même."""
+    if product_sheet.product_only(_norm_refs_needed(clip.get("refs_needed"))):
+        prod = product_anchor(clips)
+        if prod is not None and int(prod["id"]) != int(clip["id"]):
+            return prod
+    ref = consistency_ref(clips, statuses=statuses)
+    return ref if ref is not None and int(ref["id"]) != int(clip["id"]) else None
 
 
 # ==================================================================== OBJET ANIMÉ — ancre / persos
@@ -464,8 +488,8 @@ def objet_edit_anchor(clips: list[dict[str, Any]]) -> dict[str, Any] | None:
     for c in with_img:
         if c.get("is_anchor"):
             return c
-    for c in with_img:
-        if c.get("status") in ("image_pret", "valide", "pret"):
+    for c in with_img:   # repli : jamais l'ancre PRODUIT (elle sert aux plans produit seuls)
+        if c.get("status") in ("image_pret", "valide", "pret") and not c.get("is_product_anchor"):
             return c
     return None
 
@@ -592,7 +616,13 @@ def objet_anchor_edit_refs(
     return out[: max(1, cap)]
 
 
-def _anchor_edit_legend(refs: list[str], main_path: str, speaker: dict[str, str] | None) -> str:
+# Légendes des deux ancres (anglais, prompts image) — cf. prompt_profiles.ROLE_*_ANCHOR.
+CHARACTER_ANCHOR_LEGEND = "character anchor: keep the person identical"
+PRODUCT_ANCHOR_LEGEND = "product anchor: keep the product identical"
+
+
+def _anchor_edit_legend(refs: list[str], main_path: str, speaker: dict[str, str] | None,
+                        product_anchor: str = "") -> str:
     """Rôle des images envoyées APRÈS l'ancre (image 1)."""
     if len(refs) <= 1:
         return ""
@@ -600,6 +630,9 @@ def _anchor_edit_legend(refs: list[str], main_path: str, speaker: dict[str, str]
     for i, p in enumerate(refs[1:], 2):
         if p == main_path:
             lines.append(f"reference image {i} = the main product reference (never contradict it)")
+        elif product_anchor and p == product_anchor:
+            lines.append(f"reference image {i} = {PRODUCT_ANCHOR_LEGEND} (same shape, size, "
+                         "material and details)")
         elif speaker and p == speaker.get("image_ref"):
             lines.append(f"reference image {i} = {speaker['nom']} — keep this character identical")
         else:
@@ -700,6 +733,7 @@ def dedupe_images(paths: list[str]) -> list[str]:
 def objet_shot_inputs(
     ad: dict[str, Any], clip: dict[str, Any], s: dict[str, Any], needed: list[str] | None,
     typed_refs: list[dict[str, Any]], character_ref: str = "", prefix: str = "",
+    product_anchor_clip: dict[str, Any] | None = None, product_visible: bool = False,
 ) -> tuple[list[str], str, dict[str, Any]]:
     """Entrées Nano Banana d'UN plan Objet animé → (réfs ordonnées, préfixe, shot).
 
@@ -707,7 +741,17 @@ def objet_shot_inputs(
       [ancre, réf principale, perso qui parle, chips…] et prompt EDIT construit depuis la
       description du plan (le prompt_image du shot est remplacé, pas de préfixe).
     - Sinon : sélection classique (cohérence via `character_ref`), MAIS la réf principale passe en
-      image 1 avec la consigne MAIN_REF_RULE (le personnage verrouillé passe alors en image 2)."""
+      image 1 avec la consigne MAIN_REF_RULE (le personnage verrouillé passe alors en image 2).
+    Deux ancres : plan PRODUIT SEUL + ancre produit → l'ancre produit remplace l'ancre perso (et
+    devient l'ancre à retoucher) ; plan où le produit est visible → l'ancre produit est ajoutée
+    avec son rôle (« product anchor: keep the product identical »)."""
+    only_prod = product_sheet.product_only(needed)
+    prod_clip = product_anchor_clip if (
+        product_anchor_clip and product_anchor_clip.get("image_path")
+        and int(product_anchor_clip["id"]) != int(s["clip_id"])) else None
+    prod_path = str(prod_clip["image_path"]) if prod_clip and (product_visible or only_prod) else ""
+    if only_prod and prod_path:   # plan produit seul : l'ancre perso ne sert pas
+        character_ref, prefix = "", ""
     main = main_ref(typed_refs)
     main_path = str(main["path"]) if main else ""
     persos = ad_characters(ad)
@@ -719,49 +763,75 @@ def objet_shot_inputs(
         speaker_ref = same_image_ref(speaker_ref, [str(r["path"]) for r in typed_refs])
         speaker = {**speaker, "image_ref": speaker_ref}
     anchor = None
+    keep = _anchor_edit_keep(persos)
     if clip_anchor_edit_on(ad, clip) and ad.get("id") is not None:
-        anchor = objet_edit_anchor(db.clips_for_ad(int(ad["id"])))
+        if only_prod and prod_clip is not None:   # plan produit seul : on retouche l'ancre produit
+            anchor, keep = prod_clip, ["the product", "the set"]
+        else:
+            anchor = objet_edit_anchor(db.clips_for_ad(int(ad["id"])))
     if anchor and int(anchor["id"]) != int(s["clip_id"]):
         anchor_path = str(anchor["image_path"])
-        refs = dedupe_images(objet_anchor_edit_refs(anchor_path, needed, typed_refs,
-                                                    main_path, speaker_ref))
+        if prod_path == anchor_path:
+            prod_path = ""
+        refs = objet_anchor_edit_refs(anchor_path, needed, typed_refs, main_path, speaker_ref)
+        if prod_path and prod_path not in refs:   # ancre produit juste après ancre / réf principale
+            refs.insert(2 if len(refs) > 1 and refs[1] == main_path else 1, prod_path)
+        refs = dedupe_images(refs)
         blocks = anchor_edit_blocks(
-            str(s.get("prompt_image", "")), anchor_n=int(anchor["scene_n"]),
-            keep=_anchor_edit_keep(persos),
-            extra_legend=_anchor_edit_legend(refs, main_path, speaker),
+            str(s.get("prompt_image", "")), anchor_n=int(anchor["scene_n"]), keep=keep,
+            extra_legend=_anchor_edit_legend(refs, main_path, speaker, prod_path),
         )
-        roles = image_roles_for(refs, anchor=anchor_path, main=main_path, characters=[speaker_ref])
+        roles = image_roles_for(refs, anchor=anchor_path, main=main_path, characters=[speaker_ref],
+                                product_anchor=prod_path)
         return refs, "", {**s, "prompt_image": pp.nano_banana_prompt(blocks), "image_blocks": blocks,
                           "image_roles": roles}
     refs = _select_clip_refs(needed, typed_refs, character_ref)
+    if prod_path and prod_path not in refs:
+        refs.insert(1 if character_ref and refs[:1] == [character_ref] else 0, prod_path)
     if speaker_ref and Path(speaker_ref).is_file() and speaker_ref not in refs \
             and len(refs) < config_app.MAX_REFS_PER_IMAGE_CALL:
         refs.append(speaker_ref)   # perso qui parle (2e perso) : sa réf en plus, si la place
     refs = dedupe_images(refs)
     if main_path and main_path in refs:
         refs = _with_main_first(refs, main_path)
-    roles = image_roles_for(refs, main=main_path, characters=[character_ref, speaker_ref])
+    roles = image_roles_for(refs, main=main_path, characters=[speaker_ref],
+                            character_anchor=character_ref, product_anchor=prod_path)
+    prod_legend = (f"reference image {refs.index(prod_path) + 1} = {PRODUCT_ANCHOR_LEGEND} (same "
+                   "shape, size, material and details)." if prod_path and prod_path in refs else "")
     if main_path and main_path in refs:
         consistency = _CHARACTER_CONSISTENCY_AFTER_MAIN if (prefix and character_ref) else prefix
         # Bloc « rôles des images » : réf principale (image 1) puis cohérence personnage.
         roles_block = pp.NANO_BANANA_PRO.block_separator.join(
-            x for x in (MAIN_REF_RULE, consistency.strip()) if x)
+            x for x in (MAIN_REF_RULE, prod_legend, consistency.strip()) if x)
         return refs, roles_block, {**s, "image_roles": roles}
+    if prod_legend:
+        if prefix and character_ref and refs[:1] != [character_ref]:
+            prefix = _CHARACTER_CONSISTENCY_AFTER_MAIN   # perso verrouillé en image 2
+        prefix = pp.NANO_BANANA_PRO.block_separator.join(x for x in (prod_legend, prefix.strip()) if x)
     return refs, prefix, {**s, "image_roles": roles}
 
 
 def image_roles_for(
     refs: list[str], *, anchor: str = "", main: str = "", characters: list[str] | tuple[str, ...] = (),
+    character_anchor: str = "", product_anchor: str = "", products: list[str] | tuple[str, ...] = (),
 ) -> list[str]:
     """Rôle de chaque image envoyée à Nano Banana, dans l'ordre : ancre à retoucher, réf
-    principale produit, réf d'un personnage, sinon simple référence."""
+    principale produit, ancre produit, ancre perso, réf d'un personnage, photo de la fiche
+    produit, sinon simple référence."""
     chars = {c for c in characters if c}
+    prods = {p for p in products if p}
     out = []
     for p in refs:
         if anchor and p == anchor:
             out.append(pp.ROLE_ANCHOR)
         elif main and p == main:
             out.append(pp.ROLE_MAIN_REF)
+        elif product_anchor and p == product_anchor:
+            out.append(pp.ROLE_PRODUCT_ANCHOR)
+        elif character_anchor and p == character_anchor:
+            out.append(pp.ROLE_CHARACTER_ANCHOR)
+        elif p in prods:
+            out.append(pp.ROLE_PRODUCT)
         elif p in chars:
             out.append(pp.ROLE_CHARACTER)
         else:
@@ -819,24 +889,45 @@ def generate_objet_images(
     # Avatar IA : persos qui SONT le produit personnifié (posés au sol comme un objet).
     product_chars = (brain.product_characters(ad_row.get("personas"), ad_row.get("bible"))
                      if kind == "avatar_omni" else set())
+    # Avatar IA : la réf principale désignée passe devant les autres photos de son type.
+    omni_typed = sorted(typed_refs, key=lambda t: 0 if int(t.get("is_main") or 0) else 1)
+    # Deux ancres : perso (`character_ref`, choisie par l'appelant) et produit (clips.is_product_anchor).
+    prod_anchor_clip = product_anchor(db.clips_for_ad(ad_id)) if ad_row else None
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
-        shot_prefix = prefix
         clip_row = db.get_clip(int(s["clip_id"])) or {}
         grounded = kind == "objet"
+        # Produit visible ? (refs_needed « produit », mention dans le plan, persona produit) →
+        # fiche produit + ses photos ; ancre produit pour les plans où il apparaît.
+        persona_prod = any(config_app.omni_character_index(k) in product_chars for k in needed or [])
+        prod = product_sheet.plan_product(
+            ad_row, kind=kind, needed=needed, product_persona=persona_prod,
+            text=f"{s.get('prompt_image', '')}\n{clip_row.get('script') or ''}")
+        only_prod = product_sheet.product_only(needed)
+        pa = prod_anchor_clip if (prod_anchor_clip is not None
+                                  and int(prod_anchor_clip["id"]) != int(s["clip_id"])) else None
+        prod_anchor_path = str(pa["image_path"]) if pa and (prod["visible"] or only_prod) else ""
+        # Plan PRODUIT SEUL avec une ancre produit : elle remplace l'ancre perso.
+        char_ref = "" if (only_prod and prod_anchor_path) else character_ref
+        shot_prefix = prefix if char_ref else ""
         if kind == "avatar_omni":
             first = clip_first_speaker(clip_row)
-            picked = select_omni_refs(needed, typed_refs, character_ref, first_speaker=first)
-            warn = omni_refs_overflow_warning(needed, typed_refs, character_ref, first_speaker=first,
+            picked = select_omni_refs(needed, omni_typed, char_ref, first_speaker=first)
+            warn = omni_refs_overflow_warning(needed, omni_typed, char_ref, first_speaker=first,
                                               label=str(s.get("n") or ""))
             if warn:   # > 4 réfs utiles : on garde visages > produit > ancre, et on le signale
                 emit({"scene": int(s["n"]), "phase": "image", "status": "en_cours", "message": warn})
                 db.log_activity("avatar_omni", warn)
+            if prod_anchor_path:
+                picked.append({"kind": "ancre_produit", "path": prod_anchor_path})
+            picked += [{"kind": f"{PRODUCT_PHOTO_KIND}{angle}", "path": path}
+                       for path, angle in prod["photos"]]
+            picked = _dedupe_picked(picked)[: pp.NANO_BANANA_PRO.max_images or 14]
             refs = [r["path"] for r in picked]
-            shot_prefix = omni_refs_legend(picked, names)
-            roles = [pp.ROLE_CHARACTER if _omni_ref_character(r["kind"]) else pp.ROLE_REFERENCE
-                     for r in picked]
+            shot_prefix = omni_refs_legend(
+                picked, names, product_role=_OMNI_PRODUCT_ROLE_SHEET if prod["active"] else "")
+            roles = [_omni_image_role(r["kind"]) for r in picked]
             grounded = any(_omni_ref_character(r["kind"]) in product_chars for r in picked)
             db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
                 [{"n": i, **r} for i, r in enumerate(picked, 1)], ensure_ascii=False))
@@ -845,11 +936,30 @@ def generate_objet_images(
             # principale en image 1 dans les deux cas (elle prime sur les planches).
             refs, shot_prefix, s = objet_shot_inputs(
                 ad_row, clip_row, s, needed, typed_refs, character_ref, prefix,
+                product_anchor_clip=pa, product_visible=prod["visible"],
             )
             roles = list(s.get("image_roles") or [])
         else:
-            refs = _select_clip_refs(needed, typed_refs, character_ref)
-            roles = [pp.ROLE_REFERENCE] * len(refs)
+            refs = _select_clip_refs(needed, typed_refs, char_ref)
+            if prod_anchor_path and prod_anchor_path not in refs:
+                refs.append(prod_anchor_path)
+                shot_prefix = pp.NANO_BANANA_PRO.block_separator.join(x for x in (
+                    f"reference image {len(refs)} = {PRODUCT_ANCHOR_LEGEND}.", shot_prefix.strip()) if x)
+            roles = image_roles_for(refs, character_anchor=char_ref, product_anchor=prod_anchor_path)
+        # Photos de la fiche produit (Objet / Mashup ; Avatar IA : déjà dans la légende) : après
+        # les autres réfs, ordre face → profil → usage (→ packaging si demandé), rôle « product ».
+        photo_legend: list[tuple[int, str]] = []
+        if kind != "avatar_omni" and prod["photos"]:
+            refs, roles = list(refs), list(roles)
+            have = {_image_digest(p) or p for p in refs}
+            for path, angle in prod["photos"]:
+                if len(refs) >= (pp.NANO_BANANA_PRO.max_images or 14):
+                    break
+                if (_image_digest(path) or path) in have:
+                    continue
+                refs.append(path)
+                roles.append(pp.ROLE_PRODUCT)
+                photo_legend.append((len(refs), angle))
         start = {}
         if kind in ("objet", "avatar_omni"):
             start = start_frame_blocks(
@@ -858,6 +968,8 @@ def generate_objet_images(
                 refs_needed=needed, n_refs=len(refs), ref1_is_truth=kind == "objet",
                 grounded=grounded, already=f"{shot_prefix}\n{s.get('prompt_image', '')}",
             )
+        if prod["active"] and prod["visible"]:   # bloc DÉDIÉ, juste après le sujet
+            start[pp.B_PRODUCT_SHEET] = product_sheet.sheet_block(prod["sheet"], photo_legend)
         # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
         sent_kinds = [kind_of_path.get(p, "") for p in refs]
         # Journal : étape = keyframe (Avatar IA) / retouche (prompt EDIT de l'ancre) / image.
@@ -979,15 +1091,53 @@ def omni_refs_overflow_warning(
 _OMNI_REF_ROLES = {
     "produit": "the client's product — reproduce it exactly (same bottle shape, colors, cap and "
                "label) as a plain inanimate object: never give it a face, eyes or a mouth",
-    "ancre": "the validated previous shot — keep the same people, outfits, set and lighting; "
-             "only framing, pose and action change",
+    # Ancre perso (clips.is_anchor) / ancre produit (clips.is_product_anchor) : rôles distincts.
+    "ancre": "character anchor: keep the person identical — the validated previous shot: same "
+             "people, outfits, set and lighting; only framing, pose and action change",
+    "ancre_produit": "product anchor: keep the product identical — the validated product shot: "
+                     "same shape, size, material and details",
     "decor": "the set / background to reproduce",
     "style": "the photographic style and lighting to match",
     "": "an additional reference",
 }
 
 
-def _omni_ref_role(kind: str, names: dict[int, str] | None = None) -> str:
+# Réf « produit » quand la pub a une fiche produit : la fiche décrit le produit (pas de « bouteille »).
+_OMNI_PRODUCT_ROLE_SHEET = ("the client's product — reproduce it exactly as described in PRODUCT, as "
+                            "a plain inanimate object: never give it a face, eyes or a mouth")
+# Photos de la fiche produit dans refs_sent / la légende Avatar IA : « fiche_produit_<angle> ».
+PRODUCT_PHOTO_KIND = "fiche_produit_"
+
+
+def _omni_image_role(kind: str) -> str:
+    """Rôle déclaré (prompt_profiles.ROLE_*) d'une réf Avatar IA envoyée à Nano Banana."""
+    k = str(kind or "")
+    if k == "ancre":
+        return pp.ROLE_CHARACTER_ANCHOR
+    if k == "ancre_produit":
+        return pp.ROLE_PRODUCT_ANCHOR
+    if k.startswith(PRODUCT_PHOTO_KIND):
+        return pp.ROLE_PRODUCT
+    return pp.ROLE_CHARACTER if _omni_ref_character(k) else pp.ROLE_REFERENCE
+
+
+def _dedupe_picked(picked: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Réfs Avatar IA sans doublon (même chemin ou même contenu) ; la 1re occurrence gagne."""
+    out, seen = [], set()
+    for r in picked:
+        key = _image_digest(r["path"]) or r["path"]
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _omni_ref_role(kind: str, names: dict[int, str] | None = None, product_role: str = "") -> str:
+    k = str(kind or "")
+    if k.startswith(PRODUCT_PHOTO_KIND):
+        return product_sheet.photo_role_text(k[len(PRODUCT_PHOTO_KIND):])
+    if product_role and config_app.normalize_omni_ref_kind(k) == "produit":
+        return product_role
     sheet = config_app.omni_sheet_index(kind)
     if sheet:
         name = (names or {}).get(sheet, "")
@@ -1004,12 +1154,14 @@ def _omni_ref_role(kind: str, names: dict[int, str] | None = None) -> str:
     return _OMNI_REF_ROLES.get(config_app.normalize_omni_ref_kind(kind), _OMNI_REF_ROLES[""])
 
 
-def omni_refs_legend(picked: list[dict[str, str]], names: dict[int, str] | None = None) -> str:
+def omni_refs_legend(picked: list[dict[str, str]], names: dict[int, str] | None = None,
+                     product_role: str = "") -> str:
     """Légende des réfs placée en tête du prompt image Avatar IA ("" sans réf). `names` =
-    {numéro de personnage: nom court} (facultatif)."""
+    {numéro de personnage: nom court} (facultatif) ; `product_role` = rôle des photos « produit »
+    quand la pub a une fiche produit."""
     if not picked:
         return ""
-    lines = [f"reference image {i} = {_omni_ref_role(r['kind'], names)}"
+    lines = [f"reference image {i} = {_omni_ref_role(r['kind'], names, product_role)}"
              for i, r in enumerate(picked, 1)]
     return "REFERENCE IMAGES (in order): " + "; ".join(lines) + ".\n\n"
 
@@ -2169,8 +2321,6 @@ def animate_avatar_omni_clips(
     # (utilisées seulement en texte seul : avec start frame, noms seulement).
     descs = ad_character_descs(ad)
     names = ad_character_names(ad)
-    # Référence personne : ancre / 1er plan validé (déjà animé ou échoué compris : image validée).
-    ref = consistency_ref(all_clips, statuses=("valide", "pret", "echec"))
 
     camera_key = ad_omni_camera(ad)
     start_frame_only = ad_start_frame_only(ad)
@@ -2214,11 +2364,12 @@ def animate_avatar_omni_clips(
         sp = clip_first_speaker(c) if clip_segments(c) else 1
         seconds = config_app.omni_clip_seconds(dialogue, wps_for(sp))
         text_only = clip_text_only(c)
-        has_anchor = (not text_only and not start_frame_only and ref is not None
-                      and int(ref["id"]) != int(c["id"]))
+        # Ancre du plan : ancre produit pour un plan produit seul, sinon ancre perso.
+        cref = anchor_for_plan(all_clips, c, ("valide", "pret", "echec"))
+        has_anchor = not text_only and not start_frame_only and cref is not None
         motion = str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt", ""))
         image = "" if text_only else str(c["image_path"])
-        anchor = str(ref["image_path"]) if (has_anchor and ref) else ""
+        anchor = str(cref["image_path"]) if (has_anchor and cref) else ""
         sent_imgs = omni_sent_images(image, anchor)
         other = 2 if sp == 1 else 1
         if text_only:
@@ -2262,10 +2413,10 @@ def animate_avatar_omni_clips(
         if done == k and c.get("status") == "pret":
             segs, done = reset_segments_progress(segs), 0   # plan déjà animé : on refait tout
         text_only = clip_text_only(c)
-        has_anchor = (not text_only and not start_frame_only and ref is not None
-                      and int(ref["id"]) != clip_id)
+        cref = anchor_for_plan(all_clips, c, ("valide", "pret", "echec"))
+        has_anchor = not text_only and not start_frame_only and cref is not None
         image = "" if text_only else str(c["image_path"])
-        anchor = str(ref["image_path"]) if (has_anchor and ref) else ""
+        anchor = str(cref["image_path"]) if (has_anchor and cref) else ""
         in_frame = clip_characters_in_frame(c, ad)
         # Texte seul : pas d'image envoyée → descriptions sans renvois aux photos de référence.
         cdescs = {m: strip_photo_refs(d) for m, d in descs.items()} if text_only else descs

@@ -261,6 +261,8 @@
               validé (même tête/yeux/bouche/style) + tes photos produit, dans leur propre scène.</p>
             <!-- Réglages de la pub : retouche de l'ancre, persos parlants, réf principale -->
             <div id="objAdPanel" class="obj-ad-panel"></div>
+            <!-- Produit et réfs : « Réfs de la pub » + fiche produit (produit_refs.js) -->
+            <div id="objProductRefs" class="product-refs"></div>
             <div id="objGallery" class="obj-gallery"></div>
             <div class="row">
               <button class="btn" id="objRefreshBtn">↻ Rafraîchir</button>
@@ -676,6 +678,8 @@
                 <span id="aoBibleMsg" class="muted small"></span>
               </div>
             </div>
+            <!-- Produit et réfs : « Réfs de la pub » + fiche produit (produit_refs.js) -->
+            <div id="aoProductRefs" class="product-refs"></div>
             <div id="aoWarnings" class="ao-warnings hidden"></div>
             <div id="aoGallery" class="obj-gallery"></div>
             <div class="row">
@@ -868,6 +872,7 @@
           <label>Ambiance / contexte <textarea id="clientAmbiance" rows="2"></textarea></label>
           <label>Persona / cible <textarea id="clientPersona" rows="2"></textarea></label>
           <div class="row grid2" id="clientPhotos"></div>
+          <div id="clientProductSheet"></div>
           <h3>Personnages du client</h3>
           <div id="clientChars"></div>
           <div class="row">
@@ -1172,5 +1177,6 @@
   <script src="/static/app.js"></script>
   <script src="/static/outils_c.js"></script>
   <script src="/static/tracabilite.js"></script>
+  <script src="/static/produit_refs.js"></script>
 </body>
 </html>

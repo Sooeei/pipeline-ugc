@@ -32,8 +32,14 @@ _PRESET_PHOTO_KINDS = ("decor", "produit", "style")
 _NAME_MAX = 80
 _TEXT_MAX = 4000
 _EXPORT_DIR_MAX = 500
+# Réglages PAR CLIENT copiés sur la pub à l'application du preset (puis propres à la pub : jamais
+# réécrits par le réglage global). video_model (grok|kling|omni), accent_region (clé
+# config_app.OMNI_ACCENTS, ex. « quebec »), resolution (720p|1080p ; Grok borné à 720p avec
+# avertissement), omni_camera (auto|locked|push_in|handheld ; « auto » = choix automatique).
+PRESET_AD_SETTINGS = ("video_model", "accent_region", "resolution", "omni_camera")
+CAMERA_AUTO = "auto"
 # Clés conservées lors d'une mise à jour qui ne les envoie pas (formulaires partiels).
-_PRESET_KEPT_KEYS = ("export_dir", "persona")
+_PRESET_KEPT_KEYS = ("export_dir", "persona", "voice_mode", *PRESET_AD_SETTINGS)
 
 
 # ---------------------------------------------------------------- utilitaires
@@ -295,6 +301,30 @@ def _parse_data(raw: str) -> dict[str, Any]:
     return data
 
 
+def clean_preset_settings(data: dict[str, Any]) -> dict[str, str]:
+    """Réglages par client (accent, résolution, caméra) validés ; valeur vide/inconnue = non
+    défini (la clé est omise). Le modèle vidéo est validé par _clean_preset_data."""
+    from app import pipeline
+
+    out: dict[str, str] = {}
+    region = str(data.get("accent_region") or "").strip().lower()
+    if region:
+        if region not in config_app.OMNI_ACCENTS:
+            raise HTTPException(400, "Accent inconnu (" + " | ".join(config_app.OMNI_ACCENTS) + ").")
+        out["accent_region"] = region
+    res = str(data.get("resolution") or "").strip().lower()
+    if res:
+        if res not in config_app.OMNI_RESOLUTIONS:
+            raise HTTPException(400, "Résolution inconnue (720p | 1080p).")
+        out["resolution"] = res
+    cam = str(data.get("omni_camera") or "").strip().lower()
+    if cam:
+        if cam != CAMERA_AUTO and cam not in pipeline.OMNI_CAMERA_LABELS:
+            raise HTTPException(400, "Caméra inconnue (auto | locked | push_in | handheld).")
+        out["omni_camera"] = cam
+    return out
+
+
 def _clean_preset_data(data: dict[str, Any]) -> dict[str, Any]:
     """Valide `data` : characters=[{n (1..4), character_id existant}], textes, options."""
     out: dict[str, Any] = {}
@@ -336,6 +366,7 @@ def _clean_preset_data(data: dict[str, Any]) -> dict[str, Any]:
         out["voice_mode"] = config_app.normalize_voice_mode(data.get("voice_mode"))
     if data.get("video_model"):
         out["video_model"] = config_app.normalize_avatar_video_model(data.get("video_model"))
+    out.update(clean_preset_settings(data))
     # Dossier d'export du client (bouton « Exporter la pub », app/export_pub.py).
     if _clean_text(data.get("export_dir"), 500):
         out["export_dir"] = _clean_text(data.get("export_dir"), 500)
@@ -520,18 +551,78 @@ def library_persos(character_ids: list[int]) -> list[dict[str, str]]:
     return out
 
 
+def preset_ad_settings(preset_id: int | None) -> dict[str, str]:
+    """Réglages par client du preset (modèle vidéo, accent, résolution, caméra) ; {} sinon."""
+    row = db.get_preset(int(preset_id)) if preset_id else None
+    if not row:
+        return {}
+    data = _preset_data(row)
+    out: dict[str, str] = {}
+    if data.get("video_model"):
+        out["video_model"] = config_app.normalize_avatar_video_model(data["video_model"])
+    try:
+        out.update(clean_preset_settings(data))
+    except HTTPException:   # ancienne valeur devenue invalide : réglage ignoré
+        pass
+    return out
+
+
+def apply_preset_settings(ad_id: int, preset_id: int | None) -> list[str]:
+    """COPIE les réglages par client du preset sur la pub (Avatar IA) : modèle vidéo
+    (ads.video_model), accent (accent_region de CHAQUE fiche voix de la pub), résolution
+    (ads.omni_resolution), caméra (ads.omni_camera). La pub garde ensuite SES valeurs (le réglage
+    global ne les remplace jamais). Renvoie les avertissements FR (ex. 1080p impossible en Grok)."""
+    from app import avatar_video, pipeline
+
+    ad = db.get_ad(int(ad_id))
+    settings = preset_ad_settings(preset_id)
+    if not ad or not settings or ad.get("kind") != "avatar_omni":
+        return []
+    fields: dict[str, Any] = {}
+    if settings.get("video_model"):
+        fields["video_model"] = settings["video_model"]
+    if settings.get("resolution"):
+        fields["omni_resolution"] = settings["resolution"]
+    if settings.get("omni_camera"):
+        fields["omni_camera"] = "" if settings["omni_camera"] == CAMERA_AUTO else settings["omni_camera"]
+    if fields:
+        db.set_ad_fields(int(ad_id), **fields)
+    if settings.get("accent_region"):
+        profiles = pipeline.ad_voice_profiles(ad) or {"1": config_app.normalize_voice_profile({})}
+        for key, prof in profiles.items():
+            profiles[key] = config_app.normalize_voice_profile({**prof, "accent_region": settings["accent_region"]})
+        db.set_ad_voice_profiles(int(ad_id), json.dumps(profiles, ensure_ascii=False))
+        if "1" in profiles:
+            db.set_ad_voice_profile(int(ad_id), json.dumps(profiles["1"], ensure_ascii=False))
+    fresh = db.get_ad(int(ad_id)) or ad
+    model = avatar_video.effective_video_model(fresh)
+    warn = avatar_video.resolution_warning(model, fresh.get("omni_resolution"))
+    if fields.get("video_model") and int(fresh.get("pipeline_version") or 1) == 2:
+        # Durées de clip recalculées pour le modèle du client (durées acceptées par le modèle).
+        wps_for = pipeline.ad_wps_for(fresh)
+        for c in db.clips_for_ad(int(ad_id)):
+            db.update_clip(int(c["id"]), clip_seconds=avatar_video.clip_target_seconds(
+                c, model, wps_for, avatar_video.voice_mode_of(fresh)))
+    db.log_activity("presets", f"Réglages du client appliqués à la pub {ad_id} : "
+                    + ", ".join(f"{k}={v}" for k, v in settings.items()))
+    return [warn] if warn else []
+
+
 def apply_preset_to_ad(ad_id: int, preset_id: int | None,
                        character_ids: list[int] | None = None) -> dict[str, Any]:
     """Lie la pub à son client (ads.client_preset_id) et lui applique des persos : ceux du preset,
     ou — si `character_ids` est fourni (persos choisis/ajoutés dans le formulaire) — ceux-là.
-    Valable pour TOUS les modes (Objet animé, Avatar IA…)."""
+    Valable pour TOUS les modes (Objet animé, Avatar IA…). Avatar IA : les réglages par client
+    (modèle vidéo, accent, résolution, caméra) sont copiés sur la pub (apply_preset_settings)."""
+    warnings: list[str] = []
     if preset_id:
         _get_preset_or_404(preset_id)
         db.set_ad_fields(int(ad_id), client_preset_id=int(preset_id))
+        warnings = apply_preset_settings(ad_id, preset_id)
     persos = library_persos(character_ids) if character_ids is not None else (
         preset_persos(preset_id) if preset_id else [])
     apply_preset_characters(ad_id, persos)
-    return _ad_client_out(db.get_ad(int(ad_id)) or {})
+    return {**_ad_client_out(db.get_ad(int(ad_id)) or {}), "warnings": warnings}
 
 
 def _ad_client_out(ad: dict[str, Any]) -> dict[str, Any]:

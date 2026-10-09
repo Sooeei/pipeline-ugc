@@ -825,6 +825,46 @@
               <select id="clientStyle"><option value="">—</option><option value="realiste">Réaliste</option><option value="3d">3D animée</option></select>
             </label>
           </div>
+          <!-- Réglages Avatar IA du client : copiés sur chaque NOUVELLE pub de ce client, qui les
+               garde ensuite (le réglage global ne les remplace jamais). -->
+          <div class="row grid2">
+            <label>Modèle vidéo
+              <select id="clientVideoModel">
+                <option value="">— réglage global —</option>
+                <option value="grok">Grok Imagine</option>
+                <option value="kling">Kling 3.0</option>
+                <option value="omni">Google Omni</option>
+              </select>
+            </label>
+            <label>Accent des voix
+              <select id="clientAccent">
+                <option value="">— non imposé —</option>
+                <option value="france">France</option>
+                <option value="quebec">Québec</option>
+                <option value="belgique">Belgique</option>
+                <option value="suisse">Suisse</option>
+              </select>
+            </label>
+          </div>
+          <div class="row grid2">
+            <label title="Grok ne fait pas de 1080p : la vidéo sortira en 720p (avertissement sur la pub).">Résolution vidéo
+              <select id="clientResolution">
+                <option value="">— par défaut (720p) —</option>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p (Omni uniquement)</option>
+              </select>
+            </label>
+            <label>Caméra (Omni)
+              <select id="clientCamera">
+                <option value="">— non imposée —</option>
+                <option value="auto">Auto (fixe pour les plans parlés)</option>
+                <option value="locked">Caméra fixe, cadrage identique</option>
+                <option value="push_in">Léger travelling avant</option>
+                <option value="handheld">Caméra à la main UGC</option>
+              </select>
+            </label>
+          </div>
+          <p class="muted small" id="clientSettingsWarn"></p>
           <label>Ambiance / contexte <textarea id="clientAmbiance" rows="2"></textarea></label>
           <label>Persona / cible <textarea id="clientPersona" rows="2"></textarea></label>
           <div class="row grid2" id="clientPhotos"></div>

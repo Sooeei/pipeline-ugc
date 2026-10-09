@@ -224,6 +224,16 @@ def generation_usd_estimate(
 # ============================================================ COMPTABILISATION (générations RÉELLES)
 # Chaque fonction record_* enregistre UN événement de coût réel en base (jamais en simulation).
 def record_image(ad_id: int | None, model: str) -> None:
+    """1 image Nano Banana RÉELLE (keyframe, régénération, retouche, cohérence…). `ad_id` absent →
+    celui du contexte de traçabilité (gen_trace.context) : une image faite pour une pub est
+    TOUJOURS comptée dans son coût réel (ad_real_cost), même si l'appelant a oublié l'ad_id."""
+    if ad_id is None:
+        from app import gen_trace
+
+        try:
+            ad_id = int(gen_trace.current().get("ad_id"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            ad_id = None
     rate = config_app.COST_USD_PER_IMAGE.get(model, config_app.COST_USD_PER_IMAGE_DEFAULT)
     db.add_cost_event("openrouter", "image", 1, usd=rate, ad_id=ad_id, detail=model)
 

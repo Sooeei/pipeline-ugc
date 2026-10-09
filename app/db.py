@@ -262,9 +262,31 @@ def init_db() -> None:
         _migrate_objet_image_model(con)
         _migrate_objet_anchor_characters(con)
         _migrate_traceability(con)
+        _freeze_ad_video_models(con)
         con.commit()
     finally:
         con.close()
+
+
+def _freeze_ad_video_models(con: sqlite3.Connection) -> None:
+    """Fige le modèle vidéo des pubs Avatar IA v2 restées sur « réglage global » (video_model
+    vide) : CAUSE du « retour à Grok » — une pub sans modèle propre suivait le réglage global
+    (défaut grok) dès qu'il changeait ou au redémarrage. Valeur figée = modèle de sa DERNIÈRE vidéo
+    générée (journal `generations`) s'il est connu, sinon le réglage global actuel (idempotent)."""
+    rows = con.execute(
+        "SELECT id FROM ads WHERE kind='avatar_omni' AND COALESCE(pipeline_version, 1)=2 "
+        "AND COALESCE(video_model, '')=''").fetchall()
+    if not rows:
+        return
+    by_model_id = {spec["model"]: key for key, spec in config_app.AVATAR_VIDEO_MODELS.items()}
+    g = con.execute("SELECT value FROM settings WHERE key='avatar_video_model'").fetchone()
+    fallback = config_app.normalize_avatar_video_model(g["value"] if g else "")
+    for r in rows:
+        last = con.execute(
+            "SELECT model FROM generations WHERE ad_id=? AND kind='video' ORDER BY id DESC LIMIT 1",
+            (int(r["id"]),)).fetchone()
+        model = by_model_id.get(str(last["model"] if last else ""), fallback)
+        con.execute("UPDATE ads SET video_model=? WHERE id=?", (model, int(r["id"])))
 
 
 _OBJET_IMAGE_MIGRATION_FLAG = "migration_objet_image_model_pro"

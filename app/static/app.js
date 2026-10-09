@@ -4292,6 +4292,9 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   fd.append("style", aoStyle());
   fd.append("personas", JSON.stringify(aoPersonas || {}));
   if (aoPlanBible) fd.append("bible", JSON.stringify(aoPlanBible));
+  // Client chargé : ses réglages (modèle vidéo, accent, résolution, caméra) sont copiés sur la
+  // pub DÈS sa création, côté serveur (la pub les garde ensuite, quel que soit le réglage global).
+  if (aoLoadedPresetId) fd.append("client_preset_id", String(aoLoadedPresetId));
   aoRefsFiles.forEach((f) => fd.append("files", f, f.name));
   let res;
   try {
@@ -4608,11 +4611,17 @@ function aoShotCard(s) {
   const err = s.image_url && s.error ? `<div class="ao-err" title="${esc(s.error)}">⚠ ${esc(prettyError(s.error))}</div>` : "";
   const v2 = aoIsV2();
   const canTest = kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s));
+  // Variante de hook (HOOK 2 / HOOK 3…) : générée À LA DEMANDE, jamais dans le montage principal.
+  const variantBadge = s.variant
+    ? ` <span class="badge" title="Variante du hook : exportée avec le suffixe _${esc(s.variant_label || "variante")}, hors vidéo assemblée">` +
+      `🔀 ${esc(s.variant_label || "variante")} · hors montage</span>` : "";
+  const targetTxt = s.target_seconds ? ` <span class="muted small" title="Durée visée (timecodes du découpage client)">🎯 cible ${esc(s.target_seconds)} s</span>` : "";
+  const testLabel = s.variant ? "🎬 Générer cette variante" : "Tester ce plan";
   card.innerHTML =
     `<div class="kf-thumb">${thumb}${srcBadge}${v2 ? aoPlancheCompareHtml(s) : ""}</div>` +
     `<div class="body">` +
-    `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}</div>` +
-    `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${clip}</div>` +
+    `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}${variantBadge}</div>` +
+    `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${targetTxt}${clip}</div>` +
     (Array.isArray(s.refs_sent) && s.refs_sent.length
       ? `<div class="muted small" title="Réfs réellement envoyées à Nano Banana, dans l'ordre">📎 Réfs envoyées : ` +
         `${esc(s.refs_sent.map((k) => (k === "ancre" ? "Ancre" : AO_REF_LABEL[k] || "sans type")).join(" › "))}</div>`
@@ -4648,7 +4657,8 @@ function aoShotCard(s) {
     `<button class="btn btn-regen" title="Nouvelle image Nano Banana Pro (avec la correction si remplie)">Regénérer</button>` +
     `<button class="btn btn-upload" title="Remplacer le keyframe par ta propre image (PNG, JPG, WebP)">Uploader mon image</button>` +
     `<button class="btn small btn-test"${canTest ? "" : " disabled"} title="${canTest
-      ? "Anime uniquement ce plan" : v2 ? "Valide d'abord ce keyframe et la voix de ce bloc" : "Valide d'abord ce keyframe"}">Tester ce plan</button>` +
+      ? (s.variant ? "Anime uniquement cette variante (hors vidéo assemblée)" : "Anime uniquement ce plan")
+      : v2 ? "Valide d'abord ce keyframe et la voix de ce bloc" : "Valide d'abord ce keyframe"}">${testLabel}</button>` +
     `</div></div>`;
 
   // Anciennes pubs : « visage » = visage1 (même puce) ; le serveur accepte les deux.
@@ -4978,7 +4988,8 @@ function aoIsSpoken(s) {
 
 // Blocs à générer en vidéo (v2) : keyframe + voix validés, pas encore prêts.
 function aoV2Candidates() {
-  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret");
+  // Plans exclus (variantes de hook non demandées comprises) : hors run global (cf. backend).
+  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret" && !s.excluded);
 }
 
 function aoSpeakerLabel(s) {
@@ -5361,6 +5372,25 @@ function aoRenderFinal(ad) {
   box.classList.toggle("hidden", !v2);
   if (!v2) return;
   aoRenderFinalLinks(ad.final_url, ad.final_audio_url);
+  aoRenderDurationTotals(ad);
+}
+
+// Durée totale générée (clips prêts du montage principal) vs visée (timecodes du découpage client).
+function aoRenderDurationTotals(ad) {
+  const links = $("aoFinalLinks");
+  if (!links || !ad) return;
+  const gen = Number(ad.seconds_generated) || 0;
+  const tgt = ad.seconds_target == null ? null : Number(ad.seconds_target);
+  const fmt = (x) => (Math.round(x * 10) / 10).toString().replace(".", ",");
+  let txt = `⏱️ Durée générée : <b>${esc(fmt(gen))} s</b>`;
+  if (tgt != null) {
+    const diff = gen - tgt;
+    txt += ` · visée (découpage client) : <b>${esc(fmt(tgt))} s</b>` +
+      (gen > 0 ? ` <span class="muted">(${diff >= 0 ? "+" : ""}${esc(fmt(diff))} s)</span>` : "");
+  }
+  const variants = (ad.shots || []).filter((s) => s.variant).length;
+  if (variants) txt += ` <span class="muted">· ${variants} variante(s) de hook hors montage</span>`;
+  links.insertAdjacentHTML("beforeend", `<div class="muted small ao-dur-totals">${txt}</div>`);
 }
 
 function aoRenderFinalLinks(finalUrl, audioUrl) {
@@ -5526,9 +5556,11 @@ async function aoSavePreset() {
       product: $("aoProduct").value.trim(),
       bible,
       voice_mode: aoIsV2() ? $("aoVoiceMode").value : ((aoPresetOptions && aoPresetOptions.voice_mode) || "native"),
-      video_model: aoIsV2() ? $("aoVideoModel").value
-        : ((aoPresetOptions && aoPresetOptions.video_model) || (currentSettings && currentSettings.avatar_video_model) || "grok"),
     };
+    // Modèle vidéo du client : celui de la pub ouverte, sinon celui du preset chargé. JAMAIS le
+    // réglage global (il écrasait le choix du client, ex. Omni → Grok) ; absent = conservé.
+    const vmPreset = aoIsV2() ? $("aoVideoModel").value : (aoPresetOptions && aoPresetOptions.video_model);
+    if (vmPreset) data.video_model = vmPreset;
     const fd = new FormData();
     fd.append("name", name);
     fd.append("data", JSON.stringify(data));
@@ -5611,13 +5643,22 @@ async function aoLoadPreset() {
     if (d.voice_mode) aoPresetOptions.voice_mode = d.voice_mode;
     aoRefreshCharsUi();
     // aoRefreshCharsUi re-rend les fiches 2..4 en gardant les valeurs : on réécrit les voix.
+    // Accent du client (ex. Québec) : imposé à chaque fiche voix (copié aussi sur la pub au serveur).
     for (const item of d.characters || []) {
       const ch = item.character;
       const n = Number(item.n);
       const prefix = n === 1 ? "aoV" : "aoV" + n;
       if (ch && $(prefix + "Gender"))
-        aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" }));
+        aoWriteVoice(prefix, Object.assign({}, ch.voice_profile || {}, { voice_id: ch.voice_id || "" },
+          d.accent_region ? { accent_region: d.accent_region } : {}));
     }
+    if (d.accent_region) {
+      for (let n = 1; n <= AO_MAX_CHARS; n++) {
+        const el = $((n === 1 ? "aoV" : "aoV" + n) + "AccentRegion");
+        if (el && [...el.options].some((o) => o.value === d.accent_region)) el.value = d.accent_region;
+      }
+    }
+    if (d.resolution && $("aoResolution")) $("aoResolution").value = d.resolution;
     aoLoadedPresetId = p.id;
     msg.textContent = `✓ Preset « ${p.name} » chargé — il ne reste qu'à coller le script.`;
     $("aoScript").focus();
@@ -5812,6 +5853,16 @@ async function clientEditLoad(id) {
   $("clientStyle").value = ["realiste", "3d"].includes(d.style) ? d.style : "";
   $("clientAmbiance").value = d.ambiance || "";
   $("clientPersona").value = d.persona || "";
+  // Réglages Avatar IA du client (copiés sur chaque nouvelle pub du client).
+  const setSel = (id, v) => {
+    const el = $(id);
+    if (el) el.value = [...el.options].some((o) => o.value === String(v || "")) ? String(v || "") : "";
+  };
+  setSel("clientVideoModel", d.video_model);
+  setSel("clientAccent", d.accent_region);
+  setSel("clientResolution", d.resolution);
+  setSel("clientCamera", d.omni_camera);
+  clientSettingsWarn();
   const ph = $("clientPhotos");
   ph.innerHTML = "";
   CLIENT_PHOTO_KINDS.forEach(([k, label]) => {
@@ -5845,6 +5896,20 @@ async function clientEditLoad(id) {
   $("clientDelBtn").disabled = !clientLoaded;
 }
 
+// Grok / Kling ne font pas de 1080p : avertit dès le choix (la pub bornera à 720p).
+function clientSettingsWarn() {
+  const w = $("clientSettingsWarn");
+  if (!w) return;
+  const vm = $("clientVideoModel") ? $("clientVideoModel").value : "";
+  const res = $("clientResolution") ? $("clientResolution").value : "";
+  w.textContent = res === "1080p" && vm && vm !== "omni"
+    ? "⚠ 1080p n'existe qu'avec Google Omni : avec ce modèle, la vidéo sortira en 720p."
+    : "";
+}
+["clientVideoModel", "clientResolution"].forEach((id) => {
+  if ($(id)) $(id).addEventListener("change", clientSettingsWarn);
+});
+
 async function clientSave() {
   const name = $("clientName").value.trim();
   if (!name) return toast("Donne un nom au client.");
@@ -5861,6 +5926,10 @@ async function clientSave() {
     style: $("clientStyle").value,
     ambiance: $("clientAmbiance").value.trim(),
     persona: $("clientPersona").value.trim(),
+    video_model: $("clientVideoModel") ? $("clientVideoModel").value : (base.video_model || ""),
+    accent_region: $("clientAccent") ? $("clientAccent").value : (base.accent_region || ""),
+    resolution: $("clientResolution") ? $("clientResolution").value : (base.resolution || ""),
+    omni_camera: $("clientCamera") ? $("clientCamera").value : (base.omni_camera || ""),
   });
   const fd = new FormData();
   fd.append("name", name);

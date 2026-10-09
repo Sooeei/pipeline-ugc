@@ -1096,6 +1096,7 @@ def create_app() -> FastAPI:
         personas: str = Form(""),
         bible: str = Form(""),
         style: str = Form(""),
+        client_preset_id: int = Form(0),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
         """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
@@ -1121,8 +1122,14 @@ def create_app() -> FastAPI:
             db.set_ad_style(aid, style_v)
             if bible_json:
                 db.set_ad_bible(aid, bible_json)
-            # Toute NOUVELLE pub Avatar IA suit le pipeline v2 « audio d'abord ».
-            db.set_ad_fields(aid, pipeline_version=2)
+            # Toute NOUVELLE pub Avatar IA suit le pipeline v2 « audio d'abord ». Son modèle vidéo
+            # est FIGÉ à la création (réglage global du moment) : un changement ultérieur du
+            # réglage global ne la fait plus repartir sur un autre modèle. Le preset client
+            # (client_preset_id) applique ensuite ses propres réglages (presets.apply_preset_settings).
+            db.set_ad_fields(aid, pipeline_version=2,
+                             video_model=avatar_video.effective_video_model({}, cfg))
+            if client_preset_id:
+                presets.apply_preset_settings(aid, client_preset_id)
 
         def _on_clip(clip_id: int, s: dict[str, Any]) -> None:
             fields: dict[str, Any] = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
@@ -1376,6 +1383,8 @@ def create_app() -> FastAPI:
         resp.update(avatar_video.ad_v2_fields(ad))
         # Omni : réplique > ~7 s (lip-sync peu fiable) / gestes de tête retirés → alertes FR.
         resp["alerts"].extend(a for a in resp.get("omni_alerts") or [] if a not in resp["alerts"])
+        # Pilotage : durées cibles non tenues + résolution bornée par le modèle.
+        resp["alerts"].extend(a for a in resp.get("pilot_alerts") or [] if a not in resp["alerts"])
         return resp
 
     @app.patch("/api/avatar-omni/bible/{ad_id}")

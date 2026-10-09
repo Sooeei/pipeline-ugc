@@ -221,6 +221,21 @@
       `<li><span class="st-lbl">${esc(r.label)}</span><span class="st-bar"><i style="width:${Math.round((r.count / maxR) * 100)}%"></i></span>` +
       `<span class="num">${esc(r.count)}</span></li>`).join("");
     const t = s.total || {};
+    // Essais par plan validé (générations image / vidéo jusqu'à l'état gardé).
+    const es = s.essais || {};
+    const avgTxt = (x) => (x && x.plans ? `${String(x.moyenne).replace(".", ",")} <span class="muted small">(${esc(x.plans)} plan(s), max ${esc(x.max)})</span>` : "—");
+    const essaisMode = (es.by_mode || []).map((m) =>
+      `<tr><td>${esc(m.mode_label || "—")}</td><td class="num">${avgTxt(m.image)}</td><td class="num">${avgTxt(m.video)}</td></tr>`).join("");
+    const essaisModel = (es.by_model || []).map((m) =>
+      `<tr><td>${esc(m.mode_label || "—")}</td><td>${m.kind === "video" ? "Vidéo" : "Image"}</td><td><code>${esc(m.model || "—")}</code></td>` +
+      `<td class="num">${esc(m.plans)}</td><td class="num"><b>${esc(String(m.moyenne).replace(".", ","))}</b></td><td class="num">${esc(m.max)}</td></tr>`).join("");
+    const essaisHtml = `<div class="card-block"><h2>Essais par plan validé</h2>` +
+      ((es.image && es.image.plans) || (es.video && es.video.plans)
+        ? `<p>Moyenne : <b>image</b> ${avgTxt(es.image)} · <b>vidéo</b> ${avgTxt(es.video)}</p>` +
+          `<table class="cost-table"><tr><th>Mode</th><th>Essais image / plan</th><th>Essais vidéo / plan</th></tr>${essaisMode}</table>` +
+          `<table class="cost-table"><tr><th>Mode</th><th>Type</th><th>Modèle</th><th>Plans validés</th><th>Essais moyens</th><th>Max</th></tr>${essaisModel}</table>`
+        : `<p class="muted">Aucun plan validé pour l'instant.</p>`) +
+      `<p class="muted small">Nombre de générations (keyframe, régénérations, retouches ; clips vidéo) faites sur un plan avant qu'il soit gardé.</p></div>`;
     root.innerHTML =
       `<div class="cards">` +
       `<div class="card"><div class="card-label">Décisions notées</div><div class="card-value">${esc(t.decisions ?? 0)}</div></div>` +
@@ -236,6 +251,7 @@
       `<div class="card-block"><h2>Taux de plans gardés par modèle</h2>` +
       (byModel ? `<table class="cost-table"><tr><th>Mode</th><th>Modèle</th><th>Gardés</th><th>Régénérés</th><th>Rejetés</th><th>Taux gardé</th></tr>${byModel}</table>`
         : `<p class="muted">Valide, régénère ou rejette des plans pour remplir ce tableau.</p>`) + `</div>` +
+      essaisHtml +
       `<div class="card-block"><h2>Raisons de rejet les plus fréquentes</h2>` +
       (reasons ? `<ul class="st-reasons">${reasons}</ul>` : `<p class="muted">Aucune raison notée (clique une puce après une régénération ou un rejet).</p>`) +
       `</div>`;

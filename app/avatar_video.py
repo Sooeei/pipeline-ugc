@@ -125,6 +125,8 @@ def clip_block_reason(c: dict[str, Any], model: str, voice_mode: str = "") -> st
     """Pourquoi ce bloc NE PEUT PAS être animé ("" = prêt) : keyframe validé + image (ou « texte
     seul », Omni uniquement) ; en mode voix « elevenlabs » seulement : voix validée + audio."""
     n = c.get("scene_n")
+    if pipeline.clip_excluded(c):
+        return f"Bloc {n} : exclu de la vidéo — réintègre-le pour le générer."
     if config_app.normalize_voice_mode(voice_mode) == "elevenlabs":
         if not int(c.get("voice_ok") or 0):
             return f"Bloc {n} : valide d'abord sa voix (étape Voix)."
@@ -142,18 +144,7 @@ def clip_block_reason(c: dict[str, Any], model: str, voice_mode: str = "") -> st
 
 def media_url(path: Any) -> str | None:
     """URL /media/… + cache-buster (date de modif) ; None si hors MEDIA_DIR ou absent."""
-    if not path:
-        return None
-    p = Path(str(path))
-    try:
-        rel = p.relative_to(config_app.MEDIA_DIR)
-    except ValueError:
-        return None
-    url = "/media/" + str(rel).replace("\\", "/")
-    try:
-        return f"{url}?v={int(p.stat().st_mtime)}"
-    except OSError:
-        return url
+    return media.media_url(path)
 
 
 # ============================================================ prompt vidéo
@@ -182,8 +173,12 @@ def build_video_prompt(
     images: list[Any] | None = None,
     camera_key: str = "",
     style: str = config_app.DEFAULT_OMNI_STYLE,
+    offscreen: bool = False,
 ) -> str:
-    """Prompt image→vidéo d'UN bloc. Ordre : geste/expression (video_prompt nettoyé des marques,
+    """Prompt image→vidéo d'UN bloc. `offscreen` = voix HORS CHAMP de `speaker` : les personnes
+    visibles (`others_in_frame`) se taisent bouche fermée, aucune règle de lip-sync, la voix et sa
+    fiche sont celles de `speaker` (lipsync_rules.offscreen_voice_line), dialogue VERBATIM.
+    Ordre : geste/expression (video_prompt nettoyé des marques,
     ≤ 12 mots) → « Character N (nom) talking… » → chaque autre perso à l'image bouche fermée →
     « Never mirror… » → réplique VERBATIM (crochets retirés) + fiche voix VERBATIM, au format du
     modèle (Grok : section AUDIO: ; Omni : réplique + synchro ; Kling : réplique entre
@@ -198,31 +193,32 @@ def build_video_prompt(
         return pipeline.build_omni_block_prompt(
             video_prompt, speaker=speaker, others_in_frame=others_in_frame, dialogue=dialogue,
             voice_sheet=voice_sheet, names=names, scene_desc=scene_desc, images=images,
-            camera_key=camera_key, style=style)
+            camera_key=camera_key, style=style, offscreen=offscreen)
     sp = max(1, int(speaker or 1))
     text = pipeline._omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
     sheet = str(voice_sheet or "").strip()
+    off = bool(offscreen) and bool(text)
     if model == "grok":
-        return _grok_block_prompt(video_prompt, sp, others_in_frame, text, sheet, names, accent)[0]
+        return _grok_block_prompt(video_prompt, sp, others_in_frame, text, sheet, names, accent,
+                                  offscreen=off)[0]
     parts: list[str] = []
     if scene_desc.strip():
         parts.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
     if g := _gesture(video_prompt):
         parts.append(g)
-    parts.append(f"{_who(sp, names)} talking, expressive mouth, subtle body motion.")
-    seen: set[int] = set()
-    for m in others_in_frame or []:
-        m = int(m)
-        if m == sp or m in seen:
-            continue
-        seen.add(m)
-        parts.append(f"{_who(m, names)} keeps their mouth closed, does not speak.")
+    visible = list(dict.fromkeys(int(m) for m in others_in_frame or [] if int(m) != sp))
+    if off:
+        parts.append(lipsync_rules.offscreen_voice_line(_who(sp, names), len(visible)))
+    else:
+        parts.append(f"{_who(sp, names)} talking, expressive mouth, subtle body motion.")
+        parts.extend(f"{_who(m, names)} keeps their mouth closed, does not speak." for m in visible)
     if scene_desc.strip():
         parts.append("Never mirror the image, keep framing and background stable.")
     else:
         parts.append("Never mirror the image, keep framing and background exactly as the start frame.")
     if text:
-        parts.append(f'Character {sp} says: "{text}"')
+        parts.append(f'Off-screen voice of Character {sp} says: "{text}"' if off
+                     else f'Character {sp} says: "{text}"')
         if sheet:
             parts.append(f"Voice: {sheet}.")
     return " ".join(p for p in parts if p)
@@ -232,19 +228,27 @@ def build_video_prompt(
 
 def _grok_block_prompt(
     video_prompt: str, sp: int, others_in_frame: list[int], text: str, sheet: str,
-    names: dict[int, str], accent: str = "",
+    names: dict[int, str], accent: str = "", *, offscreen: bool = False,
 ) -> tuple[str, list[str]]:
     """Prompt Grok d'un bloc v2 + gestes de tête retirés. Bloc PARLÉ : gestes retirés AVANT la
     coupe à 12 mots, « Only Character N speaks… », AUDIO = fiche voix VERBATIM + langue/accent +
-    réplique VERBATIM (la fiche porte déjà le débit). Bloc muet : mouvement d'origine."""
+    réplique VERBATIM (la fiche porte déjà le débit). Bloc muet : mouvement d'origine.
+    `offscreen` (voix hors champ de `sp`) : visibles bouche fermée, aucune règle de lip-sync,
+    AUDIO « off-screen voice » avec la fiche voix de `sp`."""
     motion = brain.scrub_brand_names(" ".join(str(video_prompt or "").split()))
     removed: list[str] = []
-    if text:
-        motion, removed = lipsync_rules.strip_lipsync_gestures(motion)
     others: list[int] = []
     for m in others_in_frame or []:
         if int(m) != sp and int(m) not in others:
             others.append(int(m))
+    if text and offscreen:
+        prompt, _ = providers.build_grok_prompt(
+            _gesture(motion), text, tone=voice_i18n.clean_sheet(sheet), accent=accent,
+            performance=lipsync_rules.offscreen_voice_line(_who(sp, names), len(others)),
+            offscreen=True)
+        return prompt, []
+    if text:
+        motion, removed = lipsync_rules.strip_lipsync_gestures(motion)
     perf = " ".join([f"{_who(sp, names)} talking, expressive mouth, subtle body motion."]
                     + [f"{_who(m, names)} keeps their mouth closed, does not speak." for m in others])
     prompt, _ = providers.build_grok_prompt(
@@ -263,8 +267,8 @@ def speaker_accent(ad: dict[str, Any] | None, speaker: int) -> str:
 
 def lipsync_warning(c: dict[str, Any], model: str) -> str:
     """Avertissement FR de la carte d'un bloc PARLÉ animé par Grok : gestes de tête retirés."""
-    if config_app.normalize_avatar_video_model(model) != "grok":
-        return ""
+    if config_app.normalize_avatar_video_model(model) != "grok" or pipeline.clip_offscreen(c):
+        return ""   # voix hors champ : aucun geste retiré (personne ne parle à l'image)
     motion = str(c.get("video_prompt") or "").strip() or str(c.get("motion_prompt") or "")
     return pipeline.lipsync_warning(brain.scrub_brand_names(" ".join(motion.split())), str(c.get("script") or ""))
 
@@ -306,6 +310,7 @@ def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str,
         scene_desc=pipeline.clip_scene_desc(c) if pipeline.clip_text_only(c) else "",
         accent=speaker_accent(ad, sp),
         images=sent, camera_key=pipeline.ad_omni_camera(ad), style=pipeline.ad_style(ad),
+        offscreen=pipeline.clip_offscreen(c),
     )
 
 
@@ -325,7 +330,8 @@ def estimate(
         dry_run = cfg.dry_run if cfg is not None else db.get_setting("dry_run", "1") == "1"
     model = effective_video_model(ad, cfg)
     if clips is None:
-        clips = [c for c in db.clips_for_ad(int(ad["id"])) if c.get("status") != "pret"]
+        clips = [c for c in db.clips_for_ad(int(ad["id"]))
+                 if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
     wps_for = pipeline.ad_wps_for(ad)
     mode = voice_mode_of(ad)
     secs = [clip_target_seconds(c, model, wps_for, mode) for c in clips]
@@ -405,6 +411,8 @@ def omni_alerts(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> list[s
     wps_for = pipeline.ad_wps_for(ad)
     out: list[str] = []
     for c in sorted(clips, key=lambda x: int(x["scene_n"])):
+        if pipeline.clip_excluded(c) or pipeline.clip_offscreen(c):
+            continue   # plan exclu / voix hors champ : pas de lip-sync à surveiller
         out.extend(pipeline.omni_plan_warnings(
             c.get("block_n") or c.get("scene_n"), str(c.get("script") or ""),
             str(c.get("video_prompt") or ""), wps_for(_speaker(c))))
@@ -614,7 +622,7 @@ def animate_blocks(
                     db.log_activity("avatar_omni", w)
         ok, ko = pipeline._run_parallel(clips, _one, MAX_PARALLEL.get(model, 1))
     assembled = False
-    fresh = db.clips_for_ad(ad_id)
+    fresh = [c for c in db.clips_for_ad(ad_id) if not pipeline.clip_excluded(c)]
     if fresh and all(c.get("status") == "pret" and c.get("mp4_path") for c in fresh):
         try:
             assemble(ad_id)
@@ -739,7 +747,7 @@ def _animate_voice_chains(
                         dialogue=str(c.get("script") or ""), voice_sheet=sheet_for(sp), names=names,
                         scene_desc="" if refs else pipeline.clip_scene_desc(c),
                         images=providers.omni_sent_references(refs), camera_key=camera_key,
-                        style=style, chain_turn=True)
+                        style=style, chain_turn=True, offscreen=pipeline.clip_offscreen(c))
                 db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
                                clip_seconds=seconds, error=None)
                 if pacer is not None:
@@ -804,7 +812,9 @@ def assemble(ad_id: int) -> dict[str, Any]:
     ad = db.get_ad(ad_id)
     if ad is None:
         raise RuntimeError("Pub introuvable.")
-    clips = sorted(db.clips_for_ad(ad_id), key=lambda c: int(c["scene_n"]))
+    # Plans exclus (variantes non voulues, « Exclure de la vidéo ») : hors du montage final.
+    clips = sorted((c for c in db.clips_for_ad(ad_id) if not pipeline.clip_excluded(c)),
+                   key=lambda c: int(c["scene_n"]))
     missing = [int(c["scene_n"]) for c in clips
                if c.get("status") != "pret" or not c.get("mp4_path") or not Path(str(c["mp4_path"])).is_file()]
     if not clips or missing:
@@ -890,7 +900,8 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
         if not int(ad.get("keyframes_ok") or 0):
             raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») avant "
                                      "de générer les vidéos.")
-        candidates = [c for c in clips if c.get("status") != "pret"]
+        # Plans exclus (variante non voulue / « Exclure de la vidéo ») : jamais générés.
+        candidates = [c for c in clips if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
         blocked = [(int(c["scene_n"]), r) for c in candidates if (r := clip_block_reason(c, model, voice_mode_of(ad)))]
         if blocked:
             return JSONResponse(status_code=409, content={
@@ -941,10 +952,12 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
         fields["video_model"] = vm
     if body.voice_mode is not None:
         mode = body.voice_mode.strip().lower()
-        if mode not in config_app.ACTIVE_VOICE_MODES:
-            raise HTTPException(400, "Mode voix indisponible : seule la voix native du modèle "
-                                     "vidéo est active (" + " | ".join(config_app.ACTIVE_VOICE_MODES) + ").")
-        fields["voice_mode"] = mode
+        if mode and mode not in config_app.VOICE_MODES:
+            raise HTTPException(400, "Mode voix inconnu (" + " | ".join(config_app.VOICE_MODES) + ").")
+        # Mode connu mais INACTIF (« elevenlabs » masqué, ex. venu d'un ancien preset client) :
+        # normalisé à l'enregistrement (voix native) au lieu de rejeter tout le PATCH — sinon le
+        # modèle vidéo du preset envoyé dans la même requête était perdu.
+        fields["voice_mode"] = config_app.normalize_voice_mode(mode)
     omni_fields: dict[str, Any] = {}
     if body.omni_camera is not None:
         cam = body.omni_camera.strip().lower()

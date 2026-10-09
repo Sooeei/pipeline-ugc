@@ -50,7 +50,10 @@ async function srvFetch(url, opts) {
       : "Le serveur ne répond pas — réessaie dans un instant.");
   }
 }
-setInterval(() => { srvFetch("/api/health", { cache: "no-store" }).catch(() => {}); }, 10000);
+setInterval(() => {
+  if (typeof srvRestarting !== "undefined" && srvRestarting) return;   // redémarrage volontaire
+  srvFetch("/api/health", { cache: "no-store" }).catch(() => {});
+}, 10000);
 
 const api = async (url, opts) => {
   const r = await srvFetch(url, opts);
@@ -523,8 +526,8 @@ $("objetStylePreviewBtn").addEventListener("click", async () => {
       body: JSON.stringify({ style, confirm: true }),
     });
     msg.textContent = r.cached ? "Aperçu (cache)." : "Aperçu généré.";
-    const bust = "?t=" + Date.now();
-    box.innerHTML = `<img src="${esc(r.image_url)}${bust}" alt="aperçu style" />`;
+    // L'URL porte déjà « ?v=<date de modif> » (serveur) : pas de 2e « ? ».
+    box.innerHTML = `<img src="${esc(r.image_url)}" alt="aperçu style" />`;
   } catch (e) {
     msg.textContent = "✗ " + e.message;
   }
@@ -4532,7 +4535,8 @@ async function aoValidateAllKeyframes() {
 
 // Plans candidats à l'animation = comme le backend : keyframe validé + départ dispo + valide/echec.
 function aoCandidates() {
-  return aoGalleryShots.filter((s) => aoKfOk(s) && aoHasStart(s) && (s.status === "valide" || s.status === "echec"));
+  return aoGalleryShots.filter((s) => !s.excluded && aoKfOk(s) && aoHasStart(s) &&
+    (s.status === "valide" || s.status === "echec"));
 }
 
 function aoSumSeconds(shots) {
@@ -4578,13 +4582,86 @@ function aoRenderAnimEstimate() {
 
 const AO_KF_SOURCE = { nano_banana_pro: "Nano Banana Pro", upload: "Mon image" };
 
+// ---- Options d'un plan : exclure de la vidéo, supprimer, voix hors champ ----
+function aoPlanCharNums() {
+  const list = (aoPersonas && Array.isArray(aoPersonas.characters)) ? aoPersonas.characters : [];
+  const nums = list.map((c) => Number(c.n)).filter((n) => n >= 1 && n <= 4);
+  return nums.length ? [...new Set(nums)].sort() : [1, 2];
+}
+
+function aoPlanOptionsHtml(s) {
+  const spoken = !!String(s.dialogue || "").trim();
+  const sp = Number(s.speaker) || 1;
+  const opts = aoPlanCharNums().map((n) =>
+    `<option value="${n}"${n === sp ? " selected" : ""}>${esc(aoCharName(n))}</option>`).join("");
+  return `<div class="ao-plan-opts">` +
+    (s.variant ? `<span class="badge">variante${s.variant_label ? " " + esc(s.variant_label) : ""}</span>` : "") +
+    (s.target_seconds ? `<span class="muted small">🎯 durée cible ${esc(s.target_seconds)} s</span>` : "") +
+    `<label class="check"><input type="checkbox" class="po-excl"${s.excluded ? " checked" : ""} /> Exclure de la vidéo</label>` +
+    (spoken
+      ? `<label class="check" title="La réplique est dite hors champ : la personne visible garde la bouche fermée">` +
+        `<input type="checkbox" class="po-off"${s.offscreen ? " checked" : ""} /> Voix hors champ</label>` +
+        `<select class="po-sp"${s.offscreen ? "" : " disabled"} title="Personnage dont on entend la voix">${opts}</select>`
+      : "") +
+    `<button class="btn small danger-outline po-del" title="Supprime ce plan et ses fichiers">🗑 Supprimer le plan</button>` +
+    (s.excluded ? `<div class="muted small">⛔ Exclu : ignoré par la validation, la génération vidéo et l'assemblage.</div>` : "") +
+    `</div>`;
+}
+
+async function aoPatchPlan(card, s, body, okMsg) {
+  card.classList.add("busy");
+  try {
+    const r = await api(AO_API + "/clip/" + s.clip_id + "/options", {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    toast(r.video_stale ? okMsg + " — ce clip est déjà animé : « Tester ce plan » pour le refaire." : okMsg);
+    await aoRefreshCard(card, s.clip_id);
+  } catch (e) {
+    card.classList.remove("busy");
+    toast(e.message);
+    await aoRefreshCard(card, s.clip_id).catch(() => {});
+  }
+}
+
+function aoBindPlanOptions(card, s) {
+  const excl = card.querySelector(".po-excl");
+  if (excl) excl.addEventListener("change", () =>
+    aoPatchPlan(card, s, { excluded: excl.checked }, excl.checked ? "Plan exclu de la vidéo ✓" : "Plan réintégré ✓"));
+  const off = card.querySelector(".po-off");
+  const spSel = card.querySelector(".po-sp");
+  if (off) off.addEventListener("change", () =>
+    aoPatchPlan(card, s, off.checked ? { offscreen: true, speaker: Number(spSel.value) || 1 } : { offscreen: false },
+      off.checked ? "Voix hors champ ✓" : "Voix à l'image ✓"));
+  if (spSel) spSel.addEventListener("change", () =>
+    aoPatchPlan(card, s, { speaker: Number(spSel.value) || 1 }, "Voix : " + aoCharName(spSel.value) + " ✓"));
+  const del = card.querySelector(".po-del");
+  if (del) del.addEventListener("click", async () => {
+    const ok = await showModal({
+      title: "Supprimer le plan",
+      message: `Supprimer définitivement le ${aoPlanTitle(s).replace(/<[^>]*>/g, "")} et ses fichiers (keyframe, vidéo) ? ` +
+        "Les autres plans gardent leur numéro.",
+      confirmText: "Supprimer", cancelText: "Annuler", danger: true,
+    });
+    if (!ok) return;
+    card.classList.add("busy");
+    try {
+      await api(AO_API + "/clip/" + s.clip_id, { method: "DELETE" });
+      toast("Plan supprimé ✓");
+      await loadAoGallery(aoAdId);
+    } catch (e) {
+      card.classList.remove("busy");
+      toast(e.message);
+    }
+  });
+}
+
 // Carte d'un plan à l'étape Keyframes : image de départ + prompts image/vidéo + actions.
 function aoShotCard(s) {
   const card = document.createElement("div");
   const done = s.status === "pret";
   const kfOk = aoKfOk(s);
   const mode = aoKfMode(s);
-  card.className = "obj-shot" + (kfOk ? " valide" : "");
+  card.className = "obj-shot" + (kfOk ? " valide" : "") + (s.excluded ? " excluded" : "");
   card.dataset.clip = String(s.clip_id);
   const isClient = Array.isArray(s.segments) && s.segments.length > 0;
   const badge = done
@@ -4607,7 +4684,7 @@ function aoShotCard(s) {
     : "";
   const err = s.image_url && s.error ? `<div class="ao-err" title="${esc(s.error)}">⚠ ${esc(prettyError(s.error))}</div>` : "";
   const v2 = aoIsV2();
-  const canTest = kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s));
+  const canTest = !s.excluded && kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s));
   card.innerHTML =
     `<div class="kf-thumb">${thumb}${srcBadge}${v2 ? aoPlancheCompareHtml(s) : ""}</div>` +
     `<div class="body">` +
@@ -4637,6 +4714,7 @@ function aoShotCard(s) {
     `<div class="lbl">💬 Dialogue — ce que la personne DIT (verbatim)</div>` +
     `<textarea class="vo" placeholder="Laisse vide = plan sans parole">${esc(s.dialogue || "")}</textarea>` +
     aoBracketValuesHtml(s.dialogue) +
+    aoPlanOptionsHtml(s) +
     `<label class="kf-mode-lbl">Départ vidéo <select class="kf-mode">` +
     `<option value="start_frame"${mode === "start_frame" ? " selected" : ""}>Omni avec start frame</option>` +
     `<option value="texte_seul"${mode === "texte_seul" ? " selected" : ""}>Omni texte seul</option>` +
@@ -4655,6 +4733,7 @@ function aoShotCard(s) {
   if (Array.isArray(s.refs_needed)) s.refs_needed = s.refs_needed.map((k) => (k === "visage" ? "visage1" : k));
   card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".kf-mode-lbl"));
   traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
+  aoBindPlanOptions(card, s);   // exclure / supprimer / voix hors champ
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");
@@ -4828,7 +4907,8 @@ $("aoConsistencyBtn").addEventListener("click", async () => {
 $("aoAnimateBtn").addEventListener("click", () => {
   if (!aoAdId) return toast("Génère et valide d'abord tes keyframes.");
   if (aoIsV2()) {
-    if (!aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
+    // Étape 4b n'existe qu'en voix ElevenLabs : en voix native, rien à valider.
+    if (aoUsesElVoices() && !aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
     if (!aoKeyframesOk) return toast("Clique d'abord « ✅ Valider les keyframes ».");
     return aoLaunchAnimation(aoV2Candidates(), null);
   }
@@ -4911,7 +4991,7 @@ async function aoLaunchAnimation(shots, clipId) {
   } catch (e) {
     return toast(e.message);
   }
-  if (v2 && !clipId && !aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
+  if (v2 && !clipId && aoUsesElVoices() && !aoVoicesOk) return toast("Clique d'abord « ✅ Valider les voix » (étape 4b).");
   if (!clipId && !aoKeyframesOk) return toast("Clique d'abord « ✅ Valider les keyframes ».");
   if (!shots.length) {
     return toast(v2 ? (clipId ? "Valide d'abord le keyframe et la voix de ce bloc." : "Aucun bloc à générer (tous déjà prêts ?).")
@@ -4978,7 +5058,7 @@ function aoIsSpoken(s) {
 
 // Blocs à générer en vidéo (v2) : keyframe + voix validés, pas encore prêts.
 function aoV2Candidates() {
-  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret");
+  return aoGalleryShots.filter((s) => !s.excluded && aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret");
 }
 
 function aoSpeakerLabel(s) {
@@ -6092,6 +6172,44 @@ async function loadHealth() {
     /* non bloquant : la version reste vide si la santé n'est pas joignable */
   }
 }
+
+// Réglages → « Redémarrer le serveur » : nouveau process serveur (même port), puis on attend
+// que /api/health réponde avec un AUTRE pid avant de recharger la page.
+let srvRestarting = false;
+async function restartServer() {
+  if (srvRestarting) return;
+  const ok = await showModal({
+    title: "Redémarrer le serveur",
+    message: "Le serveur local va redémarrer (quelques secondes) puis la page se rechargera. " +
+      "Tes pubs et plans sont conservés. Continuer ?",
+    confirmText: "Redémarrer", cancelText: "Annuler",
+  });
+  if (!ok) return;
+  let oldPid = null;
+  try {
+    oldPid = (await api("/api/health", { cache: "no-store" })).pid;
+    await api("/api/restart", { method: "POST" });
+  } catch (e) {
+    return toast(e.message);
+  }
+  srvRestarting = true;
+  toast("Redémarrage du serveur…");
+  const t0 = Date.now();
+  const poll = async () => {
+    if (Date.now() - t0 > 60000) {
+      srvRestarting = false;
+      return alertModal("Le serveur ne répond pas après 60 s — relance l'app (LANCER.bat).", "Redémarrage");
+    }
+    try {
+      const r = await fetch("/api/health", { cache: "no-store" });
+      const h = await r.json();
+      if (r.ok && h.ok && h.pid && h.pid !== oldPid) return location.reload();
+    } catch (_) { /* serveur en cours de redémarrage */ }
+    setTimeout(poll, 1000);
+  };
+  setTimeout(poll, 1000);
+}
+if ($("restartServer")) $("restartServer").addEventListener("click", restartServer);
 
 // ------------------------------------------------ démarrage
 loadHealth();

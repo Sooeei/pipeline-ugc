@@ -20,6 +20,28 @@ from typing import Any
 from . import config_app
 
 
+def media_url(path: Any) -> str | None:
+    """URL UNIQUE d'un fichier média renvoyée par l'API : « /media/<chemin relatif à MEDIA_DIR> »
+    + cache-buster « ?v=<date de modif en ms> ». Un keyframe / une vidéo régénéré(e), importé(e)
+    ou retouché(e) garde souvent le MÊME nom : sans ?v, le navigateur ré-affichait l'ancien.
+    None si vide ou hors MEDIA_DIR ; fichier absent → URL sans ?v."""
+    if not path:
+        return None
+    p = Path(str(path))
+    try:
+        rel = p.relative_to(config_app.MEDIA_DIR)
+    except ValueError:
+        try:
+            rel = p.resolve().relative_to(config_app.MEDIA_DIR.resolve())
+        except (ValueError, OSError):
+            return None
+    url = "/media/" + str(rel).replace("\\", "/")
+    try:
+        return f"{url}?v={p.stat().st_mtime_ns // 1_000_000}"
+    except OSError:
+        return url
+
+
 def write_silence_wav(path: str | Path, seconds: float = 1.0, sample_rate: int = 22050) -> str:
     """Écrit un .wav de silence valide (mono 16 bits)."""
     path = Path(path)

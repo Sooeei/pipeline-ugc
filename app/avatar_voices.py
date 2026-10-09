@@ -67,18 +67,7 @@ def speaker_voice_id(ad: dict[str, Any], speaker: int) -> str:
 
 def _media_url_v(path: str | None) -> str | None:
     """/media/... + cache-buster (date de modif) — l'audio regénéré garde le même nom."""
-    if not path:
-        return None
-    p = Path(path)
-    try:
-        rel = p.relative_to(config_app.MEDIA_DIR)
-    except ValueError:
-        return None
-    url = "/media/" + str(rel).replace("\\", "/")
-    try:
-        return f"{url}?v={int(p.stat().st_mtime)}"
-    except OSError:
-        return url
+    return media.media_url(path)
 
 
 def voice_fields(clip: dict[str, Any]) -> dict[str, Any]:

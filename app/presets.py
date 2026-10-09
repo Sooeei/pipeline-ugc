@@ -23,7 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from . import config_app, db
+from . import config_app, db, media
 
 router = APIRouter()
 
@@ -54,13 +54,9 @@ def _media_url(path: str | Path | None) -> str:
         rel = p.resolve().relative_to(config_app.MEDIA_DIR.resolve())
     except (ValueError, OSError):
         return ""
-    if not p.is_file():
+    if not p.is_file() or not rel:
         return ""
-    url = "/media/" + str(rel).replace("\\", "/")
-    try:
-        return f"{url}?v={int(p.stat().st_mtime)}"
-    except OSError:
-        return url
+    return media.media_url(p) or ""
 
 
 def _clean_text(value: Any, limit: int = _TEXT_MAX) -> str:
@@ -353,6 +349,8 @@ def _preset_out(row: dict[str, Any], expand: bool = False) -> dict[str, Any]:
         data = {}
     if not isinstance(data, dict):
         data = {}
+    if data.get("voice_mode"):   # ancien preset enregistré avec un mode voix devenu inactif
+        data["voice_mode"] = config_app.normalize_voice_mode(data.get("voice_mode"))
     folder = _presets_dir(int(row["id"]))
     for kind in _PRESET_PHOTO_KINDS:   # URLs recalculées depuis le disque (toujours à jour)
         found = sorted(folder.glob(f"{kind}.*")) if folder.is_dir() else []

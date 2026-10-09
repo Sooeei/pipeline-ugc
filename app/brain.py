@@ -1639,46 +1639,222 @@ _CLIENT_SPEAKER_MARK = "\U0001f5e3"     # 🗣 (ligne « qui parle », optionnel
 _CLIENT_CLOSERS = "»\"”’)]"
 
 
+_CLIENT_TITLE_LETTER_PREFIXES = {"VARIANTE", "VARIANT", "VERSION", "HOOK", "ACCROCHE", "ALT"}
+# Timecode d'un bloc : « 0:00–0:03 », « [0:03-0:06] », « (00:12 → 00:15) », « 0:03,5 - 0:06 ».
+_CLIENT_TC = r"(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?"
+_CLIENT_TIMECODE_RE = re.compile(
+    r"[\[(]?\s*" + _CLIENT_TC + r"\s*(?:–|—|-|→|->|à|to)\s*" + _CLIENT_TC + r"\s*s?\s*[\])]?")
+_CLIENT_TC_START_RE = re.compile(r"^[\[(]?\d{1,2}:\d{2}")
+# Contenu d'une parenthèse / d'un crochet qui est une DIDASCALIE (jeu, voix, silence…), pas une
+# valeur « [à valider] » du dialogue (« [97 %] », « [49,90 $] », « [L'Oréal] »).
+_CLIENT_STAGE_RE = re.compile(
+    r"\b(?:voix|off|hors[\s-]+champ|muet(?:te)?|silen\w*|aucune\s+voix|sans\s+dialogue|"
+    r"pas\s+de\s+dialogue|rires?|rit|sourit|sourire|souriant\w*|chuchot\w*|murmur\w*|amuse\w*|"
+    r"ironi\w*|soupir\w*|pause|ton|aparte|narrat\w*|face\s+camera|regard\w*|enthousias\w*|"
+    r"gene\w*|surpris\w*|vo|didascalie|en\s+off)\b")
+# Plan MUET : dialogue vide, « (muet) », « (aucune voix) », « — », « … » seul.
+_CLIENT_MUTE_RE = re.compile(
+    r"^(?:[\(\[]\s*(?:muet(?:te)?|aucune\s+voix|aucun\s+dialogue|pas\s+de\s+dialogue|"
+    r"sans\s+dialogue|silence|silencieu(?:x|se)|plan\s+muet)\s*[\)\]]\.?|[—–\-…\.\s]+)$",
+    re.IGNORECASE)
+# Voix HORS CHAMP : « voix hors champ de Nadia », « voix off de Nadia », « VO Nadia », « (off) ».
+_CLIENT_OFFSCREEN_RE = re.compile(
+    r"\bvoix\s+(?:hors[\s-]+champ|off)\b(?:\s*(?:de|d['’]|:)\s*(?P<who>[^,.;:()\[\]\n—–]+))?",
+    re.IGNORECASE)
+_CLIENT_VO_RE = re.compile(
+    r"(?<![\w'’])VO\b\s*(?:de\s+|d['’]\s*|:\s*)?(?P<who>(?:Personnage\s+\d|[A-ZÀ-Ý][\w'’-]*))?")
+_CLIENT_OFF_MARK_RE = re.compile(r"[\(\[]\s*(?:off|hors[\s-]+champ|en\s+off)\s*[\)\]]", re.IGNORECASE)
+_CLIENT_OFFSCREEN_WHO_STOP = re.compile(r"\s+(?:qui|pendant|alors|et|sur|avec|amus\w*)\b.*$", re.IGNORECASE)
+# Variantes : « HOOK 2 », « HOOK 3 », « HOOK B », « VARIANTE », « VARIANTE B », « ACCROCHE 2 ».
+_CLIENT_HOOK_VARIANT_RE = re.compile(r"^(?:HOOK|ACCROCHE)\s*#?\s*(?P<k>\d{1,2}|[A-Z])\b")
+_CLIENT_VARIANTE_RE = re.compile(r"^VARIANTE?\b\s*#?\s*(?P<k>\d{1,2}\b|[A-Z]\b)?")
+
+
 def _client_split_title(rest: str) -> tuple[str, str]:
-    """Sépare « TITRE EN MAJUSCULES » du début du dialogue (même ligne). Le titre = mots sans
-    minuscule ; le dialogue commence au 1er mot avec une minuscule, ou par « [ »."""
+    """Sépare « TITRE EN MAJUSCULES » du reste de la ligne. Le titre = mots sans minuscule ; il
+    s'arrête au 1er mot avec une minuscule, ou à « [ », « ( » ou un timecode (le reste de
+    l'en-tête — didascalies, timecode — est lu par _client_block_header)."""
     toks = list(re.finditer(r"\S+", rest))
     for i, m in enumerate(toks):
         t = m.group(0)
         letters = [c for c in t if c.isalpha()]
-        if t.startswith("["):
+        if t.startswith(("[", "(")) or _CLIENT_TC_START_RE.match(t):
             return rest[: m.start()].strip(), rest[m.start():]
         if any(c.islower() for c in letters):
             return rest[: m.start()].strip(), rest[m.start():]
         nxt = toks[i + 1].group(0) if i + 1 < len(toks) else ""
-        if len(letters) == 1 and any(c.islower() for c in nxt):   # « À partir… », « Y a… »
+        prev = toks[i - 1].group(0).upper() if i else ""
+        if (len(letters) == 1 and any(c.islower() for c in nxt)
+                and prev not in _CLIENT_TITLE_LETTER_PREFIXES):   # « À partir… », « Y a… »
             return rest[: m.start()].strip(), rest[m.start():]
     return rest.strip(), ""
 
 
+def _client_tc_seconds(mm: str, ss: str, frac: str | None) -> float:
+    return int(mm) * 60 + int(ss) + (float(f"0.{frac}") if frac else 0.0)
+
+
+def client_timecode_seconds(timecode: str) -> float | None:
+    """Durée cible (s) d'un timecode « 0:00–0:03 » / « (00:12 → 00:15) » = fin − début ;
+    None si illisible ou non positif."""
+    m = _CLIENT_TIMECODE_RE.search(str(timecode or ""))
+    if not m:
+        return None
+    start = _client_tc_seconds(m.group(1), m.group(2), m.group(3))
+    end = _client_tc_seconds(m.group(4), m.group(5), m.group(6))
+    d = round(end - start, 2)
+    return d if d > 0 else None
+
+
+def _client_tc_text(match: re.Match[str]) -> str:
+    return match.group(0).strip().strip("[]()").strip()
+
+
+def _client_is_stage_note(content: str, after: str = "x") -> bool:
+    """Contenu d'un crochet = didascalie (et non valeur « [à valider] » du dialogue) : mot de jeu
+    / de voix, ou crochet seul en fin de ligne d'en-tête sans chiffre."""
+    c = _fold(content)
+    if _CLIENT_STAGE_RE.search(c):
+        return True
+    return not after.strip() and any(ch.isalpha() for ch in c) and not any(ch.isdigit() for ch in c)
+
+
+def _client_balanced_end(s: str) -> int:
+    """Index de la parenthèse fermante qui équilibre s[0] == « ( » (-1 si absente)."""
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _client_block_header(rest: str) -> dict[str, Any]:
+    """Ligne « BLOC N … » (après le numéro) → timecode, titre, didascalies, début du dialogue.
+    Les didascalies entre parenthèses / crochets de l'EN-TÊTE (« — HOOK (voix hors champ de
+    Nadia, amusée) ») vont dans la mise en scène, jamais dans le dialogue."""
+    s = rest.strip().lstrip("·•:.|").strip()
+    timecode, title, notes = "", "", []
+    m = _CLIENT_TIMECODE_RE.match(s)
+    if m:
+        timecode, s = _client_tc_text(m), s[m.end():].strip()
+    elif s.startswith("["):   # ancien format : [..] juste après « BLOC N » = timecode
+        end = s.find("]")
+        if end != -1:
+            timecode, s = s[1:end].strip(), s[end + 1:].strip()
+    s = s.lstrip("·•:|").strip()
+    if s[:1] in "—–-" and s[1:2].isspace():
+        title, s = _client_split_title(s[1:].strip())
+    while s:
+        t = s.lstrip("·•|").strip()
+        if t[:1] in "—–-" and t[1:2].isspace() and (
+                t[1:].strip()[:1] in "([" or _CLIENT_TC_START_RE.match(t[1:].strip())):
+            t = t[1:].strip()
+        m = _CLIENT_TIMECODE_RE.match(t)
+        if m:
+            timecode = timecode or _client_tc_text(m)
+            s = t[m.end():].strip()
+            continue
+        if t.startswith("("):
+            end = _client_balanced_end(t)
+            if end != -1:
+                notes.append(t[1:end].strip())
+                s = t[end + 1:].strip()
+                continue
+        if t.startswith("["):
+            end = t.find("]")
+            if end != -1 and _client_is_stage_note(t[1:end], t[end + 1:]):
+                notes.append(t[1:end].strip())
+                s = t[end + 1:].strip()
+                continue
+        s = t
+        break
+    # Timecode écrit DANS le titre (« HOOK · 0:03-0:06 ») : retiré du titre.
+    if not timecode and (m := _CLIENT_TIMECODE_RE.search(title)):
+        timecode = _client_tc_text(m)
+        title = (title[: m.start()] + " " + title[m.end():])
+    title = " ".join(title.split()).strip(" ·•:|—–-")
+    return {"timecode": timecode, "title": title, "notes": [n for n in notes if n], "dialogue": s}
+
+
+def client_variant(title: str) -> tuple[int, str]:
+    """(variant, variant_label) d'un titre de bloc : « HOOK 2 » → (1, "hook2"), « HOOK 3 » →
+    (1, "hook3"), « VARIANTE » → (1, "variante"), « VARIANTE B » → (1, "varianteb") ;
+    « HOOK » / « HOOK 1 » / autre → (0, "")."""
+    t = _fold(" ".join(str(title or "").split())).upper()
+    m = _CLIENT_HOOK_VARIANT_RE.match(t)
+    if m:
+        k = m.group("k")
+        if k in ("1", "A"):
+            return 0, ""
+        return 1, f"{'hook' if t.startswith('HOOK') else 'accroche'}{k.lower()}"
+    m = _CLIENT_VARIANTE_RE.match(t)
+    if m:
+        return 1, "variante" + (m.group("k") or "").strip().lower()
+    return 0, ""
+
+
+def client_offscreen(*texts: str) -> tuple[bool, str]:
+    """Voix HORS CHAMP dans l'en-tête, la mise en scène ou la ligne 🗣 : « voix hors champ de
+    Nadia », « voix off de Nadia », « VO Nadia », « (off) » → (True, "Nadia" | "")."""
+    found, who = False, ""
+    for raw in texts:
+        text = str(raw or "")
+        if not text.strip():
+            continue
+        for rx in (_CLIENT_OFFSCREEN_RE, _CLIENT_VO_RE):
+            for m in rx.finditer(text):
+                found = True
+                w = _CLIENT_OFFSCREEN_WHO_STOP.sub("", str(m.group("who") or "")).strip(" '’\"«»")
+                if w and not who:
+                    who = w
+        if _CLIENT_OFF_MARK_RE.search(text) or re.fullmatch(r"\s*(?:off|en\s+off)\s*", text, re.I):
+            found = True
+    return found, who
+
+
+def client_dialogue_warnings(block_n: Any, dialogue: str) -> list[str]:
+    """Parenthèse / crochet de JEU restés dans un dialogue : ils seraient DITS par la voix."""
+    out: list[str] = []
+    for m in re.finditer(r"\(([^()]*)\)", dialogue or ""):
+        out.append(f"Bloc {block_n} : « ({m.group(1).strip()}) » est dans le dialogue — il sera DIT "
+                   "tel quel. Si c'est une indication de jeu, mets-la dans la ligne titre ou la "
+                   "mise en scène 🎬.")
+    for m in _BRACKET_RE.finditer(dialogue or ""):
+        if _CLIENT_STAGE_RE.search(_fold(m.group(1))):
+            out.append(f"Bloc {block_n} : « [{m.group(1).strip()}] » ressemble à une indication de "
+                       "jeu — elle sera DITE (sans les crochets). Déplace-la dans la mise en scène 🎬.")
+    return out
+
+
 def parse_client_doc(text: str) -> list[dict[str, Any]]:
-    """Document client → [{block_n, timecode, title, dialogue, direction}] (dans l'ordre).
+    """Document client → [{block_n, timecode, title, dialogue, direction, mute, offscreen,
+    offscreen_who, variant, variant_label, excluded, target_seconds, warnings
+    (+ speaker_hint)}] dans l'ordre.
 
     Tolérant : un bloc commence par « BLOC N » ; timecode [..] et titre (après « — ») optionnels ;
     tout ce qui suit la ligne titre jusqu'à « 🎬 » = dialogue ; la ligne 🎬 (et la suite, jusqu'au
-    bloc suivant) = direction. Le texte du dialogue est une tranche EXACTE du document."""
+    bloc suivant) = direction. Le texte du dialogue est une tranche EXACTE du document.
+    - didascalies ( … ) / [ … ] de la ligne titre → début de la direction (jamais le dialogue) ;
+    - bloc sans dialogue, « (muet) », « (aucune voix) », « — », « … » → plan MUET (dialogue "") ;
+    - « voix hors champ de X », « voix off de X », « VO X », « (off) » (titre, 🎬 ou 🗣) →
+      offscreen=True, offscreen_who="X" (résolu en numéro de perso par l'appelant) ;
+    - titre « HOOK 2 », « HOOK 3 », « VARIANTE », « VARIANTE B » → variant=1, variant_label
+      (« hook2 », « hook3 », « variante », « varianteb »), excluded=1 ;
+    - timecode « [0:00–0:03] », « 0:03-0:06 », « (00:12 → 00:15) » → target_seconds (fin − début)."""
     blocks: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     in_direction = False
     for line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         m = _CLIENT_BLOCK_RE.match(line)
         if m:
-            rest = m.group(2).strip()
-            rest = rest.lstrip("·•:.").strip()
-            timecode = ""
-            if rest.startswith("["):
-                end = rest.find("]")
-                if end != -1:
-                    timecode, rest = rest[1:end].strip(), rest[end + 1:].strip()
-            title, dialogue = "", rest
-            if rest[:1] in "—–-" and rest[1:2].isspace():
-                title, dialogue = _client_split_title(rest[1:].strip())
-            cur = {"block_n": int(m.group(1)), "timecode": timecode, "title": title,
+            head = _client_block_header(m.group(2))
+            dialogue = head["dialogue"]
+            cur = {"block_n": int(m.group(1)), "timecode": head["timecode"], "title": head["title"],
+                   "notes": head["notes"],
                    "dialogue_lines": [dialogue] if dialogue.strip() else [], "direction_lines": []}
             blocks.append(cur)
             in_direction = False
@@ -1707,16 +1883,44 @@ def parse_client_doc(text: str) -> list[dict[str, Any]]:
     out = []
     for b in blocks:
         dialogue = "\n".join(b["dialogue_lines"]).strip()
-        if not dialogue:
-            raise BrainError(f"Bloc {b['block_n']} : aucun dialogue trouvé (texte avant « 🎬 »).")
+        mute = not dialogue or bool(_CLIENT_MUTE_RE.match(dialogue))
+        if mute:
+            dialogue = ""
+        notes = [n.rstrip(" .") for n in b["notes"]]
+        direction = " ".join(b["direction_lines"]).strip()
+        if notes:   # didascalies de la ligne titre → en tête de la mise en scène
+            direction = " ".join([". ".join(notes) + ".", direction]).strip()
+        hint = str(b.get("speaker_hint") or "")
+        off, who = client_offscreen(" ".join(f"({n})" for n in b["notes"]), b["title"], direction, hint)
+        variant, label = client_variant(b["title"])
         item = {
             "block_n": b["block_n"], "timecode": b["timecode"], "title": b["title"],
-            "dialogue": dialogue, "direction": " ".join(b["direction_lines"]).strip(),
+            "dialogue": dialogue, "direction": direction, "mute": mute,
+            "offscreen": bool(off and not mute), "offscreen_who": who if off and not mute else "",
+            "variant": variant, "variant_label": label, "excluded": variant,
+            "target_seconds": client_timecode_seconds(b["timecode"]),
+            "warnings": client_dialogue_warnings(b["block_n"], dialogue),
         }
-        if b.get("speaker_hint"):
-            item["speaker_hint"] = b["speaker_hint"]
+        if hint:
+            item["speaker_hint"] = hint
         out.append(item)
+    if all(b["mute"] for b in out) and not any(b["direction"] for b in out):
+        raise BrainError("Aucun dialogue ni mise en scène trouvés dans les blocs : écris le texte "
+                         "après « BLOC N — TITRE » et la mise en scène après « 🎬 ».")
     return out
+
+
+def client_doc_warnings(blocks: list[dict[str, Any]]) -> list[str]:
+    """Avertissements du découpage (affichés à l'écran) : didascalies restées dans un dialogue."""
+    return [w for b in blocks for w in (b.get("warnings") or [])]
+
+
+def client_block_fields(b: dict[str, Any]) -> dict[str, Any]:
+    """Champs de plan issus du découpage (stockés sur le clip) : excluded, variant,
+    variant_label, offscreen, target_seconds (None si pas de timecode)."""
+    return {"excluded": int(b.get("excluded") or 0), "variant": int(b.get("variant") or 0),
+            "variant_label": str(b.get("variant_label") or ""),
+            "offscreen": 1 if b.get("offscreen") else 0, "target_seconds": b.get("target_seconds")}
 
 
 def _client_sentences(text: str) -> list[str]:
@@ -2687,10 +2891,10 @@ def generate_avatar_omni_client_plan(
     plans = [{
         "dialogue": b["dialogue"], "block_n": b["block_n"], "block_sub": 1, "block_count": 1,
         "block_title": b["title"], "timecode": b["timecode"], "direction": b["direction"],
-        "label": str(b["block_n"]), "faces": faces,
+        "label": str(b["block_n"]), "faces": faces, "flags": client_block_fields(b),
     } for b in blocks]
     warnings: list[str] = []
-    alerts: list[str] = []
+    alerts: list[str] = client_doc_warnings(blocks)
     visuals: list[dict[str, Any]] = []
     if not cfg.dry_run:
         if not _brain_ready(cfg):
@@ -2765,6 +2969,7 @@ def generate_avatar_omni_client_plan(
             "dialogue": p["dialogue"], "segments": timed, "duration_s": total,
             **{k: p[k] for k in ("block_n", "block_sub", "block_count", "block_title",
                                  "timecode", "direction", "label")},
+            **p["flags"],
         })
         if total > config_app.OMNI_MAX_TOTAL_SECONDS:
             alerts.append(
@@ -2775,7 +2980,7 @@ def generate_avatar_omni_client_plan(
     bw = bracket_values_warning([s["dialogue"] for s in shots])
     if bw:
         alerts.append(bw)
-    return {"ad": _slug(blocks[0]["title"] or blocks[0]["dialogue"]), "shots": shots,
+    return {"ad": _slug(blocks[0]["title"] or blocks[0]["dialogue"] or blocks[0]["direction"]), "shots": shots,
             "warnings": warnings, "alerts": alerts, "max_words": max_words,
             "max_spoken": max_spoken, "style": style, "blocks": len(blocks), "bible": bible}
 
@@ -2973,7 +3178,7 @@ def generate_avatar_omni_auto_doc(
     parsed = parse_client_doc(doc)
     if realign_to_script(script, [b["dialogue"] for b in parsed]) is None:
         raise BrainVerbatimError("Document généré non conforme au script (texte altéré) — relance.")
-    warnings = []
+    warnings = client_doc_warnings(parsed)
     bw = bracket_values_warning([b["dialogue"] for b in parsed])
     if bw:
         warnings.append(bw)
@@ -3369,6 +3574,23 @@ def _canned_v2_shot(i: int, speaker: int, others: list[int], direction: str) -> 
     return " ".join(parts)
 
 
+def _canned_v2_silent_shot(i: int, visible: int, others: list[int], direction: str) -> str:
+    """Prompt image déterministe d'un bloc MUET ou en voix HORS CHAMP : la personne visible ne
+    parle pas (bouche fermée) ; aucune personne visible → plan de coupe du décor / produit."""
+    framing = _CANNED_V2_FRAMING[i % len(_CANNED_V2_FRAMING)]
+    if visible:
+        parts = [f"{framing}, vertical 9:16, eye level. Character {visible} in frame, not speaking, "
+                 "mouth closed, natural expression."]
+        if others:
+            who = ", ".join(f"Character {n}" for n in others)
+            parts.append(f"{who} {'is' if len(others) == 1 else 'are'} also in frame, silent.")
+    else:
+        parts = [f"{framing}, vertical 9:16. Cutaway shot of the set, no person speaking in frame."]
+    if direction.strip():
+        parts.append(f"Client staging (French, follow it exactly): {direction.strip()}")
+    return " ".join(parts)
+
+
 def _call_claude_audio_visuals(
     cfg: ProviderConfig, product_name: str, ambiance: str, plans: list[dict[str, Any]],
     persona: str = "", attempt: int = 0, *, bible: dict[str, str] | None = None,
@@ -3381,12 +3603,20 @@ def _call_claude_audio_visuals(
         title = f" — {p['block_title']}" if p.get("block_title") else ""
         sp = p["speaker"]
         who = f"Personnage {sp}" + (f" ({names[sp]})" if names.get(sp) else "")
+        if p.get("mute"):
+            speaking = ("  Plan MUET : personne ne parle (une seule réplique avec \"text\": \"\"), "
+                        "bouches fermées.\n")
+        elif p.get("offscreen"):
+            speaking = (f"  VOIX HORS CHAMP de {who} : {who} n'est PAS à l'image (jamais dans "
+                        "\"shot\" ni ses réfs) ; la personne visible se tait, bouche fermée.\n")
+        else:
+            speaking = (f"  Qui parle (déduit par le code ; à corriger seulement si le dialogue "
+                        f"change de locuteur) : {who}\n")
         lines.append(
             f"[Bloc {p['label']}]{title}\n"
-            f"  Qui parle (déduit par le code ; à corriger seulement si le dialogue change de "
-            f"locuteur) : {who}\n"
+            + speaking +
             f"  Direction du client (FR) : {p['direction'] or '(aucune — cadrage sobre face caméra)'}\n"
-            f"  Dialogue (VERBATIM) :\n    {p['dialogue']}"
+            f"  Dialogue (VERBATIM) :\n    {p['dialogue'] or '(aucun — plan muet)'}"
         )
     correction = (
         "\n\n[RAPPEL] Un objet par bloc, dans l'ordre ; les \"text\" sont des tranches EXACTES du "
@@ -3514,10 +3744,14 @@ def generate_avatar_audio_plan(
     plans = [{
         "dialogue": b["dialogue"], "block_n": b["block_n"], "block_title": b["title"],
         "timecode": b["timecode"], "direction": b["direction"], "label": str(b["block_n"]),
-        "speaker": resolve_block_speaker(str(b.get("speaker_hint") or ""), b["direction"],
-                                         personas, speakers),
+        # Voix hors champ « de X » : X = celui qui parle (sa fiche voix), sauf ligne 🗣 explicite.
+        "speaker": resolve_block_speaker(
+            str(b.get("speaker_hint") or b.get("offscreen_who") or ""), b["direction"],
+            personas, speakers),
+        "mute": bool(b.get("mute")) or not str(b["dialogue"]).strip(),
+        "offscreen": bool(b.get("offscreen")), "flags": client_block_fields(b),
     } for b in blocks]
-    alerts: list[str] = []
+    alerts: list[str] = client_doc_warnings(blocks)
     warnings: list[str] = []
     visuals: list[dict[str, Any]] = []
     if not cfg.dry_run:
@@ -3547,7 +3781,16 @@ def generate_avatar_audio_plan(
     shots: list[dict[str, Any]] = []
     for i, p in enumerate(plans):
         v = visuals[i] if i < len(visuals) else {}
-        reps = _replicas_from_claude(v, p["dialogue"], speakers) if v else None
+        if p["mute"]:
+            # Plan MUET : aucune réplique ; visuel de Claude (forme courte ou 1re réplique) gardé.
+            raw_r = v.get("replicas") if v else None
+            r0 = (raw_r[0] if isinstance(raw_r, list) and raw_r and isinstance(raw_r[0], dict)
+                  else (v or {}))
+            reps = [{"text": "", "speaker": p["speaker"], "shot": str(r0.get("shot") or "").strip(),
+                     "video": str(r0.get("video") or "").strip(),
+                     "refs": _norm_refs_needed(r0.get("refs_needed")) if r0 else None}]
+        else:
+            reps = _replicas_from_claude(v, p["dialogue"], speakers) if v else None
         if reps is None:
             if v:
                 alerts.append(f"Bloc {p['label']} : répliques non conformes au dialogue (texte "
@@ -3556,6 +3799,8 @@ def generate_avatar_audio_plan(
                      "refs": None}]
         pieces: list[tuple[dict[str, Any], str]] = []
         for r in reps:
+            if p["offscreen"]:   # voix hors champ : toujours la voix de X (jamais la personne visible)
+                r["speaker"] = p["speaker"]
             r["speaker"] = r["speaker"] or p["speaker"]
             wps = wps_for(r["speaker"])
             split = _split_replica(r["text"], wps) if _replica_seconds(r["text"], wps) > max_s else [r["text"]]
@@ -3566,11 +3811,12 @@ def generate_avatar_audio_plan(
         names_product = bool(product.strip()) and product.strip().lower() in d.lower()
         bottle = bool(_CLIENT_BOTTLE_RE.search(d))
         mentioned = {n for _, n in _character_mentions(_fold(d), personas)}
+        off = p["offscreen"]
         for k, (r, piece) in enumerate(pieces, 1):
             sp = int(r["speaker"])
             canned = not r["shot"]
             if canned:
-                if _CLIENT_SOLO_RE.search(d):
+                if _CLIENT_SOLO_RE.search(d) and not off:
                     in_frame = {sp}
                 else:   # personnage-produit muet : à l'image seulement si la direction le cite
                     in_frame = {n for n in described if n not in pchars or n in mentioned} | {sp}
@@ -3578,17 +3824,27 @@ def generate_avatar_audio_plan(
                 in_frame = ({config_app.omni_character_index(x) for x in r["refs"] or []}
                             | {int(m) for m in _SHOT_CHAR_RE.findall(r["shot"])} | {sp}) - {0}
             in_frame = {n for n in in_frame if n == sp or n in described}
+            if off:   # voix HORS CHAMP : X (speaker) n'est PAS à l'image
+                in_frame.discard(sp)
             if has_tp and bottle and not names_product:
                 wants_product = False   # flacon en main = le produit concurrent cité
             elif canned:
                 wants_product = names_product or bottle or bible_shows_product(bible)
             else:
                 wants_product = "produit" in (r["refs"] or []) or names_product
-            refs = audio_plan_refs(r["refs"], speaker=sp, in_frame=sorted(in_frame),
+            visible = sorted(in_frame)
+            lead = sp if not off else (visible[0] if visible else 0)
+            refs = audio_plan_refs(r["refs"], speaker=lead or sp, in_frame=visible,
                                    uploaded=uploaded, wants_product=wants_product)
-            others = sorted(n for n in in_frame if n != sp)
-            shot = (_scrub_third_party(r["shot"], tp_names) if r["shot"]
-                    else _canned_v2_shot(len(shots), sp, others, d))
+            if off:   # jamais la planche / le visage de la voix hors champ
+                refs = [x for x in refs if x not in (planche_kind(sp), config_app.omni_face_kind(sp))]
+            others = sorted(n for n in in_frame if n != lead)
+            if r["shot"]:
+                shot = _scrub_third_party(r["shot"], tp_names)
+            elif off or not piece.strip():
+                shot = _canned_v2_silent_shot(len(shots), lead, others, d)
+            else:
+                shot = _canned_v2_shot(len(shots), sp, others, d)
             if uploaded is not None:
                 shot = strip_photo_mentions(shot, uploaded)
             shot = _shot_with_ref_mentions(shot, refs, uploaded)
@@ -3613,7 +3869,8 @@ def generate_avatar_audio_plan(
                 "n": len(shots) + 1, "speaker": sp, "dialogue": piece,
                 "shot_prompt": shot,
                 "prompt_image": compose_client_prompt_image(
-                    bible, shot, style, names=char_names, characters=[sp, *others]),
+                    bible, shot, style, names=char_names,
+                    characters=([lead, *others] if lead else None) if off else [sp, *others]),
                 "video_prompt": video, "prompt_motion": video,
                 "refs_needed": refs, "segments": [],
                 "block_n": p["block_n"], "block_sub": k, "block_count": len(pieces),
@@ -3621,18 +3878,23 @@ def generate_avatar_audio_plan(
                 "duration_s": config_app.avatar_block_clip_seconds(
                     piece, est, cfg.avatar_video_model, config_app.DEFAULT_VOICE_MODE),
                 "est_seconds": round(est, 1), "label": label,
+                "mute": not piece.strip(),
+                # Découpage client : exclusion / variante / voix hors champ / durée cible.
+                **p["flags"], "offscreen": 1 if off and piece.strip() else 0,
             })
     if len(shots) > config_app.OBJET_MAX_SHOTS:
         raise BrainError(f"{len(shots)} blocs après découpage (> {config_app.OBJET_MAX_SHOTS}). "
                          "Raccourcis le texte ou fais plusieurs pubs.")
     # Garde-fou VERBATIM : les répliques reconstituent les dialogues des blocs, dans l'ordre.
     for p in plans:
+        if p["mute"]:
+            continue   # plan muet : aucune réplique à vérifier
         if realign_to_script(p["dialogue"], p["pieces"]) is None:
             raise BrainVerbatimError(f"Bloc {p['label']} : découpage non conforme au dialogue.")
     bw = bracket_values_warning([s["dialogue"] for s in shots])
     if bw:
         alerts.append(bw)
-    head = blocks[0]["title"] or blocks[0]["dialogue"]
+    head = blocks[0]["title"] or blocks[0]["dialogue"] or blocks[0]["direction"]
     return {"ad": _slug(head), "shots": shots, "warnings": warnings, "alerts": alerts,
             "max_words": int(max_s * wps_for(speakers[0])), "style": style,
             "blocks": len(blocks), "bible": bible, "pipeline_version": 2}

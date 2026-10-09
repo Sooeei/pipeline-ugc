@@ -1549,8 +1549,11 @@ def build_omni_prompt(
     camera_key: str = "",
     style: str = config_app.DEFAULT_OMNI_STYLE,
     images: list[prompt_profiles.SentImage] | None = None,
+    offscreen: bool = False,
 ) -> str:
     """Prompt Google Omni d'UN plan (UN appel), assemblé par prompt_profiles (ordre fixe).
+    `offscreen` : la réplique est dite par une voix HORS CHAMP (`speaker` = qui parle, absent de
+    l'image) ; `silent` = la personne visible, bouche fermée, sans règle de lip-sync.
     Rôles des images DÉCLARÉS en tête ([# Sources <FIRST_FRAME>@Image1] [# References
     <IMAGE_REF_0>@Image2]) + phrases de rôle à la fin ; `images` = images réellement envoyées
     (providers.omni_sent_images), sinon déduites de `has_anchor` / `scene_desc`. Avec start frame :
@@ -1564,21 +1567,28 @@ def build_omni_prompt(
         images = omni_images_for(text_only=text_only, has_anchor=has_anchor)
     text = brain.strip_brackets((dialogue or "").strip())
     spoken = bool(text)
+    off = bool(offscreen) and spoken
     cam = camera.strip() or omni_camera_sentence(
         camera_key, spoken=spoken, style=style,
         first_frame=prompt_profiles.omni_has_first_frame(images))
-    motion, _removed = omni_motion(prompt_motion, spoken)
+    motion, _removed = omni_motion(prompt_motion, spoken and not off)
     subject: list[str] = []
     if text_only:
         subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
-        if spoken:
+        if spoken and not off:
             subject.append(lipsync_rules.SPOKEN_FRAMING)
     subject.append(motion)
-    subject.append(_omni_ref_subject(images, 2 if silent else 1))
+    subject.append(_omni_ref_subject(images, 1 if off else (2 if silent else 1)))
     who = f"The speaking character ({speaker})" if speaker else "The person"
     performance: list[str] = []
     audio: list[str] = []
-    if spoken:
+    if off:
+        performance.append(lipsync_rules.offscreen_voice_line(speaker or "a character off screen"))
+        audio.append(f"[0-1s] {intro}, silent. [1-{seconds}s] Off-screen voice of "
+                     f"{speaker or 'a character off screen'}, spoken in French, in "
+                     f"{voice_i18n.clean_sheet(voice_sheet)}: \"{_omni_quote_dialogue(text)}\"")
+        audio.append(lipsync_rules.OFFSCREEN_AUDIO)
+    elif spoken:
         performance.append(lipsync_rules.single_speaker_line(
             "the speaking character" if speaker else "the person"))
         if silent:
@@ -1783,9 +1793,23 @@ def clip_characters_in_frame(c: dict[str, Any], ad: dict[str, Any]) -> list[int]
     nums = {config_app.omni_character_index(k) for k in needed} - {0}
     nums |= {int(omni_timing.normalize_turn(s)["speaker"]) for s in clip_segments(c)
              if str(s.get("text") or "").strip()}
+    if clip_offscreen(c):
+        # Voix HORS CHAMP : celui qui parle n'est PAS à l'image (seulement les visibles).
+        sp = clip_offscreen_speaker(c)
+        nums.discard(sp)
+        return sorted(nums or (set(ad_character_descs(ad)) - {sp}))
     if not nums:
         nums = set(ad_character_descs(ad)) or {1}
     return sorted(nums)
+
+
+def clip_offscreen_speaker(c: dict[str, Any]) -> int:
+    """Numéro du personnage dont on entend la voix hors champ (clips.speaker, sinon 1er tour)."""
+    try:
+        sp = int(c.get("speaker") or 0)
+    except (TypeError, ValueError):
+        sp = 0
+    return sp if sp >= 1 else clip_first_speaker(c)
 
 
 class Tier1Pacer:
@@ -1940,7 +1964,7 @@ def build_omni_turn_prompt(
     speaker_name: str = "", voice_sheet: str = "", others: list[str] | None = None,
     has_anchor: bool = False, style: str = config_app.DEFAULT_OMNI_STYLE, n_people: int = 1,
     video_prompt: str = "", scene_desc: str = "", camera_key: str = "",
-    images: list[prompt_profiles.SentImage] | None = None,
+    images: list[prompt_profiles.SentImage] | None = None, offscreen: bool = False,
 ) -> str:
     """Prompt Google Omni d'UN tour chronométré (plan à tours, option « découpage auto »),
     assemblé par prompt_profiles dans l'ordre fixe. 1er tour : rôles des images déclarés en tête
@@ -1949,13 +1973,18 @@ def build_omni_turn_prompt(
     (omni_timing, timecodes = même calcul que la durée envoyée) dans le bloc audio. UN seul
     personnage parle ; tour muet = « No dialogue ». Gestes nettoyés des marques (et des gestes de
     tête si parlé) ; dialogue VERBATIM (crochets retirés). 1er tour : `video_prompt` (mouvement)
-    en sujet ; `scene_desc` = mode « texte_seul » (pas d'image : description visuelle écrite)."""
+    en sujet ; `scene_desc` = mode « texte_seul » (pas d'image : description visuelle écrite).
+    `offscreen` : tour dit par une voix HORS CHAMP (`speaker_name`) — `others` = les personnes
+    visibles, bouche fermée, sans règle de lip-sync."""
     t = omni_timing.normalize_turn(turn)
     mute = bool(timing.get("mute") or t["mute"])
     spoken = not mute
+    off = bool(offscreen) and spoken
     for k in ("avant", "pendant", "apres"):
-        t[k], _removed = omni_motion(t[k], spoken)
-    if speaker_desc and speaker_name:
+        t[k], _removed = omni_motion(t[k], spoken and not off)
+    if off:
+        who = f"An off-screen voice of {speaker_name or 'a character off screen'}"
+    elif speaker_desc and speaker_name:
         who = f"{speaker_name}, the speaking character ({speaker_desc}),"
     elif speaker_desc:
         who = f"The speaking character ({speaker_desc})"
@@ -1974,7 +2003,7 @@ def build_omni_turn_prompt(
         if text_only:
             subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
         if video_prompt.strip():
-            subject.append(omni_motion(video_prompt, spoken)[0])
+            subject.append(omni_motion(video_prompt, spoken and not off)[0])
         subject.append(_omni_ref_subject(images, n_people))
     else:
         images = []
@@ -1985,6 +2014,10 @@ def build_omni_turn_prompt(
     if mute:
         performance.append("Nobody speaks: no lip movement")
         audio = [timed, "The audio is a quiet natural room tone"]
+    elif off:
+        performance.append(lipsync_rules.offscreen_voice_line(
+            speaker_name or "a character off screen", len(others or [])))
+        audio = [timed, lipsync_rules.OFFSCREEN_AUDIO]
     else:
         performance.append(lipsync_rules.single_speaker_line("the speaking character"))
         if others:
@@ -2015,6 +2048,7 @@ def build_omni_block_prompt(
     voice_sheet: str, names: dict[int, str], scene_desc: str = "",
     images: list[prompt_profiles.SentImage] | None = None, camera_key: str = "",
     style: str = config_app.DEFAULT_OMNI_STYLE, chain_turn: bool = False,
+    offscreen: bool = False,
 ) -> str:
     """Prompt Omni d'UN bloc Avatar IA v2 (UN appel, une réplique d'UN personnage), assemblé par
     prompt_profiles (ordre fixe). Rôles des images déclarés en tête = `images` (images réellement
@@ -2022,15 +2056,20 @@ def build_omni_block_prompt(
     Start frame : AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
     `chain_turn` = tour suivant d'une chaîne « voix identique » (previous_interaction_id) :
     « Show the same character in the next scene, … » ; la keyframe du bloc éventuelle est une
-    RÉFÉRENCE (cadrage / décor), jamais une 1re image. Réplique VERBATIM (crochets retirés)."""
+    RÉFÉRENCE (cadrage / décor), jamais une 1re image. Réplique VERBATIM (crochets retirés).
+    `offscreen` = voix HORS CHAMP de `speaker` : `others_in_frame` = les personnes VISIBLES, qui
+    gardent la bouche fermée (lipsync_rules.offscreen_voice_line) ; aucune règle de lip-sync,
+    fiche voix = celle du speaker."""
     sp = max(1, int(speaker or 1))
     text_only = bool(scene_desc.strip())
     if images is None:
         images = omni_images_for(text_only=text_only)
     text = _omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
     spoken = bool(text)
+    off = bool(offscreen) and spoken
     first_frame = prompt_profiles.omni_has_first_frame(images)
-    gesture = _omni_gesture(video_prompt, spoken)
+    # Voix hors champ : personne ne parle à l'image → gestes de tête gardés (pas de lip-sync).
+    gesture = _omni_gesture(video_prompt, spoken and not off)
     lead = ""
     subject: list[str] = []
     if chain_turn:
@@ -2044,11 +2083,12 @@ def build_omni_block_prompt(
             subject.append(f"Framing, set and outfit as in {ref}")
     if text_only:
         subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
-        if spoken:
+        if spoken and not off:
             subject.append(lipsync_rules.SPOKEN_FRAMING)
     subject.append(gesture)
+    visible = set(others_in_frame or []) - {sp}
     if not chain_turn:
-        subject.append(_omni_ref_subject(images, 1 + len(set(others_in_frame or []) - {sp})))
+        subject.append(_omni_ref_subject(images, max(1, len(visible)) if off else 1 + len(visible)))
     who = _omni_who(sp, names)
     others: list[str] = []
     for m in dict.fromkeys(int(x) for x in others_in_frame or []):
@@ -2056,7 +2096,13 @@ def build_omni_block_prompt(
             others.append(_omni_who(m, names))
     performance: list[str] = []
     audio: list[str] = []
-    if spoken:
+    if off:
+        performance.append(lipsync_rules.offscreen_voice_line(who, len(others)))
+        audio.append(f'Off-screen voice of {who}, spoken in French: "{text}"')
+        if voice_sheet.strip():
+            audio.append(f"Voice: {voice_i18n.clean_sheet(voice_sheet)}")
+        audio.append(lipsync_rules.OFFSCREEN_AUDIO)
+    elif spoken:
         performance.append(f"Only {who} speaks, expressive mouth in sync with every word, subtle body motion")
         performance.extend(f"{o} keeps their mouth closed, does not speak" for o in others)
         audio.append(f'{who} says, spoken in French: "{text}"')
@@ -2088,8 +2134,9 @@ def clip_text_only(c: dict[str, Any]) -> bool:
 
 
 def omni_clip_animatable(c: dict[str, Any]) -> bool:
-    """Keyframe VALIDÉ (keyframe_ok=1) et, en mode start_frame, une image présente."""
-    return bool(int(c.get("keyframe_ok") or 0)) and (clip_text_only(c) or bool(c.get("image_path")))
+    """Plan NON exclu, keyframe VALIDÉ (keyframe_ok=1) et, en mode start_frame, une image."""
+    return (not clip_excluded(c) and bool(int(c.get("keyframe_ok") or 0))
+            and (clip_text_only(c) or bool(c.get("image_path"))))
 
 
 IMAGE_FILTER_FAILED_MSG = (
@@ -2210,6 +2257,9 @@ def animate_avatar_omni_clips(
         dialogue = str(c.get("script") or "").strip()   # VERBATIM
         # Plan à tours joué en UN appel (découpage auto désactivé) : speaker du 1er tour parlé.
         sp = clip_first_speaker(c) if clip_segments(c) else 1
+        off = clip_offscreen(c) and bool(dialogue)
+        if off:   # voix hors champ : la voix (et sa fiche) est celle de clips.speaker
+            sp = clip_offscreen_speaker(c)
         seconds = config_app.omni_clip_seconds(dialogue, wps_for(sp))
         text_only = clip_text_only(c)
         has_anchor = (not text_only and not start_frame_only and ref is not None
@@ -2224,10 +2274,12 @@ def animate_avatar_omni_clips(
         else:   # start frame : l'image porte le visuel → noms seulement (pas de redescription)
             sp_txt = names.get(sp, "")
             si_txt = (names.get(other) or "the second person") if descs.get(other) else ""
+        if off:   # la voix hors champ est NOMMÉE (jamais décrite : elle n'est pas à l'image)
+            sp_txt = _omni_who(sp, names)
         prompt = build_omni_prompt(
             motion, dialogue, sheet_for(sp), seconds, has_anchor,
             speaker=sp_txt, silent=si_txt, scene_desc=clip_scene_desc(c) if text_only else "",
-            camera_key=camera_key, style=style, images=sent_imgs,
+            camera_key=camera_key, style=style, images=sent_imgs, offscreen=off,
         )
         _log_omni_plan_warnings(n, dialogue, motion, wps_for(sp))
         db.update_clip(int(c["id"]), omni_prompt=json.dumps([prompt], ensure_ascii=False))
@@ -2269,10 +2321,11 @@ def animate_avatar_omni_clips(
         cdescs = {m: strip_photo_refs(d) for m, d in descs.items()} if text_only else descs
         video_prompt = str(c.get("video_prompt") or "").strip()
         sent = clip_omni_prompts(c)[:done] if done else []   # prompts des tours déjà faits
+        off = clip_offscreen(c)
         for i in range(done, k):
             s = segs[i]
             turn = omni_timing.normalize_turn(s)
-            sp = int(turn["speaker"])
+            sp = clip_offscreen_speaker(c) if off else int(turn["speaker"])
             timing = turn_plan(turn, wps_for(sp), max_spoken)
             seconds = int(timing["seconds"])
             # Keyframe (start frame) : l'image porte déjà le visuel → on ne redécrit pas les
@@ -2282,12 +2335,14 @@ def animate_avatar_omni_clips(
                       for m in in_frame if m != sp]
             sent_imgs = omni_sent_images(image, anchor) if i == 0 else []
             prompt = build_omni_turn_prompt(
-                turn, timing, first=(i == 0), speaker_desc="" if lean else cdescs.get(sp, ""),
-                speaker_name=names.get(sp, ""), voice_sheet=sheet_for(sp), others=others,
+                turn, timing, first=(i == 0),
+                speaker_desc="" if (lean or off) else cdescs.get(sp, ""),
+                speaker_name=_omni_who(sp, names) if off else names.get(sp, ""),
+                voice_sheet=sheet_for(sp), others=others,
                 has_anchor=has_anchor, style=style, n_people=max(len(in_frame), 1),
                 video_prompt=video_prompt if i == 0 else "",
                 scene_desc=clip_scene_desc(c) if (i == 0 and text_only) else "",
-                camera_key=camera_key, images=sent_imgs,
+                camera_key=camera_key, images=sent_imgs, offscreen=off,
             )
             sent = [*sent[:i], prompt]
             db.update_clip(clip_id, omni_prompt=json.dumps(sent, ensure_ascii=False))

@@ -195,6 +195,21 @@ def gestures_warning(removed: list[str]) -> str:
     return ("Gestes de tête retirés pour un lip-sync fiable : " + ", ".join(f"« {r} »" for r in removed) + ".")
 
 
+def offscreen_voice_line(who: str, n_visible: int = 1) -> str:
+    """Voix HORS CHAMP (plan parlé dont le locuteur n'est PAS à l'image) : la/les personne(s)
+    visible(s) se taisent, bouche fermée — AUCUNE règle de lip-sync pour elles.
+    « The visible person does not speak, mouth closed; the voice is an off-screen voice of X. »"""
+    voice = f"the voice is an off-screen voice of {(who or 'a character off screen').strip()}"
+    if n_visible <= 0:
+        return f"Nobody in frame speaks; {voice}."
+    if n_visible > 1:
+        return f"The visible people do not speak, mouths closed; {voice}."
+    return f"The visible person does not speak, mouth closed; {voice}."
+
+
+OFFSCREEN_AUDIO = "Audio: the off-screen voice clear up front over a quiet room tone, no background ambience"
+
+
 def single_speaker_line(name: str, others: list[str] | None = None) -> str:
     """« Only X speaks and lip-syncs; the others stay silent. » (sans autres persos : version courte)."""
     who = (name or "the character").strip()

@@ -55,8 +55,11 @@ def test_parsing_is_tolerant():
 def test_no_block_or_empty_dialogue_refused():
     with pytest.raises(brain.BrainError, match="Aucun bloc"):
         brain.parse_client_doc("juste un texte sans bloc")
-    with pytest.raises(brain.BrainError, match="Bloc 3"):
-        brain.parse_client_doc("BLOC 3 — TITRE\n🎬 direction seule")
+    # Bloc sans dialogue = plan MUET (plus une erreur) ; un document sans aucun texte reste refusé.
+    b = brain.parse_client_doc("BLOC 3 — TITRE\n🎬 direction seule")
+    assert b[0]["mute"] is True and b[0]["dialogue"] == "" and b[0]["direction"] == "direction seule"
+    with pytest.raises(brain.BrainError, match="Aucun dialogue"):
+        brain.parse_client_doc("BLOC 1 — TITRE\nBLOC 2 — AUTRE")
 
 
 # ============================================================ plan (simulation) : 1 BLOC = 1 PLAN

@@ -162,8 +162,9 @@ def test_avatar_ia_v2_full_flow_simulation(no_network):
         assert r.status_code == 200 and r.json()["validated"] == len(clips)
 
         # 8. Options : ElevenLabs masqué (refusé), modèle vidéo modifiable ------------------------
-        assert c.patch(f"/api/avatar-omni/options/{ad_id}",
-                       json={"voice_mode": "elevenlabs"}).status_code == 400
+        r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"voice_mode": "elevenlabs"})
+        assert r.status_code == 200 and r.json()["voice_mode"] == "native"   # normalisé
+        assert db.get_ad(ad_id)["voice_mode"] == "native"
         r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"video_model": "kling"})
         assert r.status_code == 200 and r.json()["video_model"] == "kling"
         r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"video_model": "grok"})

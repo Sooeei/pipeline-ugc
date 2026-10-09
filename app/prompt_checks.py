@@ -122,7 +122,14 @@ _TEXT_WANTED = (r"\b(?:text|caption|title|sign|banner|subtitles?)\s+(?:that\s+)?
                 r"saying|says)\b|\bwith the (?:text|words)\b|\bon-screen text\b(?! *(?:is|are) not)|"
                 r"\btitle card\b|\bwritten (?:on|across)\b")
 
+# Voix HORS CHAMP : la personne visible se tait → aucune consigne de lip-sync ne doit rester.
+_OFFSCREEN = r"\boff-screen voice\b"
+_LIPSYNC = r"\blip-?syncs?\b|\bin sync with every word\b|\bspeaks and lip"
+
 GENERIC_COMBINATIONS: tuple[tuple[str, str, str], ...] = (
+    (_OFFSCREEN, _LIPSYNC,
+     "Consignes contradictoires : voix hors champ (personne visible bouche fermée) ET lip-sync "
+     "demandé."),
     (_CAMERA_FIXED, _CAMERA_MOVES,
      "Consignes caméra contradictoires : caméra fixe (locked off) ET mouvement "
      "(travelling / handheld / dolly / pan / orbit)."),

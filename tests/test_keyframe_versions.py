@@ -506,6 +506,7 @@ def test_auto_face_reports_method_and_can_be_changed_by_hand(tmp_path, monkeypat
     """Sans détecteur (OpenCV 5 ne livre plus le fichier Haar) : réf en recadrage APPROXIMATIF,
     signalée ; « Changer » = autre plan source et/ou cadre tracé à la main (nouveau fichier)."""
     monkeypatch.setattr(keyframe_versions, "face_detector_path", lambda: "")
+    monkeypatch.setattr(keyframe_versions, "yunet_available", lambda: False)
     ad_id, cid = _ao_one_person(tmp_path)
     with TestClient(app) as c:
         auto = c.post(f"/api/avatar-omni/validate/{cid}", json={"valide": True}).json()["auto_face_ref"]
@@ -560,3 +561,36 @@ def test_face_detector_absent_with_opencv5_without_cascade(monkeypatch):
     assert keyframe_versions.face_detector_path() == ""
     _box, method = keyframe_versions.face_box_ex(Image.new("RGB", (720, 1280)))
     assert method == keyframe_versions.FACE_APPROX
+
+
+# ============================================================ détecteur YuNet (modèle embarqué)
+def test_yunet_model_bundled_and_loads_from_accented_path():
+    """Le modèle YuNet est dans app/models et se charge malgré un chemin avec accents (« Théo »,
+    « création ») : chargement depuis la mémoire (OpenCV n'ouvre pas ces chemins sur Windows)."""
+    cv2 = pytest.importorskip("cv2")
+    if not hasattr(cv2, "FaceDetectorYN"):
+        pytest.skip("OpenCV sans FaceDetectorYN")
+    assert keyframe_versions.YUNET_MODEL.is_file() and keyframe_versions.face_detector() == "yunet"
+    assert keyframe_versions._yunet_faces(Image.new("RGB", (720, 1280), (20, 20, 20))) == []
+    _box, method = keyframe_versions.face_box_ex(Image.new("RGB", (720, 1280), (20, 20, 20)))
+    assert method == keyframe_versions.FACE_APPROX            # pas de visage → repli
+
+
+def test_yunet_used_first_and_box_squared_around_face(monkeypatch):
+    monkeypatch.setattr(keyframe_versions, "yunet_available", lambda: True)
+    monkeypatch.setattr(keyframe_versions, "_yunet_faces",
+                        lambda img: [(10, 10, 20, 20, 0.7), (300, 400, 100, 100, 0.9)])
+    box, method = keyframe_versions.face_box_ex(Image.new("RGB", (720, 1280)))
+    assert method == keyframe_versions.FACE_DETECTED and box == (260, 360, 440, 540)   # le plus grand
+    view_label = keyframe_versions._DETECTOR_LABELS["yunet"]
+    assert "YuNet" in view_label
+
+
+@pytest.mark.skipif(not (Path(__file__).resolve().parents[1] / "refs_atelier" / "kf_blonde.png").is_file(),
+                    reason="image de perso locale absente (refs_* non versionnés)")
+def test_yunet_detects_real_character_face():
+    src = Path(__file__).resolve().parents[1] / "refs_atelier" / "kf_blonde.png"
+    with Image.open(src) as im:
+        (x0, y0, x1, y1), method = keyframe_versions.face_box_ex(im.convert("RGB"))
+        assert method == keyframe_versions.FACE_DETECTED
+        assert x1 - x0 == y1 - y0 and y0 < im.height // 2      # carré, dans le haut de l'image

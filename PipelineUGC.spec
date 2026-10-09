@@ -10,7 +10,8 @@
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [("app/static", "app/static"), ("icon.ico", ".")]
+# app/models : modèle de détection de visage YuNet (réf visage auto, OpenCV FaceDetectorYN).
+datas = [("app/static", "app/static"), ("app/models", "app/models"), ("icon.ico", ".")]
 binaries = []
 hiddenimports = []
 

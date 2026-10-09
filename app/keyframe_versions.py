@@ -366,6 +366,49 @@ def media_plan_size() -> tuple[int, int]:
 # ==================================================================== réf visage automatique
 FACE_DETECTED, FACE_APPROX, FACE_MANUAL = "detected", "approx", "manual"
 
+# Détecteur de visages YuNet (OpenCV FaceDetectorYN), modèle embarqué dans app/models (licence MIT,
+# opencv/opencv_zoo, face_detection_yunet_2023mar.onnx). Prioritaire sur Haar et sur le repli.
+YUNET_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
+YUNET_SCORE_MIN = 0.6
+
+
+def yunet_available() -> bool:
+    try:
+        import cv2
+
+        return hasattr(cv2, "FaceDetectorYN") and YUNET_MODEL.is_file()
+    except Exception:  # noqa: BLE001 - OpenCV absent
+        return False
+
+
+def face_detector() -> str:
+    """Détecteur de visage disponible : « yunet » (prioritaire), « haar », ou "" (repli)."""
+    if yunet_available():
+        return "yunet"
+    return "haar" if face_detector_path() else ""
+
+
+def _yunet_faces(img: Any) -> list[tuple[int, int, int, int, float]]:
+    """Visages détectés par YuNet : [(x, y, w, h, score)] (score ≥ YUNET_SCORE_MIN)."""
+    import cv2
+    import numpy as np
+
+    try:   # OpenCV 5 : avertissement « Targets are not supported… » à chaque création → silence
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except Exception:  # noqa: BLE001
+        pass
+    bgr = np.ascontiguousarray(np.array(img.convert("RGB"))[:, :, ::-1])
+    h, w = bgr.shape[:2]
+    # Modèle chargé depuis la MÉMOIRE : OpenCV n'ouvre pas un chemin Windows avec accents
+    # (« Théo », « création de vidéo ia ») — Can't read ONNX file.
+    model = np.frombuffer(YUNET_MODEL.read_bytes(), np.uint8)
+    det = cv2.FaceDetectorYN.create("onnx", model, np.array([], np.uint8), (w, h),
+                                    YUNET_SCORE_MIN, 0.3, 5000)
+    _ok, faces = det.detect(bgr)
+    if faces is None:
+        return []
+    return [(int(f[0]), int(f[1]), int(f[2]), int(f[3]), float(f[-1])) for f in faces]
+
 
 def face_detector_path() -> str:
     """Fichier Haar cascade de visages livré avec OpenCV ("" si indisponible : OpenCV 5 ne fournit
@@ -390,10 +433,25 @@ def face_box(img: Any) -> tuple[int, int, int, int]:
 
 
 def face_box_ex(img: Any) -> tuple[tuple[int, int, int, int], str]:
-    """(boîte (x0, y0, x1, y1), méthode) du visage : plus grand visage DÉTECTÉ (Haar cascade
-    OpenCV si disponible), élargi pour garder cheveux et menton → « detected » ; sinon recadrage
+    """(boîte (x0, y0, x1, y1), méthode) du visage : plus grand visage DÉTECTÉ (YuNet, sinon Haar
+    cascade si disponible), élargi pour garder cheveux et menton → « detected » ; sinon recadrage
     CENTRÉ en HAUT de l'image → « approx » (à vérifier par l'utilisateur)."""
     w, h = img.size
+
+    def _square(fx: int, fy: int, fw: int, fh: int) -> tuple[int, int, int, int]:
+        side = int(max(fw, fh) * 1.8)
+        cx, cy = fx + fw // 2, fy + fh // 2
+        x0, y0 = max(0, cx - side // 2), max(0, cy - side // 2)
+        return x0, y0, min(w, x0 + side), min(h, y0 + side)
+
+    if yunet_available():
+        try:
+            faces = _yunet_faces(img)
+            if faces:
+                fx, fy, fw, fh, _s = max(faces, key=lambda f: f[2] * f[3])
+                return _square(fx, fy, fw, fh), FACE_DETECTED
+        except Exception as exc:  # noqa: BLE001 - détection facultative → Haar / repli
+            print(f"[KEYFRAMES] YuNet indisponible : {exc!r}", flush=True)
     try:
         import cv2
         import numpy as np
@@ -404,10 +462,7 @@ def face_box_ex(img: Any) -> tuple[tuple[int, int, int, int], str]:
             faces = cv2.CascadeClassifier(xml).detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
             if len(faces):
                 fx, fy, fw, fh = max(faces, key=lambda f: int(f[2]) * int(f[3]))
-                side = int(max(fw, fh) * 1.8)
-                cx, cy = fx + fw // 2, fy + fh // 2
-                x0, y0 = max(0, cx - side // 2), max(0, cy - side // 2)
-                return (x0, y0, min(w, x0 + side), min(h, y0 + side)), FACE_DETECTED
+                return _square(int(fx), int(fy), int(fw), int(fh)), FACE_DETECTED
     except Exception:  # noqa: BLE001 - détection facultative → repli
         pass
     side = int(min(w, h * 0.5) * 0.7)
@@ -682,6 +737,14 @@ _FACE_METHOD_LABELS = {
 }
 
 
+_DETECTOR_LABELS = {
+    "yunet": "détection de visage active (YuNet) : le visage est recadré automatiquement",
+    "haar": "détection de visage active (OpenCV Haar)",
+    "": ("pas de détecteur de visage disponible : recadrage approximatif, vérifie chaque réf et "
+         "utilise « Changer » si besoin"),
+}
+
+
 def _auto_face_view(ad_id: int) -> dict[str, Any]:
     """Réfs visage AUTO par perso (nom, plan source, méthode) + images de plans utilisables pour
     « Changer » (plans avec image où le perso est à l'image)."""
@@ -715,10 +778,8 @@ def _auto_face_view(ad_id: int) -> dict[str, Any]:
             "method_label": _FACE_METHOD_LABELS.get(method, ""), "candidates": candidates,
         })
     return {"ad_id": ad_id, "enabled": auto_face_enabled(ad), "refs": refs,
-            "detector": "haar" if face_detector_path() else "",
-            "detector_label": ("détection de visage OpenCV active" if face_detector_path() else
-                               "pas de détecteur de visage dans cet OpenCV : recadrage approximatif, "
-                               "vérifie chaque réf et utilise « Changer » si besoin")}
+            "detector": face_detector(),
+            "detector_label": _DETECTOR_LABELS[face_detector()]}
 
 
 class AutoFaceChangeIn(BaseModel):

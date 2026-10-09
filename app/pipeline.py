@@ -2071,6 +2071,17 @@ def build_omni_block_prompt(
                          performance=performance, audio=audio, spoken=spoken)
 
 
+def clip_excluded(c: dict[str, Any]) -> bool:
+    """Plan exclu (choix manuel ou variante de hook non demandée) : ignoré par la validation
+    globale des keyframes, la génération vidéo et l'assemblage."""
+    return bool(int(c.get("excluded") or 0))
+
+
+def clip_offscreen(c: dict[str, Any]) -> bool:
+    """Réplique dite par une voix HORS CHAMP (`speaker`) : la personne visible garde la bouche fermée."""
+    return bool(int(c.get("offscreen") or 0))
+
+
 def clip_text_only(c: dict[str, Any]) -> bool:
     """Plan en mode « texte_seul » : Omni sans image de départ."""
     return config_app.normalize_keyframe_mode(c.get("keyframe_mode")) == "texte_seul"

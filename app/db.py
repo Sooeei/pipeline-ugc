@@ -213,6 +213,15 @@ _MIGRATIONS["ads"].extend([
 _MIGRATIONS["clips"].extend([
     ("omni_chain", "TEXT DEFAULT ''"),   # JSON : place du bloc dans sa chaîne voix identique (coupe)
 ])
+# Plans : exclusion, variantes de hook, voix hors champ, durée cible (découpage client) — socle
+# partagé (parsing : brain.parse_client_doc ; usage : génération, assemblage, export, prompts).
+_MIGRATIONS["clips"].extend([
+    ("excluded", "INTEGER DEFAULT 0"),      # 1 = exclu de la validation globale, de la vidéo, de l'assemblage
+    ("variant", "INTEGER DEFAULT 0"),       # 1 = variante (HOOK 2 / HOOK 3 / VARIANTE) : exclue par défaut
+    ("variant_label", "TEXT DEFAULT ''"),   # suffixe d'export (« hook2 », « variante »…)
+    ("offscreen", "INTEGER DEFAULT 0"),     # 1 = voix HORS CHAMP de `speaker` : la personne visible se tait
+    ("target_seconds", "REAL"),             # durée cible du plan (timecodes du découpage client)
+])
 
 
 def connect() -> sqlite3.Connection:
@@ -764,6 +773,7 @@ _ALLOWED_CLIP_COLS = {
     "anchor_edit",   # Objet animé : surcharge par plan de la retouche de l'ancre (NULL = pub)
     "speech_cut", "extra_seconds",
     "omni_chain",    # Omni : place du bloc dans sa chaîne « voix identique »
+    "excluded", "variant", "variant_label", "offscreen", "target_seconds",
 }
 
 

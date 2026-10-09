@@ -90,11 +90,19 @@ def test_bible_identical_in_all_ten_prompt_images():
     res = _sim_plan()
     text = brain.bible_text(res["bible"])
     assert P1_EN in text and P2_EN in text
-    # mot pour mot, juste après les TRAITS CLÉS placés en tête (v2)
-    assert all(s["prompt_image"].startswith("KEY TRAITS") and f"\n\n{text}\n\nTHIS SHOT:" in s["prompt_image"]
-               for s in res["shots"])
-    assert all(s["prompt_image"] == brain.compose_client_prompt_image(res["bible"], s["shot_prompt"])
-               for s in res["shots"])
+    set_line = f"SET: {res['bible']['set']}"
+    product = brain.product_sheet_block(res["bible"])
+    for s in res["shots"]:
+        pi = s["prompt_image"]
+        # mot pour mot, juste après les TRAITS CLÉS placés en tête (v2) ; bible LIMITÉE aux
+        # personnages à l'image (au moins celui qui parle), décor et fiche produit identiques.
+        assert pi.startswith("KEY TRAITS") and "\n\nVISUAL BIBLE —\n" in pi and "\n\nTHIS SHOT:" in pi
+        assert set_line in pi and (not product or product in pi)
+        chars = sorted(int(n) for n in re.findall(r"CHARACTER (\d):", pi))
+        assert chars and (not s.get("speaker") or int(s["speaker"]) in chars)
+        # identique hors ligne KEY TRAITS (elle porte les noms courts des personnages)
+        again = brain.compose_client_prompt_image(res["bible"], s["shot_prompt"], characters=chars)
+        assert pi.split("\n\n", 1)[1] == again.split("\n\n", 1)[1]
 
 
 def test_third_party_brand_never_in_image_prompts():

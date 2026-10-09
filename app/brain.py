@@ -2036,32 +2036,70 @@ def traits_header(
         parts.append(f"Character {n}" + (f" ({name})" if name else "") + f": {traits}")
     if not parts:
         return ""
-    return "KEY TRAITS (identical in every shot, never change them) — " + "; ".join(parts) + "."
+    return "KEY TRAITS (never change them) — " + "; ".join(parts) + "."
 
 
-def bible_text(bible: Any) -> str:
-    """Texte CANONIQUE de la bible (identique, mot pour mot, dans chaque prompt_image)."""
+def bible_text(bible: Any, characters: list[int] | None = None, *, product: bool = True) -> str:
+    """Texte CANONIQUE de la bible. `characters` (prompts image) : SEULS les personnages à
+    l'image sont décrits et les positions par défaut sont réduites à ce qui les concerne (les
+    phrases qui ne citent aucun personnage, ex. « products on the counter », restent).
+    `product=False` : sans la ligne PRODUCT (elle part dans le bloc produit dédié)."""
     b = normalize_bible(bible)
-    lines = [f"{_BIBLE_LABELS[k]}: {b[k]}" for k in _BIBLE_KEYS if b[k]]
-    return "VISUAL BIBLE (identical in every shot) —\n" + "\n".join(lines)
+    keys = [k for k in _BIBLE_KEYS if b[k] and (product or k != "product")]
+    if characters:
+        visible = {int(n) for n in characters}
+        described = {int(k[9:]) for k in _CHARACTER_KEYS if b.get(k)}
+        keys = [k for k in keys if not k.startswith("character") or int(k[9:]) in visible]
+        if not described <= visible:   # tous les persos à l'image : positions inchangées
+            b = {**b, "positions": bible_positions(b.get("positions", ""), visible)}
+        keys = [k for k in keys if b[k]]
+    lines = [f"{_BIBLE_LABELS[k]}: {b[k]}" for k in keys]
+    return "VISUAL BIBLE —\n" + "\n".join(lines)
+
+
+def bible_positions(positions: str, visible: set[int]) -> str:
+    """Positions par défaut limitées aux personnages À L'IMAGE : une phrase (séparée par « ; »
+    ou « . ») qui cite un personnage absent du plan est retirée ; une phrase sans personnage
+    (objets, produits) est gardée. Un seul personnage à l'image et aucune phrase d'objet → ""."""
+    parts = [p.strip() for p in re.split(r"[;.]\s*", str(positions or "")) if p.strip()]
+    kept = []
+    for p in parts:
+        cited = {int(m) for m in _SHOT_CHAR_RE.findall(p)}
+        if cited and not cited <= visible:
+            continue
+        kept.append(p)
+    if len(visible) <= 1:   # un seul personnage : « Character 1 stands left » n'apporte rien
+        kept = [p for p in kept if not _SHOT_CHAR_RE.search(p)]
+    return "; ".join(kept) + "." if kept else ""
+
+
+def product_sheet_block(bible: Any, product_sheet: str | None = None) -> str:
+    """Bloc PRODUIT réservé (prompt_profiles.B_PRODUCT_SHEET) : la fiche produit fournie
+    (`product_sheet`, ex. fiche produit par client) sinon la ligne « product » de la bible."""
+    text = product_sheet if product_sheet is not None else normalize_bible(bible).get("product", "")
+    return prompt_profiles.product_sheet_paragraph(scrub_brand_names(str(text or "")))
 
 
 def compose_client_prompt_image(
     bible: Any, shot: str, style: str = config_app.DEFAULT_OMNI_STYLE, *,
     names: dict[int, str] | None = None, characters: list[int] | None = None,
+    product_sheet: str | None = None,
 ) -> str:
     """prompt_image d'un plan client = TRAITS CLÉS des personnages à l'image (EN TÊTE : ils
-    fixent l'identité) + bible (injectée par le CODE) + ce qui change dans ce plan + la ligne de
-    style (réaliste UGC ou 3D animée). Personnages à l'image : `characters`, sinon ceux cités
-    « Character N » dans le plan, sinon tous. Aucun nom de studio (scrub_brand_names)."""
+    fixent l'identité) + bible LIMITÉE aux personnages à l'image (injectée par le CODE) + ce qui
+    change dans ce plan + bloc PRODUIT dédié + la ligne de style (réaliste UGC ou 3D animée).
+    Personnages à l'image : `characters`, sinon ceux cités « Character N » dans le plan, sinon
+    tous. Aucun nom de studio (scrub_brand_names). `product_sheet` remplace la ligne produit de
+    la bible dans le bloc produit (prompt_profiles.B_PRODUCT_SHEET, hors budget de mots)."""
     shot_txt = scrub_brand_names((shot or "").strip())
     chars = characters or [int(m) for m in _SHOT_CHAR_RE.findall(shot_txt)] or None
-    # Fiche Nano Banana Pro : sujet (traits clés → bible → ce plan) puis ligne de style +
-    # interdits (« no text »), dans l'ordre fixe des blocs.
+    # Fiche Nano Banana Pro : sujet (traits clés → bible → ce plan), bloc produit, puis ligne
+    # de style + interdits (« no text »), dans l'ordre fixe des blocs.
     head = traits_header(bible, chars, names)
     head = f"{head}\n\n" if head else ""
     return prompt_profiles.nano_banana_prompt({
-        prompt_profiles.B_SUBJECT: f"{head}{bible_text(bible)}\n\nTHIS SHOT: {shot_txt}",
+        prompt_profiles.B_SUBJECT: f"{head}{bible_text(bible, chars, product=False)}\n\nTHIS SHOT: {shot_txt}",
+        prompt_profiles.B_PRODUCT_SHEET: product_sheet_block(bible, product_sheet),
         prompt_profiles.B_NEGATIVES: image_suffix(style),
     })
 

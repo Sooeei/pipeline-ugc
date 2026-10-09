@@ -36,6 +36,7 @@ from . import (
     db,
     gen_trace,
     jobs,
+    keyframe_versions,
     media,
     pipeline,
     presets,
@@ -156,6 +157,8 @@ def create_app() -> FastAPI:
     # Traçabilité : journal des générations, feedback gardé / rejeté, page Stats.
     from . import trace_api
     app.include_router(trace_api.router)
+    # Keyframes : versions d'image par plan, retouche ciblée, outils locaux, réf visage auto.
+    app.include_router(keyframe_versions.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -194,6 +197,7 @@ def create_app() -> FastAPI:
         html = html.replace("/static/app.js", f"/static/app.js?v={_ver('app.js')}")
         html = html.replace("/static/style.css", f"/static/style.css?v={_ver('style.css')}")
         html = html.replace("/static/outils_c.js", f"/static/outils_c.js?v={_ver('outils_c.js')}")
+        html = html.replace("/static/keyframes.js", f"/static/keyframes.js?v={_ver('keyframes.js')}")
         return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
     # -------------------------------------------------- RÉGLAGES
@@ -1146,15 +1150,17 @@ def create_app() -> FastAPI:
     @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
     def avatar_omni_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
         """Régénère le KEYFRAME d'un plan (toujours Nano Banana Pro). `correction` = consigne libre
-        ajoutée au prompt image (« CORRECTION: … », non mémorisée). Le keyframe repart à valider
-        (keyframe_ok=0) et « Valider les keyframes » est à refaire (ads.keyframes_ok=0)."""
+        ajoutée au prompt image (« CORRECTION: … ») : mémorisée comme DERNIÈRE correction, elle
+        REMPLACE la précédente (jamais d'empilement ; vide = aucune). Le keyframe repart à
+        valider (keyframe_ok=0) et « Valider les keyframes » est à refaire (ads.keyframes_ok=0)."""
         clip = db.get_clip(clip_id)
         correction = body.correction
         if clip is not None and clip.get("shot_prompt") is not None:
             # Découpage client : le texte édité = CE QUI CHANGE dans ce plan ; la bible est
             # ajoutée par le code. Nouvelle image → la chaîne de tours repart de zéro.
             ad = db.get_ad(int(clip["ad_id"])) or {}
-            shot = body.prompt_image.strip() or str(clip.get("shot_prompt") or "")
+            # Base du plan SANS correction (la dernière correction est ajoutée à part).
+            shot = db.split_corrections(body.prompt_image.strip() or str(clip.get("shot_prompt") or ""))[0]
             # Traits clés des personnages à l'image EN TÊTE (celui qui parle d'abord).
             sp = int(clip.get("speaker") or 0)
             in_frame = pipeline.clip_characters_in_frame(clip, ad)
@@ -1187,7 +1193,8 @@ def create_app() -> FastAPI:
         # Décodage/écriture PIL (jusqu'à 25 Mo) hors boucle événementielle.
         dest = await run_in_threadpool(
             _save_keyframe_upload, raw, pipeline.objet_dir(int(ad["id"]), str(ad["name"])),
-            int(clip["scene_n"]))
+            int(clip["scene_n"]), clip_id)
+        keyframe_versions.record(clip_id, dest, "upload", keyframe_source="upload")
         db.update_clip(clip_id, image_path=str(dest), keyframe_source="upload",
                        status="image_pret", error=None)
         _reset_keyframe(clip_id)
@@ -1221,7 +1228,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(409, "Ce plan n'a pas encore de keyframe à valider.")
             status = "pret" if clip.get("status") == "pret" else "valide"
             db.update_clip(clip_id, status=status, keyframe_ok=1)
-            return {"ok": True, "status": status, "keyframe_ok": True}
+            # 1re image validée où un perso est SEUL → sa réf « Visage perso N » (auto, si aucune).
+            auto = keyframe_versions.maybe_auto_face_ref(clip_id)
+            return {"ok": True, "status": status, "keyframe_ok": True, "auto_face_ref": auto}
         status = "image_pret" if clip.get("image_path") else "en_attente"
         if clip.get("status") == "pret":
             status = "pret"   # la vidéo reste ; seul le keyframe est à revalider
@@ -1251,9 +1260,10 @@ def create_app() -> FastAPI:
                           "image, ou passe ces plans en « texte seul ».",
                 "missing": missing,
             })
-        for c in clips:
+        for c in sorted(clips, key=lambda c: int(c["scene_n"])):
             status = "pret" if c.get("status") == "pret" else "valide"
             db.update_clip(int(c["id"]), status=status, keyframe_ok=1)
+            keyframe_versions.maybe_auto_face_ref(int(c["id"]))   # réf visage auto (perso seul)
         db.set_ad_keyframes_ok(ad_id, True)
         return {"ok": True, "validated": len(clips)}
 
@@ -1393,8 +1403,14 @@ def create_app() -> FastAPI:
         n = 0
         for c in db.clips_for_ad(ad_id):
             if c.get("shot_prompt") is not None:
-                db.update_clip(int(c["id"]), prompt_image=brain.compose_client_prompt_image(
-                    bible, str(c.get("shot_prompt") or ""), style=style))
+                # Bible limitée aux personnages À L'IMAGE dans ce plan (celui qui parle d'abord).
+                sp = int(c.get("speaker") or 0)
+                in_frame = pipeline.clip_characters_in_frame(c, {**ad, "bible": _json(bible)})
+                chars = ([sp] if sp else []) + [k for k in in_frame if k != sp]
+                pi = brain.compose_client_prompt_image(
+                    bible, str(c.get("shot_prompt") or ""), style=style,
+                    names=pipeline.ad_character_names(ad), characters=chars or None)
+                db.update_clip(int(c["id"]), prompt_image=pi, prompt_base=pi)
                 n += 1
         return {"ok": True, "bible": bible, "bible_text": brain.bible_text(bible), "updated": n}
 
@@ -2028,7 +2044,8 @@ class CurrencyIn(BaseModel):
 class RegenerateIn(BaseModel):
     prompt_image: str = ""
     confirm: bool = False
-    correction: str = ""     # Avatar IA : correction libre → « CORRECTION: … » ajoutée au prompt
+    # Correction libre → « CORRECTION: … » ajoutée à la BASE du prompt ; remplace la précédente.
+    correction: str = ""
 
 
 class KeyframeModeIn(BaseModel):
@@ -2639,10 +2656,16 @@ def _reset_keyframe(clip_id: int) -> None:
 _KEYFRAME_MAX_BYTES = 25 * 1024 * 1024
 
 
-def _save_keyframe_upload(raw: bytes, folder: Path, n: int) -> Path:
-    """Écrit un keyframe importé sous `folder/{n}_upload.<ext>` : PNG/JPEG gardés tels quels,
+def _save_keyframe_upload(raw: bytes, folder: Path, n: int, clip_id: int | None = None) -> Path:
+    """Écrit un keyframe importé sous `folder/{n}_upload.<ext>` (puis `{n}_vK.<ext>` : les
+    imports précédents restent dans l'historique des versions) : PNG/JPEG gardés tels quels,
     tout autre format (webp…) converti en PNG (Pillow). 400 si ce n'est pas une image lisible."""
     from PIL import Image, UnidentifiedImageError
+
+    def _dest(ext: str) -> Path:
+        if clip_id is None:
+            return folder / f"{n}_upload.{ext}"
+        return keyframe_versions.prepare_path(clip_id, folder, n, ext=ext, preferred=f"{n}_upload.{ext}")
 
     try:
         with Image.open(io.BytesIO(raw)) as im:
@@ -2650,16 +2673,13 @@ def _save_keyframe_upload(raw: bytes, folder: Path, n: int) -> Path:
             im.load()
             folder.mkdir(parents=True, exist_ok=True)
             if fmt in ("PNG", "JPEG"):
-                dest = folder / f"{n}_upload.{'png' if fmt == 'PNG' else 'jpg'}"
+                dest = _dest("png" if fmt == "PNG" else "jpg")
                 dest.write_bytes(raw)
             else:
-                dest = folder / f"{n}_upload.png"
+                dest = _dest("png")
                 (im if im.mode in ("RGB", "RGBA") else im.convert("RGBA")).save(dest, format="PNG")
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(400, "Image illisible (formats acceptés : png, jpg, webp).") from exc
-    for other in folder.glob(f"{n}_upload.*"):   # un seul import par plan
-        if other != dest:
-            other.unlink(missing_ok=True)
     return dest
 
 
@@ -2670,11 +2690,13 @@ def _save_plan_upload(clip: dict[str, Any], raw: bytes, *, as_anchor: bool = Fal
     ad = db.get_ad(int(clip["ad_id"])) or {}
     folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"]))
     n = int(clip["scene_n"])
+    clip_id = int(clip["id"])
     try:
-        dest = media.crop_to_plan_png(raw, folder / f"{n}.png")
+        # {n}.png si libre, sinon {n}_vK.png : l'image précédente reste dans l'historique.
+        dest = media.crop_to_plan_png(raw, keyframe_versions.prepare_path(clip_id, folder, n))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    clip_id = int(clip["id"])
+    keyframe_versions.record(clip_id, dest, "upload", keyframe_source="upload")
     if as_anchor:
         for c in db.clips_for_ad(int(ad["id"])):
             if int(c["id"]) != clip_id and c.get("is_anchor"):
@@ -3053,20 +3075,20 @@ def _regenerate_image(
     ref = _consistency_ref(db.clips_for_ad(int(ad["id"])))
     character_ref = str(ref["image_path"]) if ref and int(ref["id"]) != clip_id else ""
 
+    # Corrections NON empilées : la BASE du plan (sans correction) est stockée à part
+    # (prompt_base) et seule la DERNIÈRE correction (last_correction) lui est ajoutée ; une
+    # nouvelle correction remplace la précédente, une correction vide l'efface.
     edited = body.prompt_image.strip()
     if allow_prompt_edit and edited:
-        # Prompt édité par l'utilisateur → on le mémorise avant de régénérer.
-        prompt_image = edited
-        db.update_clip(clip_id, prompt_image=prompt_image, status="en_attente", error=None)
+        base = db.split_corrections(edited)[0]   # prompt édité : jamais de « CORRECTION: » gardée
     else:
-        prompt_image = str(clip["prompt_image"] or "")
-        db.update_clip(clip_id, status="en_attente", error=None)
-
-    fix = " ".join(str(correction or "").split())[:2000]
-    if fix:   # correction libre (non mémorisée) : consigne ajoutée au prompt de CETTE génération
-        prompt_image = f"{prompt_image}\n\nCORRECTION: {fix}"
+        base = keyframe_versions.prompt_base(clip)
+    fix = " ".join(str(correction or body.correction or "").split())[:2000]
+    db.update_clip(clip_id, prompt_image=base, prompt_base=base, last_correction=fix,
+                   status="en_attente", error=None)
+    prompt_image = keyframe_versions.prompt_with_correction(base, keyframe_versions.to_english(cfg, fix))
     shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
-            "refs_needed": clip.get("refs_needed")}
+            "refs_needed": clip.get("refs_needed"), "correction": fix}
     job = jobs.manager.start(
         cfg, int(ad["id"]), str(ad["name"]), [shot], "",
         output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
@@ -3103,7 +3125,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         _check_spend_cap(cfg, est, body.confirm_over_cap)
         ref = _consistency_ref(clips)
         shots = [
-            {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": c.get("prompt_image") or "",
+            {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": keyframe_versions.effective_prompt(c),
              "refs_needed": c.get("refs_needed")}
             for c in img_fail
         ]
@@ -3179,7 +3201,7 @@ def _run_consistency(
     if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
     shots = [
-        {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": c.get("prompt_image") or "",
+        {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": keyframe_versions.effective_prompt(c),
          "refs_needed": c.get("refs_needed")}
         for c in targets
     ]

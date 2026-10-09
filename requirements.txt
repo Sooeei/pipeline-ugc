@@ -7,4 +7,5 @@ requests             # appels HTTP aux fournisseurs (HeyGen, OpenRouter, xAI) + 
 gradium              # SDK voix Gradium (synthèse vocale)
 anthropic            # SDK du « cerveau » (Claude) : découpage scènes / plans
 python-multipart     # requis par FastAPI pour les uploads (photos de référence)
-pillow               # images du mode simulation (démo sans clé)
+pillow               # images du mode simulation (démo sans clé) + miroir / recadrage des keyframes
+opencv-python-headless  # « Effacer une zone » (inpainting local) + détection de visage ; facultatif (dégradé propre si absent)

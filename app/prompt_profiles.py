@@ -203,6 +203,12 @@ GROK = ModelProfile(
 # cohérence) → cadrage → sujet (description du plan + objet posé) → interdits → format de sortie.
 # Les blocs propres à la vidéo (plan unique, jeu, audio, phrases de rôle) restent vides.
 B_OUTPUT_FORMAT = "output_format"    # Nano Banana : consigne de format, toujours en dernier
+# Bloc RÉSERVÉ à la fiche PRODUIT (bible « product » aujourd'hui, fiche produit par client
+# demain) : un paragraphe qui commence par PRODUCT_SHEET_LABEL, placé juste après le sujet.
+# Il est EXCLU du compteur de mots (budget < 250 mots hors fiche produit) : voir
+# `words_outside_product_sheet`.
+B_PRODUCT_SHEET = "product_sheet"
+PRODUCT_SHEET_LABEL = "PRODUCT:"
 
 NB_OUTPUT_FORMAT = "Output a vertical 9:16 (1K) image."
 # Start frames (anglais, collés tels quels) :
@@ -222,7 +228,8 @@ NB_NO_TEXT = "No text, labels or logos."
 
 NANO_BANANA_PRO = ModelProfile(
     key="nano_banana_pro", label="Nano Banana Pro", model_id="google/gemini-3-pro-image-preview",
-    block_order=(*BLOCK_ORDER, B_OUTPUT_FORMAT),
+    block_order=(B_IMAGE_ROLES, B_SINGLE_SHOT, B_CAMERA, B_SUBJECT, B_PRODUCT_SHEET, B_PERFORMANCE,
+                 B_AUDIO, B_NEGATIVES, B_ROLE_SENTENCES, B_OUTPUT_FORMAT),
     anti_defects=(NB_GROUNDING, NB_NO_FOREIGN_TEXT_REF1),
     limits={
         "usd_per_image": 0.134,               # 1K/2K = 1120 tokens × 0,00012 $ (OpenRouter)
@@ -263,6 +270,27 @@ def nano_banana_prompt(blocks: dict[str, str]) -> str:
     """Prompt image Nano Banana assemblé dans l'ordre fixe de sa fiche (blocs séparés par une
     ligne vide, sauts de ligne internes conservés)."""
     return assemble(NANO_BANANA_PRO, blocks)
+
+
+def product_sheet_paragraph(text: str) -> str:
+    """Paragraphe du bloc produit (`B_PRODUCT_SHEET`) : « PRODUCT: … » ("" si vide)."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    return t if t.startswith(PRODUCT_SHEET_LABEL) else f"{PRODUCT_SHEET_LABEL} {t}"
+
+
+def strip_product_sheet(text: str) -> str:
+    """Texte sans le(s) paragraphe(s) de la fiche produit (ceux qui commencent par
+    PRODUCT_SHEET_LABEL, y compris une ligne « PRODUCT: » au milieu d'un bloc)."""
+    kept = [ln for ln in str(text or "").splitlines()
+            if not ln.lstrip().startswith(PRODUCT_SHEET_LABEL)]
+    return "\n".join(kept)
+
+
+def words_outside_product_sheet(text: str) -> int:
+    """Nombre de mots d'un prompt image HORS fiche produit (budget Nano Banana < 250 mots)."""
+    return len(strip_product_sheet(text).split())
 
 PROFILES: dict[str, ModelProfile] = {p.key: p for p in (OMNI, GROK, NANO_BANANA_PRO)}
 

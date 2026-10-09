@@ -241,8 +241,10 @@ def _check(profile: ModelProfile, prompt: str, images: list[SentImage], dialogue
                              f"Le prompt {label} semble contenir du français hors dialogue "
                              "(les modèles suivent mieux l'anglais)."))
 
-    # 5. Longueur hors dialogue.
-    n_words = len(folded.split())
+    # 5. Longueur hors dialogue (et hors fiche produit « PRODUCT: … », budget à part).
+    from app.prompt_profiles import words_outside_product_sheet
+
+    n_words = words_outside_product_sheet(folded)
     lo, hi = profile.prompt_words
     if n_words and not (lo <= n_words <= hi):
         issues.append(_issue("warning", "prompt_length",

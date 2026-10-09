@@ -24,6 +24,7 @@ from . import (
     cost,
     db,
     gen_trace,
+    keyframe_versions,
     lipsync_rules,
     media,
     omni_timing,
@@ -977,10 +978,9 @@ def omni_refs_overflow_warning(
 
 # Rôle de chaque réf, nommé dans le prompt image Avatar IA (« reference image 1 = … »).
 _OMNI_REF_ROLES = {
-    "produit": "the client's product — reproduce it exactly (same bottle shape, colors, cap and "
-               "label) as a plain inanimate object: never give it a face, eyes or a mouth",
-    "ancre": "the validated previous shot — keep the same people, outfits, set and lighting; "
-             "only framing, pose and action change",
+    "produit": "the client's product — reproduce it exactly, a plain object: never give it a face",
+    "ancre": "the validated previous shot — same people, outfits, set and lighting; only framing, "
+             "pose and action change",
     "decor": "the set / background to reproduce",
     "style": "the photographic style and lighting to match",
     "": "an additional reference",
@@ -988,19 +988,18 @@ _OMNI_REF_ROLES = {
 
 
 def _omni_ref_role(kind: str, names: dict[int, str] | None = None) -> str:
+    """Rôle COURT d'une réf (légende du prompt image : budget < 250 mots hors fiche produit)."""
     sheet = config_app.omni_sheet_index(kind)
     if sheet:
         name = (names or {}).get(sheet, "")
         who = f"character sheet of character {sheet}" + (f" ({name})" if name else "")
-        return (f"{who} — THE MAIN reference for this character: reproduce exactly the same "
-                "design (face, hair, body shape, outfit, colors and every signature detail) in "
-                "this shot; use the sheet's views as reference, never draw the sheet itself")
+        return (f"{who} — THE MAIN reference for this character: same face, hair, body, outfit "
+                "and colors; never draw the sheet itself")
     n = config_app.omni_face_index(kind)
     if n:
         name = (names or {}).get(n, "")
         who = f"character {n}'s face" + (f" ({name})" if name else "")
-        return (f"{who} — keep this exact face identical (same age, features, skin, hair), "
-                "consistent with their character sheet")
+        return f"{who} — keep this exact face (age, features, skin, hair)"
     return _OMNI_REF_ROLES.get(config_app.normalize_omni_ref_kind(kind), _OMNI_REF_ROLES[""])
 
 
@@ -1127,7 +1126,8 @@ def _generate_one_image(
     prompt_image = nano_image_prompt(prefix, s, start_frame)
     if keep_kinds is not None:
         prompt_image = strip_photo_refs(prompt_image, keep_kinds=keep_kinds)
-    img = folder / f"{n}.png"
+    # Jamais d'écrasement : 1re image = N.png, puis N_v2.png, N_v3.png… (historique des versions).
+    img = keyframe_versions.prepare_path(clip_id, folder, n)
     try:
         emit({"scene": n, "phase": "image", "status": "en_cours"})
         try:
@@ -1149,6 +1149,13 @@ def _generate_one_image(
         if not cfg.dry_run:
             cost.record_image(ad_id, model_id)  # 1 image Nano Banana réellement générée
         db.update_clip(clip_id, image_path=str(img), status="image_pret", error=None, **(extra or {}))
+        # Version reliée à son prompt (journal des générations : même output_path).
+        keyframe_versions.record(
+            clip_id, img, str(s.get("version_source") or "generation"),
+            generation_id=db.generation_for_output(clip_id, str(img)),
+            keyframe_source=(extra or {}).get("keyframe_source"),
+            note=str(s.get("correction") or ""),
+        )
         emit({"scene": n, "phase": "pret", "status": "ok", "image": str(img)})
         return True
     except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres

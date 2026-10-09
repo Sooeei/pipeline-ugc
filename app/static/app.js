@@ -1659,6 +1659,15 @@ function objShotCard(s) {
   // Upload de MON image + retouche de l'ancre / qui parle (Objet animé).
   card.querySelector(".body").insertBefore(objPlanOptions(s, card), card.querySelector(".actions"));
   traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
+  // keyframes.js : versions de l'image, retouche ciblée, miroir / effacer / recadrer.
+  if (typeof kfTools === "function") kfTools(card.querySelector(".body"), s, {
+    onChange: async () => {
+      const ad = await api("/api/objet/ad/" + objAdId);
+      const updated = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
+      if (updated) card.replaceWith(objShotCard(updated));
+      else card.classList.remove("busy");
+    },
+  });
 
   // Sauvegarde du DIALOGUE (verbatim, jamais modifié) à la perte de focus.
   const voEl = card.querySelector(".vo");
@@ -3207,6 +3216,15 @@ function mashShotCard(s) {
     planRefsControls(s), card.querySelector(".actions")
   );
   traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
+  // keyframes.js : versions de l'image, retouche ciblée, miroir / effacer / recadrer.
+  if (typeof kfTools === "function") kfTools(card.querySelector(".body"), s, {
+    onChange: async () => {
+      const ad = await api("/api/mashup/ad/" + mashAdId);
+      const updated = (ad.shots || []).find((x) => x.clip_id === s.clip_id);
+      if (updated) card.replaceWith(mashShotCard(updated));
+      else card.classList.remove("busy");
+    },
+  });
 
   // Durée éditable -> POST /api/mashup/duration
   const durEl = card.querySelector(".mash-dur");
@@ -4412,6 +4430,7 @@ async function loadAoGallery(adId) {
     g.appendChild(aoShotCard(s));
   });
   aoApplyAdState(r);
+  if (typeof kfAutoFacePanel === "function") kfAutoFacePanel(adId);   // keyframes.js
 }
 
 // ---- Étape Keyframes : état par plan + verrou global avant toute vidéo ----
@@ -4490,6 +4509,7 @@ async function aoRefreshCard(card, clipId) {
   const updated = (ad.shots || []).find((x) => x.clip_id === clipId);
   if (updated) card.replaceWith(aoShotCard(updated));
   else card.classList.remove("busy");
+  if (typeof kfAutoFacePanel === "function") kfAutoFacePanel(aoAdId);   // réf visage auto créée ?
 }
 
 // Re-rend toutes les cartes depuis une réponse GET /ad en gardant les saisies non envoyées.
@@ -4662,7 +4682,7 @@ function aoShotCard(s) {
     `<option value="start_frame"${mode === "start_frame" ? " selected" : ""}>Omni avec start frame</option>` +
     `<option value="texte_seul"${mode === "texte_seul" ? " selected" : ""}>Omni texte seul</option>` +
     `</select></label>` +
-    `<input type="text" class="kf-corr" maxlength="500" placeholder="Correction (optionnel) — ex. « sourire plus léger, main gauche visible »" />` +
+    `<input type="text" class="kf-corr" maxlength="500" placeholder="Correction (optionnel, remplace la précédente ; vide = aucune) — ex. « sourire plus léger »" />` +
     `<input type="file" class="kf-file hidden" accept="image/png,image/jpeg,image/webp" />` +
     `<div class="actions">` +
     (done && kfOk ? "" : `<button class="btn primary btn-valid">${kfOk ? "Dévalider" : "Valider"}</button>`) +
@@ -4677,6 +4697,10 @@ function aoShotCard(s) {
   if (Array.isArray(s.refs_needed)) s.refs_needed = s.refs_needed.map((k) => (k === "visage" ? "visage1" : k));
   card.querySelector(".body").insertBefore(planRefsControls(s, aoRefKindOpts()), card.querySelector(".kf-mode-lbl"));
   traceDetails(card.querySelector(".body"), s.clip_id);   // tracabilite.js
+  // keyframes.js : versions du keyframe, retouche ciblée, miroir / effacer / recadrer.
+  if (typeof kfTools === "function") kfTools(card.querySelector(".body"), s, {
+    onChange: () => aoRefreshCard(card, s.clip_id),
+  });
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
   const voEl = card.querySelector(".vo");

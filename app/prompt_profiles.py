@@ -19,6 +19,7 @@ mot pour mot.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -218,6 +219,13 @@ NB_BLOCK_ORDER: tuple[str, ...] = (
     B_NEGATIVES, B_ROLE_SENTENCES, B_OUTPUT_FORMAT,
 )
 
+# Bloc fiche PRODUIT : paragraphe qui commence par un libellé « PRODUCT », placé juste
+# après le sujet, EXCLU du compteur de mots (budget < 250 mots hors fiche produit) : voir
+# `words_outside_product_sheet`.
+PRODUCT_SHEET_LABEL = "PRODUCT:"
+# Toute ligne qui commence par « PRODUCT: » ou « PRODUCT (match exactly): » (fiche produit client).
+_PRODUCT_SHEET_LINE_RE = re.compile(r"^\s*PRODUCT\b[^:\n]{0,40}:")
+
 NB_OUTPUT_FORMAT = "Output a vertical 9:16 (1K) image."
 # Start frames (anglais, collés tels quels) :
 NB_GROUNDING = "The object rests on a real surface with a soft contact shadow, never floating."
@@ -282,6 +290,27 @@ def nano_banana_prompt(blocks: dict[str, str]) -> str:
     """Prompt image Nano Banana assemblé dans l'ordre fixe de sa fiche (blocs séparés par une
     ligne vide, sauts de ligne internes conservés)."""
     return assemble(NANO_BANANA_PRO, blocks)
+
+
+def product_sheet_paragraph(text: str) -> str:
+    """Paragraphe du bloc produit (`B_PRODUCT_SHEET`) : « PRODUCT: … » ("" si vide)."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    return t if _PRODUCT_SHEET_LINE_RE.match(t) else f"{PRODUCT_SHEET_LABEL} {t}"
+
+
+def strip_product_sheet(text: str) -> str:
+    """Texte sans le(s) paragraphe(s) de la fiche produit (ceux qui commencent par
+    PRODUCT_SHEET_LABEL, y compris une ligne « PRODUCT: » au milieu d'un bloc)."""
+    kept = [ln for ln in str(text or "").splitlines()
+            if not _PRODUCT_SHEET_LINE_RE.match(ln)]
+    return "\n".join(kept)
+
+
+def words_outside_product_sheet(text: str) -> int:
+    """Nombre de mots d'un prompt image HORS fiche produit (budget Nano Banana < 250 mots)."""
+    return len(strip_product_sheet(text).split())
 
 PROFILES: dict[str, ModelProfile] = {p.key: p for p in (OMNI, GROK, NANO_BANANA_PRO)}
 

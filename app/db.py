@@ -232,6 +232,39 @@ _MIGRATIONS["clips"].append(("is_product_anchor", "INTEGER DEFAULT 0"))
 _MIGRATIONS["ref_images"].append(("position", "INTEGER"))
 
 
+# Keyframes (agent images) : historique des versions d'image d'un plan, base du prompt image
+# séparée de la DERNIÈRE correction (les corrections ne s'empilent plus), réf visage auto.
+_MIGRATIONS["clips"].extend([
+    # JSON [{v, path, ts, source, generation_id, note}] : génération / upload / retouche /
+    # miroir / effacement / recadrage — l'image courante reste clips.image_path.
+    ("image_versions", "TEXT DEFAULT ''"),
+    ("prompt_base", "TEXT"),                # prompt image SANS correction (NULL = déduit de prompt_image)
+    ("last_correction", "TEXT DEFAULT ''"),  # dernière correction (remplace la précédente)
+])
+_MIGRATIONS["ads"].extend([
+    ("auto_face_ref", "INTEGER DEFAULT 1"),  # 1 = réf « Visage perso N » auto depuis un plan validé
+])
+_MIGRATIONS["ref_images"].extend([
+    ("auto", "INTEGER DEFAULT 0"),           # 1 = réf créée automatiquement (visage auto)
+    ("source_clip_id", "INTEGER"),           # plan dont l'image a servi (réf auto)
+])
+
+CORRECTION_MARK = "CORRECTION:"
+
+
+def split_corrections(prompt: str) -> tuple[str, str]:
+    """(base, dernière correction) d'un prompt image où des « CORRECTION: … » ont pu
+    s'empiler (anciennes versions) : base = texte avant la 1re correction."""
+    import re
+
+    text = str(prompt or "")
+    pieces = re.split(r"(?:^|\n)[ \t]*" + re.escape(CORRECTION_MARK), text)
+    if len(pieces) == 1:
+        return text.strip(), ""
+    tail = [p.strip() for p in pieces[1:] if p.strip()]
+    return pieces[0].rstrip(), (" ".join(tail[-1].split()) if tail else "")
+
+
 def connect() -> sqlite3.Connection:
     config_app.ensure_dirs()
     con = sqlite3.connect(config_app.DB_PATH, timeout=30)
@@ -267,6 +300,8 @@ def init_db() -> None:
                 "AND NOT EXISTS (SELECT 1 FROM clips c WHERE c.ad_id=ads.id "
                 "AND c.status NOT IN ('valide', 'pret'))"
             )
+        if ("clips", "prompt_base") in added:
+            _migrate_prompt_base(con)
         _migrate_objet_image_model(con)
         _migrate_objet_anchor_characters(con)
         _migrate_traceability(con)
@@ -295,6 +330,19 @@ def _freeze_ad_video_models(con: sqlite3.Connection) -> None:
             (int(r["id"]),)).fetchone()
         model = by_model_id.get(str(last["model"] if last else ""), fallback)
         con.execute("UPDATE ads SET video_model=? WHERE id=?", (model, int(r["id"])))
+
+
+def _migrate_prompt_base(con: sqlite3.Connection) -> None:
+    """Migration UNIQUE (à l'apparition de clips.prompt_base) : les prompts image où des
+    « CORRECTION: … » se sont empilés sont ramenés à leur BASE ; la dernière correction est
+    gardée à part (last_correction). Les autres plans gardent prompt_base NULL (= prompt_image)."""
+    rows = con.execute(
+        "SELECT id, prompt_image FROM clips WHERE prompt_image LIKE ?", (f"%{CORRECTION_MARK}%",)
+    ).fetchall()
+    for r in rows:
+        base, last = split_corrections(r["prompt_image"])
+        con.execute("UPDATE clips SET prompt_base=?, prompt_image=?, last_correction=? WHERE id=?",
+                    (base, base, last, r["id"]))
 
 
 _OBJET_IMAGE_MIGRATION_FLAG = "migration_objet_image_model_pro"
@@ -641,6 +689,7 @@ _ALLOWED_AD_COLS |= {"export_dir", "export_subdir", "export_preset_id"}   # expo
 _ALLOWED_AD_COLS |= {"client_preset_id", "preset_characters"}   # presets client (tous modes)
 _ALLOWED_AD_COLS |= {"omni_start_frame_only", "omni_camera", "omni_auto_turns", "omni_voice_chain"}
 _ALLOWED_AD_COLS |= {"product_sheet"}   # fiche produit de la pub (app/product_sheet.py)
+_ALLOWED_AD_COLS |= {"auto_face_ref"}   # keyframes : réf visage auto (1 = active)
 
 
 def set_ad_fields(ad_id: int, **fields: Any) -> None:
@@ -719,6 +768,38 @@ def add_ref_image(ad_id: int, path: str, kind: str = "") -> int:
         con.close()
 
 
+def add_auto_ref_image(ad_id: int, path: str, kind: str, source_clip_id: int | None) -> int:
+    """Réf créée AUTOMATIQUEMENT (ex. visage auto depuis un plan validé) : marquée auto=1."""
+    con = connect()
+    try:
+        cur = con.execute(
+            "INSERT INTO ref_images(ad_id, path, kind, auto, source_clip_id) VALUES(?, ?, ?, 1, ?)",
+            (ad_id, path, kind, source_clip_id),
+        )
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def delete_auto_ref_images(ad_id: int, kind: str | None = None) -> list[str]:
+    """Supprime les réfs AUTO d'une pub (d'un type si `kind`) ; renvoie leurs chemins. Les réfs
+    fournies par l'utilisateur ne sont jamais touchées."""
+    con = connect()
+    try:
+        sql, params = "SELECT id, path FROM ref_images WHERE ad_id=? AND COALESCE(auto, 0)=1", [ad_id]
+        if kind:
+            sql += " AND kind=?"
+            params.append(kind)
+        rows = con.execute(sql, params).fetchall()
+        for r in rows:
+            con.execute("DELETE FROM ref_images WHERE id=?", (r["id"],))
+        con.commit()
+        return [r["path"] for r in rows]
+    finally:
+        con.close()
+
+
 def list_ref_images(ad_id: int) -> list[str]:
     con = connect()
     try:
@@ -731,12 +812,15 @@ def list_ref_images(ad_id: int) -> list[str]:
 
 
 def list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]:
-    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main}], dans l'ordre choisi."""
+    """Réfs avec leur type (jalon 2a) : [{id, path, kind, is_main, auto}], dans l'ordre choisi.
+    Les réfs créées automatiquement (visage auto) viennent APRÈS celles fournies par
+    l'utilisateur : à type égal, la sélection des réfs prend toujours la réf de l'utilisateur."""
     con = connect()
     try:
         rows = con.execute(
-            "SELECT id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main "
-            f"FROM ref_images WHERE ad_id=? {_REF_ORDER}",
+            "SELECT id, path, COALESCE(kind, '') AS kind, COALESCE(is_main, 0) AS is_main, "
+            "COALESCE(auto, 0) AS auto "
+            "FROM ref_images WHERE ad_id=? ORDER BY COALESCE(auto, 0), COALESCE(position, id), id",
             (ad_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -882,6 +966,7 @@ _ALLOWED_CLIP_COLS = {
     "omni_chain",    # Omni : place du bloc dans sa chaîne « voix identique »
     "excluded", "variant", "variant_label", "offscreen", "target_seconds",
     "is_product_anchor",   # ancre PRODUIT (is_anchor = ancre perso)
+    "image_versions", "prompt_base", "last_correction",   # keyframes : versions / corrections
 }
 
 
@@ -1439,6 +1524,19 @@ def get_generation(gen_id: int) -> dict[str, Any] | None:
     finally:
         con.close()
     return dict(r) if r else None
+
+
+def generation_for_output(clip_id: int, output_path: str) -> int | None:
+    """Id de la DERNIÈRE génération d'un plan qui a produit `output_path` (journal → version)."""
+    con = connect()
+    try:
+        r = con.execute(
+            "SELECT id FROM generations WHERE clip_id=? AND output_path=? ORDER BY id DESC LIMIT 1",
+            (int(clip_id), str(output_path)),
+        ).fetchone()
+    finally:
+        con.close()
+    return int(r["id"]) if r else None
 
 
 def add_plan_feedback(

@@ -663,3 +663,28 @@ label.inline select { margin: 0; min-width: 160px; }
 .ref-row .ref-n { font-size: 12px; color: var(--muted); min-width: 16px; text-align: center; }
 .ref-row .star.on { background: var(--warn, #d98a2b); color: #1a1200; }
 .ref-chip.anchor-prod.on { background: var(--accent-2, #2bb39a); color: #001a14; border-color: transparent; }
+
+
+/* Keyframes (keyframes.js) : versions de l'image, retouche ciblée, outils locaux, réf visage auto */
+.kf-tools { border-top: 1px dashed var(--line); padding-top: 6px; margin-top: 6px; font-size: 12px; }
+.kf-tool-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.kf-retouch-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.kf-retouch-form .kf-retouch-txt { flex: 1 1 220px; min-width: 0; }
+.kf-ver-box { margin-top: 6px; }
+.kf-ver-box > summary { cursor: pointer; color: var(--muted); }
+.kf-versions { display: flex; gap: 8px; overflow-x: auto; padding: 6px 0; }
+.kf-ver { flex: 0 0 96px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
+.kf-ver.current { border-color: var(--accent); }
+.kf-ver img { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 6px; }
+.kf-ver-missing { width: 100%; aspect-ratio: 9 / 16; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; }
+.kf-ver-meta { font-size: 11px; line-height: 1.3; }
+.kf-ver .btn.small { font-size: 11px; padding: 3px 6px; }
+.kf-rect-modal { max-width: 560px; }
+.kf-rect-stage { position: relative; display: inline-block; max-width: 100%; user-select: none; }
+.kf-rect-stage img { display: block; max-width: 100%; max-height: 62vh; }
+.kf-rect-stage canvas { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.kf-rect-fmt { display: block; margin-top: 8px; font-size: 13px; }
+.kf-autoface { margin: 8px 0; font-size: 13px; }
+.kf-af-refs { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+.kf-af-ref { display: inline-flex; align-items: center; gap: 6px; }
+.kf-af-ref img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; }

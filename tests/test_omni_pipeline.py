@@ -439,7 +439,8 @@ def test_manual_mode_passes_new_kwargs(monkeypatch):
 def test_bible_patch_four_characters_and_style(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(brain, "compose_client_prompt_image",
-                        lambda bible, shot, style="realiste": seen.append((dict(bible), style)) or f"{style}:{shot}")
+                        lambda bible, shot, style="realiste", **kw: seen.append((dict(bible), style, kw))
+                        or f"{style}:{shot}")
     ad_id, cid = _ad(tmp_path, [_turn("Salut.", 1)], style="3d")
     db.update_clip(cid, shot_prompt="close-up")
     bible = {"character1": P1, "character2": P2, "character3": P3, "character4": P4, "set": "s"}
@@ -447,6 +448,7 @@ def test_bible_patch_four_characters_and_style(monkeypatch, tmp_path):
         r = c.patch(f"/api/avatar-omni/bible/{ad_id}", json={"bible": bible})
     assert r.status_code == 200 and r.json()["updated"] == 1
     assert seen[-1][1] == "3d" and db.get_clip(cid)["prompt_image"] == "3d:close-up"
+    assert seen[-1][2]["characters"] == [1]   # bible limitée au perso à l'image (celui qui parle)
 
 
 def test_ref_kinds_visage1_to_4_accepted():

@@ -343,3 +343,22 @@ def test_consistency_never_regenerates_product_anchor(tmp_path):
             pytest.skip("route de cohérence Objet différente")
         assert r.status_code == 200, r.text
         assert r.json()["n"] == 1   # seul le plan 3 (ni ancre perso ni ancre produit)
+
+
+def test_client_sheet_replaces_bible_product_line(monkeypatch, tmp_path):
+    """Pub avec fiche produit client : la ligne « PRODUCT: … » de la bible (générique, ex. « bottle »)
+    est RETIRÉE du prompt image — jamais deux descriptions contradictoires du produit."""
+    calls = _capture(monkeypatch)
+    ad_id = db.create_ad("cleolya", "", "[]", kind="avatar_omni")
+    product_sheet.save_ad_sheet(ad_id, _sheet_with_photos(tmp_path, ("face", "profil")))
+    pi = ("THIS SHOT: She pinches the clip near her eye.\n\n"
+          "PRODUCT: the product bottle exactly as in the reference photos\n\n"
+          "Photorealistic vertical 9:16 smartphone UGC video frame. No text, no captions, no watermark.")
+    cid = db.create_clip(ad_id, 1, "", "m", prompt_image=pi)
+    pipeline.generate_objet_images(ProviderConfig(dry_run=True), ad_id, "cleolya", [
+        {"n": 1, "clip_id": cid, "prompt_image": pi, "refs_needed": ["produit"]}])
+    p = calls[-1]["prompt"]
+    assert "the product bottle" not in p and p.count("PRODUCT (match exactly)") == 1
+    assert "She pinches the clip" in p
+    # Avatar IA : la ligne de style dit déjà « No text » → pas de 2e interdit de texte.
+    assert "No text, labels or logos that are not on" not in p

@@ -961,6 +961,10 @@ def generate_objet_images(
                 refs.append(path)
                 roles.append(pp.ROLE_PRODUCT)
                 photo_legend.append((len(refs), angle))
+        if prod["active"]:
+            # Fiche produit client : elle REMPLACE la ligne « PRODUCT: » de la bible (souvent une
+            # description générique, ex. « bottle », qui contredirait la fiche) — jamais les deux.
+            s = {**s, "prompt_image": pp.strip_product_sheet(str(s.get("prompt_image") or "")).strip()}
         start = {}
         if kind in ("objet", "avatar_omni"):
             start = start_frame_blocks(
@@ -1092,10 +1096,9 @@ def omni_refs_overflow_warning(
 _OMNI_REF_ROLES = {
     "produit": "the client's product — reproduce it exactly, a plain object: never give it a face",
     # Ancre perso (clips.is_anchor) / ancre produit (clips.is_product_anchor) : rôles distincts.
-    "ancre": "character anchor: keep the person identical — the validated previous shot: same "
-             "people, outfits, set and lighting; only framing, pose and action change",
-    "ancre_produit": "product anchor: keep the product identical — the validated product shot: "
-                     "same shape, size, material and details",
+    "ancre": "character anchor: keep the person identical (same people, outfits, set, light; "
+             "only framing, pose and action change)",
+    "ancre_produit": "product anchor: keep the product identical (shape, size, material, details)",
     "decor": "the set / background to reproduce",
     "style": "the photographic style and lighting to match",
     "": "an additional reference",
@@ -1229,7 +1232,10 @@ def start_frame_blocks(
         out[pp.B_CAMERA] = pp.NB_FRAMINGS[framing]
     if grounded and not _AIRBORNE_RE.search(desc or ""):
         out["grounding"] = pp.NB_GROUNDING
-    if "logos that are not on" not in f"{already}\n{desc}".lower():
+    seen = f"{already}\n{desc}".lower()
+    # Avatar IA : la ligne de style porte déjà « No text… » → pas de 2e interdit de texte (budget de
+    # mots). Objet animé : « pas sur la réf 1 » reste utile (l'étiquette de la réf 1 est permise).
+    if "logos that are not on" not in seen and (ref1_is_truth or "no text" not in seen):
         out[pp.B_NEGATIVES] = (pp.NB_NO_TEXT if not n_refs else
                                pp.NB_NO_FOREIGN_TEXT_REF1 if ref1_is_truth else pp.NB_NO_FOREIGN_TEXT_REFS)
     return out

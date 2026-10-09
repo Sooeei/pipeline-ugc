@@ -109,8 +109,8 @@ def sheet_block(sheet: dict[str, Any] | None, photo_legend: list[tuple[int, str]
 
 def photo_role_text(angle: str) -> str:
     """Rôle d'une photo de la fiche dans la légende Avatar IA (« reference image N = … »)."""
-    return (f"product photo ({ANGLE_EN.get(angle, angle)}) — reproduce this exact product: same "
-            "shape, size, material and details, as described in PRODUCT")
+    # Court (budget < 250 mots) : la description complète est dans le bloc PRODUCT.
+    return f"product photo ({ANGLE_EN.get(angle, angle)}), exactly as described in PRODUCT"
 
 
 # ---------------------------------------------------------------- produit visible ?

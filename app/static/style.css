@@ -391,6 +391,11 @@ label.check input { width: auto; margin: 0; }
 }
 .obj-shot.valide { border-color: var(--ok); }
 .obj-shot.busy { opacity: .55; pointer-events: none; }
+.obj-shot.excluded { border-style: dashed; border-color: var(--muted); opacity: .7; }
+.obj-shot.excluded .thumb { filter: grayscale(1); }
+.ao-plan-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.ao-plan-opts .check { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+.ao-plan-opts select { width: auto; }
 .obj-shot .thumb { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; background: #000; display: block; }
 .obj-shot .thumb.empty {
   display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px;

@@ -19,7 +19,6 @@ import json
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 from app.prompt_profiles import PreflightIssue, SentImage
@@ -143,21 +142,10 @@ def record(*, kind: str, model: str, prompt: str, images: list[SentImage],
 
 # ---------------------------------------------------------------- lecture (API / UI)
 def _media_url(path: Any) -> str | None:
-    """URL /media/… (+ cache-buster) d'un fichier sous MEDIA_DIR ; None sinon."""
-    from app import config_app
+    """URL /media/… (+ cache-buster) d'un fichier sous MEDIA_DIR ; None sinon (media.media_url)."""
+    from app import media
 
-    if not path:
-        return None
-    p = Path(str(path))
-    try:
-        rel = p.relative_to(config_app.MEDIA_DIR)
-    except ValueError:
-        return None
-    url = "/media/" + str(rel).replace("\\", "/")
-    try:
-        return f"{url}?v={int(p.stat().st_mtime)}"
-    except OSError:
-        return url
+    return media.media_url(path)
 
 
 def _loads(raw: Any, default: Any) -> Any:

@@ -404,3 +404,25 @@ def test_stats_attempts_per_validated_plan():
     assert s["video"]["plans"] == 2 and s["video"]["max"] == 2
     with TestClient(app) as c:
         assert "essais" in c.get("/api/stats").json()
+
+
+def test_variant_generated_on_demand_but_manual_exclusion_still_blocks():
+    """Arbitrage agents 1 / 4 : une variante de hook (exclue par défaut) se génère À LA DEMANDE ;
+    un plan exclu à la main (« Exclure de la vidéo ») reste bloqué, même demandé précisément."""
+    from fastapi import HTTPException
+
+    ad_id, ids = _v2_ad([{}, {"variant": 1, "variant_label": "hook2", "excluded": 1},
+                         {"excluded": 1}])
+    ad = db.get_ad(ad_id)
+    variant, manual = db.get_clip(ids[1]), db.get_clip(ids[2])
+    assert avatar_video.clip_block_reason(variant, "omni", on_demand=True) == ""
+    assert avatar_video.clip_block_reason(variant, "omni")            # run global : exclue
+    assert avatar_video.clip_block_reason(manual, "omni", on_demand=True)
+    res = avatar_video.video_animate(ad_id, avatar_video.VideoAnimateIn(clip_id=ids[1]))
+    assert res.get("job_id") or res.get("ok")
+    try:
+        avatar_video.video_animate(ad_id, avatar_video.VideoAnimateIn(clip_id=ids[2]))
+        raise AssertionError("un plan exclu à la main ne doit pas être généré")
+    except HTTPException as exc:
+        assert exc.status_code == 409 and "exclu" in str(exc.detail)
+    assert ad["id"] == ad_id

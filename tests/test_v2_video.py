@@ -451,8 +451,10 @@ def test_native_default_only_keyframes_gate_video(monkeypatch):
         r = c.post(f"/api/avatar-omni/video/animate/{ad_kf}", json={"confirm": True})
         assert r.status_code == 409 and "keyframes" in r.json()["detail"]
         assert k.video == []
+        # Mode inactif (ElevenLabs masqué) : normalisé à l'enregistrement → voix native.
         r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"voice_mode": "elevenlabs"})
-        assert r.status_code == 400
+        assert r.status_code == 200 and r.json()["voice_mode"] == "native"
+        assert db.get_ad(ad_id)["voice_mode"] == "native"
         r = c.post(f"/api/avatar-omni/video/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 200, r.text
         assert r.json()["estimate"]["usd_voice"] == 0 and r.json()["voice_mode"] == "native"

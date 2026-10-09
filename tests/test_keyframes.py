@@ -73,7 +73,7 @@ def test_animate_global_refused_409_without_validate_all(tmp_path, monkeypatch):
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 409
         assert c.post(f"/api/avatar-omni/keyframes/validate-all/{ad_id}").json() == {
-            "ok": True, "validated": 2}
+            "ok": True, "validated": 2, "excluded": 0}
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True, "resolution": "1080p"})
         assert r.status_code == 200, r.text
         assert r.json()["resolution"] == "1080p"

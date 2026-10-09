@@ -973,6 +973,7 @@ def build_grok_prompt(
     performance: str = "",
     accent: str = "",
     extra_negatives: str = "",
+    offscreen: bool = False,
 ) -> tuple[str, list[str]]:
     """Prompt Grok FINAL, assemblé par `prompt_profiles.assemble(GROK, …)` (ordre fixe des blocs) :
     plan unique → caméra/cadrage → mouvement → jeu (qui parle) → AUDIO (dialogue) → interdits.
@@ -984,12 +985,26 @@ def build_grok_prompt(
     + accent (`accent` = phrase d'accent de la fiche voix, vide = France), pas de musique ni
     d'ambiance au premier plan. Le dialogue est inséré VERBATIM entre guillemets.
     Plan MUET : mouvement d'origine, aucune règle lip-sync.
+    Voix HORS CHAMP (`offscreen`) : mouvement d'origine (aucun geste retiré), `performance` = la
+    personne visible bouche fermée, PAS de « Only … speaks and lip-syncs » ; AUDIO « off-screen
+    voice » + dialogue VERBATIM.
     `tone` / `pace` = timbre et directive de débit (déjà résolus par l'appelant, vides = absents).
     Renvoie (prompt, gestes retirés) — la liste sert à l'avertissement de la carte du plan."""
     motion = (motion or "").strip()
     dialogue = (dialogue or "").strip()
     single_shot, *negatives = prompt_profiles.GROK.anti_defects
     blocks: dict[str, str] = {prompt_profiles.B_SINGLE_SHOT: single_shot}
+    if dialogue and offscreen:
+        audio = ", ".join(x for x in ("off-screen voice", tone.strip(), lipsync_rules.language_line(accent),
+                                      pace.strip()) if x)
+        blocks.update({
+            prompt_profiles.B_CAMERA: lipsync_rules.spoken_camera(lipsync_rules.spoken_camera_for(motion)),
+            prompt_profiles.B_SUBJECT: motion,
+            prompt_profiles.B_PERFORMANCE: performance or lipsync_rules.offscreen_voice_line("a character off screen"),
+            prompt_profiles.B_AUDIO: f'AUDIO: {audio}, saying: "{dialogue}"',
+            prompt_profiles.B_NEGATIVES: " ".join([extra_negatives, lipsync_rules.SPOKEN_AMBIENCE_RULE, *negatives]),
+        })
+        return prompt_profiles.assemble(prompt_profiles.GROK, blocks), []
     if not dialogue:
         blocks[prompt_profiles.B_SUBJECT] = motion
         blocks[prompt_profiles.B_PERFORMANCE] = performance

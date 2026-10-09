@@ -306,6 +306,7 @@ def init_db() -> None:
         _migrate_objet_anchor_characters(con)
         _migrate_traceability(con)
         _freeze_ad_video_models(con)
+        _migrate_inactive_voice_mode(con)
         con.commit()
     finally:
         con.close()
@@ -343,6 +344,18 @@ def _migrate_prompt_base(con: sqlite3.Connection) -> None:
         base, last = split_corrections(r["prompt_image"])
         con.execute("UPDATE clips SET prompt_base=?, prompt_image=?, last_correction=? WHERE id=?",
                     (base, base, last, r["id"]))
+
+
+def _migrate_inactive_voice_mode(con: sqlite3.Connection) -> None:
+    """Migration IDEMPOTENTE : une pub dont `voice_mode` vaut un mode INACTIF (« elevenlabs »,
+    masqué depuis ACTIVE_VOICE_MODES — écrit par d'anciennes versions ou un ancien preset) ou
+    vide repasse au mode par défaut (« native »). Sinon l'UI réclamait l'étape 4b masquée."""
+    active = tuple(config_app.ACTIVE_VOICE_MODES)
+    marks = ", ".join("?" for _ in active)
+    con.execute(
+        f"UPDATE ads SET voice_mode=? WHERE voice_mode IS NULL OR voice_mode NOT IN ({marks})",
+        (config_app.normalize_voice_mode(config_app.DEFAULT_VOICE_MODE), *active),
+    )
 
 
 _OBJET_IMAGE_MIGRATION_FLAG = "migration_objet_image_model_pro"
@@ -698,6 +711,8 @@ def set_ad_fields(ad_id: int, **fields: Any) -> None:
     fields = {k: v for k, v in fields.items() if k in _ALLOWED_AD_COLS}
     if not fields:
         return
+    if "voice_mode" in fields:   # jamais de mode voix INACTIF en base (ex. « elevenlabs » masqué)
+        fields["voice_mode"] = config_app.normalize_voice_mode(fields["voice_mode"])
     cols = ", ".join(f"{k}=?" for k in fields)
     con = connect()
     try:
@@ -1406,6 +1421,30 @@ def job_inflight_add(
             (job_id, int(ad_id), output_mode, json.dumps([int(n) for n in scene_ns]),
              int(clip_id) if clip_id is not None else None, time.time()),
         )
+        con.commit()
+    finally:
+        con.close()
+
+
+def jobs_inflight(ad_id: int | None = None) -> list[dict[str, Any]]:
+    """Jobs encore « en cours » (tous, ou ceux d'une pub) : bloque suppression / redémarrage."""
+    con = connect()
+    try:
+        if ad_id is None:
+            rows = con.execute("SELECT * FROM jobs_inflight").fetchall()
+        else:
+            rows = con.execute("SELECT * FROM jobs_inflight WHERE ad_id=?", (int(ad_id),)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def delete_clip(clip_id: int) -> None:
+    """Supprime UN plan (ligne clips). Le journal des générations / feedbacks est conservé
+    (historique, clip_id orphelin sans contrainte)."""
+    con = connect()
+    try:
+        con.execute("DELETE FROM clips WHERE id=?", (int(clip_id),))
         con.commit()
     finally:
         con.close()

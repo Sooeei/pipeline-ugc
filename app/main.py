@@ -171,7 +171,25 @@ def create_app() -> FastAPI:
             "ok": True, "app": "pipeline-ugc", "version": __version__,
             "dry_run": db.get_setting("dry_run", "1") == "1",
             "ffmpeg": media.ffmpeg_available(),
+            "pid": os.getpid(),   # le front repère le NOUVEAU process après « Redémarrer »
         }
+
+    @app.post("/api/restart")
+    def restart_server() -> dict[str, Any]:
+        """Réglages → « Redémarrer le serveur » : relance PROPRE du process (nouveau
+        `python -m app.main`, mêmes arguments / variables d'environnement, même port), l'ancien
+        s'arrête ; le fichier port est réécrit par le nouveau et la fenêtre est rouverte (ou
+        réutilisée si elle survit à l'ancien process). Le front attend /api/health (nouveau pid)
+        puis recharge. 409 si une génération tourne ou si l'app n'a pas été lancée par run()."""
+        if db.jobs_inflight():
+            raise HTTPException(409, "Une génération est en cours : attends qu'elle se termine "
+                                     "avant de redémarrer le serveur.")
+        if _RUNTIME.get("server") is None:
+            raise HTTPException(409, "Redémarrage indisponible : ce serveur n'a pas été lancé par "
+                                     "l'app (LANCER.bat) — relance-le à la main.")
+        port = int(_RUNTIME.get("port") or 0)
+        _schedule_restart(port)
+        return {"ok": True, "pid": os.getpid(), "port": port}
 
     @app.get("/api/onboarding")
     def onboarding_status() -> dict[str, bool]:
@@ -1140,10 +1158,12 @@ def create_app() -> FastAPI:
                 db.set_ad_bible(aid, bible_json)
             # Toute NOUVELLE pub Avatar IA suit le pipeline v2 « audio d'abord ». Son modèle vidéo
             # est FIGÉ à la création (réglage global du moment) : un changement ultérieur du
-            # réglage global ne la fait plus repartir sur un autre modèle. Le preset client
-            # (client_preset_id) applique ensuite ses propres réglages (presets.apply_preset_settings).
+            # réglage global ne la fait plus repartir sur un autre modèle. Mode voix normalisé
+            # (seul « native » est actif). Le preset client (client_preset_id) applique ensuite ses
+            # propres réglages (presets.apply_preset_settings).
             db.set_ad_fields(aid, pipeline_version=2,
-                             video_model=avatar_video.effective_video_model({}, cfg))
+                             video_model=avatar_video.effective_video_model({}, cfg),
+                             voice_mode=config_app.normalize_voice_mode(config_app.DEFAULT_VOICE_MODE))
             if client_preset_id:
                 presets.apply_preset_settings(aid, client_preset_id)
 
@@ -1157,6 +1177,7 @@ def create_app() -> FastAPI:
                 fields["shot_prompt"] = s["shot_prompt"]
             if s.get("video_prompt"):
                 fields["video_prompt"] = s["video_prompt"]
+            fields.update({k: s[k] for k in _PLAN_FLAG_FIELDS if k in s})
             if fields:
                 db.update_clip(clip_id, **fields)
 
@@ -1181,7 +1202,8 @@ def create_app() -> FastAPI:
             # Base du plan SANS correction (la dernière correction est ajoutée à part).
             shot = db.split_corrections(body.prompt_image.strip() or str(clip.get("shot_prompt") or ""))[0]
             # Traits clés des personnages à l'image EN TÊTE (celui qui parle d'abord).
-            sp = int(clip.get("speaker") or 0)
+            # Voix hors champ : le perso qui parle n'est PAS à l'image (pas de traits en tête).
+            sp = 0 if pipeline.clip_offscreen(clip) else int(clip.get("speaker") or 0)
             in_frame = pipeline.clip_characters_in_frame(clip, ad)
             chars = ([sp] if sp else []) + [n for n in in_frame if n != sp]
             body = RegenerateIn(
@@ -1233,7 +1255,8 @@ def create_app() -> FastAPI:
                                      "le modèle vidéo de la pub ou garde un keyframe.")
         db.update_clip(clip_id, keyframe_mode=body.mode)
         clip = db.get_clip(clip_id) or {}
-        db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
+        if not pipeline.clip_excluded(clip):   # un plan exclu ne reverrouille pas la génération
+            db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
         return {"ok": True, "mode": body.mode}
 
     @app.post("/api/avatar-omni/validate/{clip_id}")
@@ -1267,9 +1290,13 @@ def create_app() -> FastAPI:
         ad = db.get_ad(ad_id)
         if ad is None or ad.get("kind") != "avatar_omni":
             raise HTTPException(404, "Avatar IA introuvable.")
-        clips = db.clips_for_ad(ad_id)
-        if not clips:
+        all_clips = db.clips_for_ad(ad_id)
+        if not all_clips:
             raise HTTPException(400, "Aucun plan dans cette pub.")
+        # Plans EXCLUS (variante non voulue, « Exclure de la vidéo ») : ni validés ni exigés.
+        clips = [c for c in all_clips if not pipeline.clip_excluded(c)]
+        if not clips:
+            raise HTTPException(400, "Tous les plans sont exclus de la vidéo : réintègres-en au moins un.")
         missing = [int(c["scene_n"]) for c in clips
                    if not pipeline.clip_text_only(c) and not c.get("image_path")]
         if missing:
@@ -1284,7 +1311,62 @@ def create_app() -> FastAPI:
             db.update_clip(int(c["id"]), status=status, keyframe_ok=1)
             keyframe_versions.maybe_auto_face_ref(int(c["id"]))   # réf visage auto (perso seul)
         db.set_ad_keyframes_ok(ad_id, True)
-        return {"ok": True, "validated": len(clips)}
+        return {"ok": True, "validated": len(clips), "excluded": len(all_clips) - len(clips)}
+
+    @app.patch("/api/avatar-omni/clip/{clip_id}/options")
+    def avatar_omni_clip_options(clip_id: int, body: ClipPlanOptionsIn) -> dict[str, Any]:
+        """Options d'UN plan Avatar IA : `excluded` (« Exclure de la vidéo » : ignoré par la
+        validation globale, la génération vidéo et l'assemblage), `offscreen` + `speaker` (voix
+        HORS CHAMP : la réplique est dite par le perso `speaker`, absent de l'image ; la personne
+        visible garde la bouche fermée). Un changement d'exclusion invalide l'assemblage."""
+        clip, ad = _omni_clip_or_404(clip_id)
+        ad_id = int(ad["id"])
+        fields: dict[str, Any] = {}
+        if body.excluded is not None:
+            fields["excluded"] = 1 if body.excluded else 0
+        if body.speaker is not None:
+            if not 1 <= int(body.speaker) <= config_app.OMNI_MAX_CHARACTERS:
+                raise HTTPException(400, f"Personnage inconnu (1 à {config_app.OMNI_MAX_CHARACTERS}).")
+            fields["speaker"] = int(body.speaker)
+        if body.offscreen is not None:
+            if body.offscreen and not str(clip.get("script") or "").strip():
+                raise HTTPException(409, "Plan muet : pas de voix hors champ sans réplique.")
+            fields["offscreen"] = 1 if body.offscreen else 0
+        if not fields:
+            raise HTTPException(400, "Rien à modifier (excluded, offscreen, speaker).")
+        db.update_clip(clip_id, **fields)
+        if "excluded" in fields and fields["excluded"] != int(clip.get("excluded") or 0):
+            db.set_ad_fields(ad_id, final_path="", final_audio_path="")   # assemblage à refaire
+            if not fields["excluded"] and not int(clip.get("keyframe_ok") or 0):
+                db.set_ad_keyframes_ok(ad_id, False)   # plan réintégré pas encore validé
+        if ("speaker" in fields and fields["speaker"] != int(clip.get("speaker") or 0)
+                and int(ad.get("pipeline_version") or 1) == 2):
+            avatar_voices.invalidate_clip_voices(ad_id, [clip_id])   # autre voix (ElevenLabs)
+        fresh = db.get_clip(clip_id) or {}
+        changed_voice = any(k in fields for k in ("offscreen", "speaker"))
+        return {"ok": True, "clip_id": clip_id, **_plan_flags_view(fresh),
+                "speaker": int(fresh.get("speaker") or 1),
+                "video_stale": changed_voice and fresh.get("status") == "pret"}
+
+    @app.delete("/api/avatar-omni/clip/{clip_id}")
+    def avatar_omni_clip_delete(clip_id: int) -> dict[str, Any]:
+        """« Supprimer le plan » : ligne du plan + SES fichiers (keyframe, vidéos, frame 0, voix,
+        tours) sous le dossier de la pub. Les autres plans gardent leur numéro (ordre conservé).
+        409 si une génération tourne sur la pub ou s'il ne reste qu'un plan."""
+        clip, ad = _omni_clip_or_404(clip_id)
+        ad_id = int(ad["id"])
+        if db.jobs_inflight(ad_id):
+            raise HTTPException(409, "Une génération est en cours sur cette pub : attends qu'elle "
+                                     "se termine avant de supprimer un plan.")
+        clips = db.clips_for_ad(ad_id)
+        if len(clips) <= 1:
+            raise HTTPException(409, "C'est le dernier plan de la pub : il ne peut pas être supprimé.")
+        removed = _delete_clip_files(clip, ad, clips)
+        db.delete_clip(clip_id)
+        db.set_ad_fields(ad_id, final_path="", final_audio_path="")   # assemblage à refaire
+        db.log_activity("avatar_omni", f"Plan {clip.get('scene_n')} supprimé ({removed} fichier(s)).")
+        return {"ok": True, "deleted": clip_id, "scene_n": int(clip["scene_n"]),
+                "files_removed": removed, "remaining": len(clips) - 1}
 
     @app.post("/api/avatar-omni/dialogue/{clip_id}")
     def avatar_omni_set_dialogue(clip_id: int, body: DialogueIn) -> dict[str, Any]:
@@ -1348,6 +1430,7 @@ def create_app() -> FastAPI:
                 "dialogue": c.get("script") or "",
                 "duration_s": pipeline.clip_omni_seconds(c, None, wps_for=wps_for, max_spoken=max_spoken),
                 **{k: c.get(k) for k in _BLOCK_FIELDS},
+                **_plan_flags_view(c),
                 "label": _block_label(c),
                 "segments": _segments_view(c, wps_for, max_spoken, names),
                 "shot_prompt": c.get("shot_prompt") or "",
@@ -1497,6 +1580,8 @@ def create_app() -> FastAPI:
             clip = next((c for c in clips if int(c["id"]) == int(body.clip_id)), None)
             if clip is None:
                 raise HTTPException(404, "Plan introuvable.")
+            if pipeline.clip_excluded(clip):
+                raise HTTPException(409, "Ce plan est exclu de la vidéo : réintègre-le pour le générer.")
             if not int(clip.get("keyframe_ok") or 0):
                 raise HTTPException(409, "Valide d'abord le keyframe de ce plan.")
             if not pipeline.omni_clip_animatable(clip):
@@ -2073,6 +2158,12 @@ class KeyframeModeIn(BaseModel):
     mode: str = "start_frame"   # "start_frame" | "texte_seul"
 
 
+class ClipPlanOptionsIn(BaseModel):
+    excluded: bool | None = None    # « Exclure de la vidéo »
+    offscreen: bool | None = None   # voix hors champ (la personne visible se tait)
+    speaker: int | None = None      # perso dont on entend la voix (1..4)
+
+
 class ValidateIn(BaseModel):
     valide: bool = True
 
@@ -2196,15 +2287,9 @@ def _validate_scenes(scenes: list[dict[str, Any]]) -> None:
 
 
 def _media_url(mp4_path: str | None) -> str | None:
-    # Sert aussi bien les .mp4 que les images (.png) sous MEDIA_DIR.
-    if not mp4_path:
-        return None
-    p = Path(mp4_path)
-    try:
-        rel = p.relative_to(config_app.MEDIA_DIR)
-    except ValueError:
-        return None
-    return "/media/" + str(rel).replace("\\", "/")
+    """URL /media/… (images, vidéos, audio) + cache-buster ?v=<date de modif> : helper UNIQUE
+    media.media_url (un média régénéré sous le même nom s'affiche à jour)."""
+    return media.media_url(mp4_path)
 
 
 def _check_voiceover_len(
@@ -2294,8 +2379,31 @@ def _parse_avatar_omni_shots(shots_json: str) -> list[dict[str, Any]]:
             **_block_fields(s),
             **_segment_fields(s),
             **_speaker_field(s),
+            **_plan_flag_fields(s),
         }, s),
     )
+
+
+# Découpage client (socle 19b4cd6) : plan exclu, variante de hook, voix hors champ, durée cible.
+_PLAN_FLAG_FIELDS = ("excluded", "variant", "variant_label", "offscreen", "target_seconds")
+
+
+def _plan_flag_fields(s: dict[str, Any]) -> dict[str, Any]:
+    """Champs de plan du découpage client (brain.client_block_fields) nettoyés pour la base."""
+    out: dict[str, Any] = {}
+    for k in ("excluded", "variant", "offscreen"):
+        if s.get(k) not in (None, ""):
+            out[k] = 1 if (s.get(k) is True or str(s.get(k)).strip().lower() in ("1", "true")) else 0
+    label = re.sub(r"[^a-z0-9]", "", str(s.get("variant_label") or "").lower())[:20]
+    if label:
+        out["variant_label"] = label
+    try:
+        ts = float(s.get("target_seconds"))  # type: ignore[arg-type]
+        if 0 < ts <= 600:
+            out["target_seconds"] = round(ts, 2)
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def _speaker_field(s: dict[str, Any]) -> dict[str, Any]:
@@ -2370,6 +2478,15 @@ def _block_fields(s: dict[str, Any]) -> dict[str, Any]:
         if str(s.get(k) or "").strip():
             out[k] = str(s[k]).strip()[:2000]
     return out
+
+
+def _plan_flags_view(c: dict[str, Any]) -> dict[str, Any]:
+    """Champs exposés à l'UI : plan exclu, variante, voix hors champ (+ speaker), durée cible."""
+    return {
+        "excluded": pipeline.clip_excluded(c), "variant": bool(int(c.get("variant") or 0)),
+        "variant_label": str(c.get("variant_label") or ""), "offscreen": pipeline.clip_offscreen(c),
+        "target_seconds": c.get("target_seconds"),
+    }
 
 
 def _refs_sent(c: dict[str, Any]) -> list[str]:
@@ -2672,7 +2789,37 @@ def _reset_keyframe(clip_id: int) -> None:
     if clip is None:
         return
     db.update_clip(clip_id, keyframe_ok=0)
-    db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
+    if not pipeline.clip_excluded(clip):   # plan exclu : ne reverrouille pas la génération
+        db.set_ad_keyframes_ok(int(clip["ad_id"]), False)
+
+
+_CLIP_PATH_COLS = ("image_path", "mp4_path", "raw_mp4_path", "frame0_path", "wav_path")
+_CLIP_FILE_PATTERNS = ("{n}.mp4", "{n}_brut.mp4", "{n}_frame0.png", "{n}_tour*.mp4",
+                       "{n}_chaine*_tour*.mp4")
+
+
+def _delete_clip_files(clip: dict[str, Any], ad: dict[str, Any], clips: list[dict[str, Any]]) -> int:
+    """Fichiers d'UN plan (chemins du clip + tours + fichiers nommés par son numéro) supprimés —
+    seulement sous le dossier de la pub et jamais un fichier utilisé par un AUTRE plan."""
+    folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"])).resolve()
+    others = {str(Path(str(c.get(k))).resolve()) for c in clips if int(c["id"]) != int(clip["id"])
+              for k in _CLIP_PATH_COLS if c.get(k)}
+    paths = {Path(str(clip.get(k))) for k in _CLIP_PATH_COLS if clip.get(k)}
+    paths |= {Path(str(s.get("mp4_path"))) for s in pipeline.clip_segments(clip) if s.get("mp4_path")}
+    n = int(clip["scene_n"])
+    for pat in _CLIP_FILE_PATTERNS:
+        paths |= set(folder.glob(pat.format(n=n)))
+    removed = 0
+    for p in paths:
+        try:
+            rp = p.resolve()
+            if not rp.is_file() or str(rp) in others or folder not in rp.parents:
+                continue
+            rp.unlink()
+            removed += 1
+        except OSError as exc:
+            prov._log_detail(f"Suppression du plan {n} : {p} non supprimé ({exc!r})")
+    return removed
 
 
 _KEYFRAME_MAX_BYTES = 25 * 1024 * 1024
@@ -2776,14 +2923,8 @@ def _keyframe_fields(c: dict[str, Any]) -> dict[str, Any]:
 
 
 def _media_url_v(path: str | None) -> str | None:
-    """URL média + cache-buster (date de modif) : un keyframe remplacé s'affiche à jour."""
-    url = _media_url(path)
-    if not url or not path:
-        return url
-    try:
-        return f"{url}?v={int(Path(path).stat().st_mtime)}"
-    except OSError:
-        return url
+    """Alias historique de _media_url (le cache-buster est désormais TOUJOURS présent)."""
+    return media.media_url(path)
 
 
 def _animatable_clips(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3317,6 +3458,7 @@ def run() -> None:
     _prepare_streams()  # pythonw : sinon uvicorn plante (« Unable to configure formatter »)
 
     try:
+        restarted = _wait_previous_instance()   # « Redémarrer le serveur » : l'ancien s'arrête
         existing = _running_instance_port()
         if existing is not None:
             _open_window(f"http://{config_app.HOST}:{existing}/")  # déjà lancé : juste une fenêtre
@@ -3326,6 +3468,8 @@ def run() -> None:
 
         port = config_app.PORT or _pick_free_port()  # UGC_PORT force un port ; 0/absent = libre
         url = f"http://{config_app.HOST}:{port}/"
+        if restarted:
+            _wait_port_free(port)
 
         # uvicorn dans un thread secondaire : on désactive les gestionnaires de signaux
         # (ils n'existent que dans le thread principal, sinon ValueError). Le corps du
@@ -3362,14 +3506,22 @@ def run() -> None:
             config_app.PORT_FILE.write_text(str(port), encoding="utf-8")
         except OSError:
             pass  # non bloquant : au pire l'instance-unique ne détecte pas cette instance
+        _RUNTIME.update(server=server, port=port)   # « Redémarrer le serveur » (Réglages)
 
         if os.environ.get("UGC_NO_WINDOW") == "1":
             # Mode serveur SANS fenêtre (diagnostic / test d'install) : on sert jusqu'à ce que
             # le processus soit arrêté (Ctrl+C ou kill). Aucune fenêtre/onglet n'est ouvert.
+            _RUNTIME["window"] = "none"
             thread.join()
             return
 
-        _open_window(url)          # BLOQUE jusqu'à la fermeture de la fenêtre
+        if restarted and os.environ.pop("UGC_REUSE_WINDOW", "") == "1":
+            # Redémarrage : la fenêtre Chrome/Edge --app (process à part) a survécu à l'ancien
+            # serveur → elle se reconnecte toute seule (heartbeat), pas de 2e fenêtre.
+            _RUNTIME["window"] = "reused"
+            _LAST_REQUEST[0] = time.monotonic()   # délai de grâce avant le 1er heartbeat
+        else:
+            _open_window(url)      # BLOQUE jusqu'à la fermeture de la fenêtre
         # ⚠️ Cause probable du « port qui ne répond plus » : le process navigateur (Chrome/Edge
         # --app) peut se terminer alors que la fenêtre reste ouverte (relais vers un process
         # déjà lancé, redémarrage après mise à jour…) → on coupait le serveur sous les pieds de
@@ -3390,6 +3542,110 @@ def run() -> None:
 
 WINDOW_IDLE_SHUTDOWN_S = 45.0   # sans requête depuis 45 s (heartbeat 10 s) = fenêtre fermée
 
+# ---------------------------------------------------------------- redémarrage (Réglages)
+# État du process lancé par run() : serveur uvicorn, port, type de fenêtre ouverte
+# (« pywebview » meurt avec le process ; « chromium » / « browser » / « reused » lui survivent ;
+# « none » = mode serveur UGC_NO_WINDOW). Vide sous TestClient → /api/restart répond 409.
+_RUNTIME: dict[str, Any] = {"server": None, "port": 0, "window": ""}
+RESTART_DELAY_S = 0.6           # laisse partir la réponse HTTP avant d'arrêter le serveur
+RESTART_EXIT_GRACE_S = 1.5      # arrêt d'uvicorn avant la sortie du process
+RESTART_WAIT_MAX_S = 30.0       # le nouveau process attend au plus 30 s que l'ancien libère le port
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def restart_command() -> list[str]:
+    """Commande du NOUVEAU process : `python -m app.main` + mêmes arguments (exe gelé : l'exe)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *sys.argv[1:]]
+    return [sys.executable, "-m", "app.main", *sys.argv[1:]]
+
+
+def restart_env(port: int, window: str) -> dict[str, str]:
+    """Environnement du nouveau process : le MÊME (clés, UGC_DATA_DIR…) + même port forcé, pid
+    de l'ancien à attendre et réutilisation de la fenêtre si elle survit à l'ancien process."""
+    env = dict(os.environ)
+    if port:
+        env["UGC_PORT"] = str(int(port))
+    env["UGC_RESTART_WAIT_PID"] = str(os.getpid())
+    if window in ("chromium", "browser", "reused"):
+        env["UGC_REUSE_WINDOW"] = "1"
+    else:
+        env.pop("UGC_REUSE_WINDOW", None)
+    return env
+
+
+def _spawn_process(cmd: list[str], env: dict[str, str]) -> None:
+    """Lance le nouveau process DÉTACHÉ (il survit à l'arrêt de l'ancien)."""
+    import subprocess
+
+    kw: dict[str, Any] = {"cwd": str(_PROJECT_ROOT), "env": env, "close_fds": True,
+                          "stdin": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0x8)
+                               | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200))
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(cmd, **kw)  # noqa: S603 - commande construite par l'app (python -m app.main)
+
+
+def _exit_process() -> None:
+    os._exit(0)
+
+
+def do_restart(port: int, *, delay: float = RESTART_DELAY_S, grace: float = RESTART_EXIT_GRACE_S) -> None:
+    """Relance : nouveau process (même port, même env), fichier port effacé (le nouveau le
+    réécrit), arrêt d'uvicorn puis sortie de l'ancien process."""
+    import time
+
+    time.sleep(delay)
+    prov._log_detail(f"[APP] Redémarrage demandé (pid {os.getpid()}, port {port}).")
+    try:
+        config_app.PORT_FILE.unlink()
+    except OSError:
+        pass
+    _spawn_process(restart_command(), restart_env(port, str(_RUNTIME.get("window") or "")))
+    server = _RUNTIME.get("server")
+    if server is not None:
+        server.should_exit = True
+    time.sleep(grace)
+    _exit_process()
+
+
+def _schedule_restart(port: int) -> None:
+    import threading
+
+    threading.Thread(target=do_restart, args=(port,), daemon=True, name="ugc-restart").start()
+
+
+def _wait_previous_instance(max_s: float = RESTART_WAIT_MAX_S) -> bool:
+    """Process lancé par « Redémarrer le serveur » (UGC_RESTART_WAIT_PID) : attend que l'ancien
+    serveur ne réponde plus. Renvoie True si c'est un redémarrage."""
+    import time
+
+    if not os.environ.pop("UGC_RESTART_WAIT_PID", ""):
+        return False
+    port = config_app.PORT
+    end = time.monotonic() + max_s
+    while port and time.monotonic() < end and _server_up(port, 0.3):
+        time.sleep(0.25)
+    return True
+
+
+def _wait_port_free(port: int, max_s: float = RESTART_WAIT_MAX_S) -> None:
+    """Attend que le port de l'ancien serveur soit de nouveau libre (bind possible)."""
+    import socket
+    import time
+
+    end = time.monotonic() + max_s
+    while time.monotonic() < end:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((config_app.HOST, int(port)))
+                return
+            except OSError:
+                pass
+        time.sleep(0.25)
+
 
 def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: float = 2.0) -> None:
     """Bloque tant que la fenêtre interroge le serveur (dernière requête < idle_s)."""
@@ -3402,8 +3658,10 @@ def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: floa
 def _open_window(url: str) -> None:
     """Ouvre l'app dans sa PROPRE fenêtre : pywebview, sinon Chrome/Edge --app,
     sinon navigateur par défaut. Bloque tant que la fenêtre est ouverte."""
+    _RUNTIME["window"] = "pywebview"
     if _try_pywebview(url):
         return
+    _RUNTIME["window"] = "chromium"
     if _try_chromium_app(url):
         return
     # Dernier secours : navigateur par défaut (onglet). Cas quasi impossible sous Windows
@@ -3411,21 +3669,45 @@ def _open_window(url: str) -> None:
     # la fermeture d'un onglet, donc le serveur reste actif jusqu'à fermeture manuelle.
     import webbrowser
 
+    _RUNTIME["window"] = "browser"
     webbrowser.open(url)
     _keep_alive()
 
 
+def pywebview_unavailable_reason() -> str:
+    """Pourquoi pywebview ne peut PAS ouvrir de fenêtre ("" = disponible). Vérifié AVANT tout
+    import : sous Windows, pywebview (WinForms / Edge WebView2) exige pythonnet (module `clr`) ;
+    sans lui il journalisait « ModuleNotFoundError: No module named 'clr' » à chaque lancement."""
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("webview") is None:
+            return "pywebview absent"
+        if os.name == "nt" and importlib.util.find_spec("clr") is None:
+            return "pythonnet (module clr) absent"
+    except (ImportError, ValueError) as exc:
+        return f"détection impossible ({type(exc).__name__})"
+    return ""
+
+
 def _try_pywebview(url: str) -> bool:
-    """Vraie fenêtre native pywebview. Retourne False si indisponible (ex. pythonnet)."""
+    """Vraie fenêtre native pywebview. False si indisponible (pythonnet absent…) → repli
+    SILENCIEUX sur Chrome/Edge --app (une seule ligne d'info dans app.log, aucune trace)."""
+    reason = pywebview_unavailable_reason()
+    if reason:
+        prov._log_detail(f"[APP] Fenêtre : pywebview indisponible ({reason}) → Chrome/Edge --app.")
+        return False
+    import logging
+
+    logging.getLogger("pywebview").setLevel(logging.CRITICAL)   # pas de trace en cas d'échec
     try:
         import webview  # pywebview
-    except Exception:  # noqa: BLE001
-        return False
-    try:
+
         webview.create_window("Pipeline UGC", url, width=1200, height=840)
         webview.start()
         return True
-    except Exception:  # noqa: BLE001 - moteur GUI absent -> on bascule
+    except Exception as exc:  # noqa: BLE001 - moteur GUI absent -> on bascule
+        prov._log_detail(f"[APP] Fenêtre : pywebview a échoué ({type(exc).__name__}) → Chrome/Edge --app.")
         return False
 
 

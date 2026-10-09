@@ -245,6 +245,9 @@ _MIGRATIONS["ads"].extend([
     ("auto_face_ref", "INTEGER DEFAULT 1"),  # 1 = réf « Visage perso N » auto depuis un plan validé
 ])
 _MIGRATIONS["ref_images"].extend([
+    # Réf visage auto : « detected » (visage détecté) | « approx » (recadrage du haut de l'image,
+    # pas de détecteur) | « manual » (recadrée à la main via « Changer »).
+    ("auto_method", "TEXT DEFAULT ''"),
     ("auto", "INTEGER DEFAULT 0"),           # 1 = réf créée automatiquement (visage auto)
     ("source_clip_id", "INTEGER"),           # plan dont l'image a servi (réf auto)
 ])
@@ -783,16 +786,42 @@ def add_ref_image(ad_id: int, path: str, kind: str = "") -> int:
         con.close()
 
 
-def add_auto_ref_image(ad_id: int, path: str, kind: str, source_clip_id: int | None) -> int:
+def add_auto_ref_image(ad_id: int, path: str, kind: str, source_clip_id: int | None,
+                       method: str = "") -> int:
     """Réf créée AUTOMATIQUEMENT (ex. visage auto depuis un plan validé) : marquée auto=1."""
     con = connect()
     try:
         cur = con.execute(
-            "INSERT INTO ref_images(ad_id, path, kind, auto, source_clip_id) VALUES(?, ?, ?, 1, ?)",
-            (ad_id, path, kind, source_clip_id),
+            "INSERT INTO ref_images(ad_id, path, kind, auto, source_clip_id, auto_method) "
+            "VALUES(?, ?, ?, 1, ?, ?)",
+            (ad_id, path, kind, source_clip_id, method),
         )
         con.commit()
         return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def update_auto_ref_image(ref_id: int, path: str, source_clip_id: int | None, method: str) -> None:
+    """« Changer » une réf visage AUTO : nouvelle image source / nouveau recadrage."""
+    con = connect()
+    try:
+        con.execute("UPDATE ref_images SET path=?, source_clip_id=?, auto_method=? WHERE id=? AND auto=1",
+                    (path, source_clip_id, method, ref_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def list_auto_ref_images(ad_id: int) -> list[dict[str, Any]]:
+    """Réfs AUTO d'une pub avec leur plan source et la méthode de recadrage."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT id, path, COALESCE(kind, '') AS kind, source_clip_id, "
+            "COALESCE(auto_method, '') AS auto_method FROM ref_images WHERE ad_id=? AND auto=1 "
+            "ORDER BY id", (ad_id,)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         con.close()
 
@@ -1405,7 +1434,8 @@ _DONE_STATUSES_VIDEO = ("pret",)
 _IMAGE_MODES = ("objet_images",)
 # Jobs « voix » : l'état des plans est porté par d'autres champs (voice_ok…) → on ne touche pas
 # aux statuts des plans, seulement au statut de la pub.
-_VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off")
+_VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off",
+                "retouche")   # retouche interrompue : le plan garde son image actuelle
 
 
 def job_inflight_add(

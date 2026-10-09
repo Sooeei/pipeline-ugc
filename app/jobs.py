@@ -8,6 +8,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from . import brain, db, gen_trace, media, pipeline
@@ -106,7 +107,10 @@ class JobManager:
         character_ref: str = "",
         is_retry: bool = False,
         only_clip_id: int | None = None,
+        runner: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any] | None] | None = None,
     ) -> Job:
+        """`runner(on_update)` : tâche PONCTUELLE (ex. « Retoucher » un plan) exécutée en fond à la
+        place d'un mode prédéfini ; son échec n'est jamais reporté sur le statut de la pub."""
         job = Job(ad_id, ad_name, scenes)
         with self._lock:
             self._jobs[job.id] = job
@@ -132,7 +136,9 @@ class JobManager:
         def _run_inner() -> None:
             job.set_state("en_cours")
             try:
-                if output_mode == "voix_seules":
+                if runner is not None:
+                    summary = runner(job.on_update) or {}
+                elif output_mode == "voix_seules":
                     summary = pipeline.generate_voices_only(
                         cfg, ad_id, ad_name, scenes, on_update=job.on_update,
                         avatar_label=avatar_label,
@@ -191,7 +197,8 @@ class JobManager:
                 )
             except Exception as exc:  # noqa: BLE001
                 job.set_state("echec", {"message": _job_error_message(exc)})
-                db.set_ad_status(ad_id, "echec")
+                if runner is None:   # une tâche ponctuelle (retouche) ne met pas la pub en échec
+                    db.set_ad_status(ad_id, "echec")
 
         threading.Thread(target=_run, name=f"job-{job.id}", daemon=True).start()
         return job

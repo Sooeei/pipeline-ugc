@@ -145,6 +145,7 @@
       `<input type="text" class="kf-retouch-txt" maxlength="300" placeholder="Ce qui change UNIQUEMENT — ex. « le pull en bleu marine »" />` +
       `<label class="small"><input type="checkbox" class="kf-retouch-prod" /> Envoyer aussi les photos produit</label>` +
       `<button class="btn small primary kf-retouch-go" type="button">Lancer la retouche</button>` +
+      `<span class="kf-retouch-prog muted small" aria-live="polite"></span>` +
       `</div>` +
       `<details class="kf-ver-box"><summary>🗂️ Versions de l'image<span class="kf-ver-count"></span></summary><div class="kf-ver-body"></div></details>`;
     container.appendChild(wrap);
@@ -189,8 +190,32 @@
         });
         if (!ok) return;
       }
-      run(() => post(`/api/clips/${s.clip_id}/retouch`, { instruction, with_product_refs, confirm: true }),
-        "Retouche faite ✓ — nouvelle version à valider.");
+      // Job de FOND (~30 s en réel) : progression dans la carte, le reste de l'interface reste libre.
+      const prog = form.querySelector(".kf-retouch-prog");
+      const go = form.querySelector(".kf-retouch-go");
+      const t0 = Date.now();
+      go.disabled = true;
+      card.classList.add("busy");
+      prog.textContent = "⏳ Retouche lancée…";
+      try {
+        const r = await post(`/api/clips/${s.clip_id}/retouch`, { instruction, with_product_refs, confirm: true });
+        const j = await waitJob(r.job_id, (snap) => {
+          const sc = (snap.scenes || [])[0] || {};
+          const secs = Math.round((Date.now() - t0) / 1000);
+          prog.textContent = `⏳ ${sc.message || "Retouche en cours…"} ${secs} s`;
+        });
+        if (j.state === "echec") throw new Error((j.summary && j.summary.message) || "Retouche impossible.");
+        prog.textContent = "";
+        toast("Retouche faite ✓ — nouvelle version à valider.");
+        if (onChange) await onChange();
+        else card.classList.remove("busy");
+      } catch (e) {
+        prog.textContent = "";
+        card.classList.remove("busy");
+        toast(typeof prettyError === "function" ? prettyError(e.message) : e.message);
+      } finally {
+        go.disabled = false;
+      }
     });
     wrap.querySelector(".kf-mirror").addEventListener("click", () =>
       run(() => post(`/api/clips/${s.clip_id}/tools/mirror`), "Miroir appliqué ✓ — nouvelle version."));
@@ -210,6 +235,16 @@
     });
   }
 
+  // Attend la fin d'un job de fond (/api/jobs/{id}) en rappelant `onTick(snapshot)` chaque seconde.
+  async function waitJob(jobId, onTick) {
+    for (;;) {
+      const snap = await api(`/api/jobs/${jobId}`);
+      if (onTick) onTick(snap);
+      if (!["en_cours", "en_attente"].includes(snap.state)) return snap;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
   // ------------------------------------------------ réf visage auto (Avatar IA)
   async function kfAutoFacePanel(adId) {
     const el = document.getElementById("aoAutoFace");
@@ -221,27 +256,86 @@
       el.innerHTML = "";
       return;
     }
-    const refs = (d.refs || []).map((r) =>
-      `<span class="kf-af-ref">${r.url ? `<img src="${esc(r.url)}" alt="${esc(r.kind)}" />` : ""}` +
-      `Visage perso ${esc(String(r.kind).replace("visage", ""))} <button class="btn small kf-af-del" type="button" data-kind="${esc(r.kind)}">Retirer</button></span>`).join("");
+    // Une carte par perso : sa réf visage générée, comment elle a été recadrée, « Changer » / « Retirer ».
+    const cards = (d.refs || []).map((r, i) => {
+      const who = `Perso ${esc(String(r.character || ""))}${r.name ? ` (${esc(r.name)})` : ""}`;
+      const warn = r.method === "approx" ? " kf-af-warn" : "";
+      return `<div class="kf-af-card${warn}" data-i="${i}">` +
+        (r.url ? `<img src="${esc(r.url)}" alt="réf visage ${who}" />` : `<div class="kf-ver-missing">absente</div>`) +
+        `<div class="kf-af-meta"><b>${who}</b><br><span class="small">Réf « Visage perso ${esc(String(r.character || ""))} »` +
+        `${r.source_n ? ` · depuis le plan ${esc(String(r.source_n))}` : ""}</span>` +
+        (r.method_label ? `<br><span class="small kf-af-method">${esc(r.method_label)}</span>` : "") +
+        `<div class="kf-tool-row"><button class="btn small kf-af-change" type="button">🔁 Changer</button>` +
+        `<button class="btn small kf-af-del" type="button">Retirer</button></div></div></div>`;
+    }).join("");
     el.innerHTML =
       `<label class="small"><input type="checkbox" class="kf-af-on"${d.enabled ? " checked" : ""} /> ` +
       `Réf visage automatique : la 1re image validée où un perso apparaît seul devient sa réf « Visage perso N » ` +
       `(jamais à la place d'une réf que tu as fournie)</label>` +
-      (refs ? `<div class="kf-af-refs">${refs}</div>` : "");
+      (d.detector_label ? `<p class="muted small">${esc(d.detector_label)}</p>` : "") +
+      (cards ? `<div class="kf-af-refs">${cards}</div>` : "");
     el.querySelector(".kf-af-on").addEventListener("change", async (ev) => {
       try {
         await post(`/api/ads/${adId}/auto-face`, { enabled: ev.target.checked });
         toast(ev.target.checked ? "Réf visage auto activée." : "Réf visage auto désactivée.");
       } catch (e) { toast(e.message); }
     });
-    el.querySelectorAll(".kf-af-del").forEach((b) => b.addEventListener("click", async () => {
-      try {
-        await api(`/api/ads/${adId}/auto-face?kind=${encodeURIComponent(b.dataset.kind)}`, { method: "DELETE" });
-        toast("Réf visage auto retirée.");
-        kfAutoFacePanel(adId);
-      } catch (e) { toast(e.message); }
-    }));
+    el.querySelectorAll(".kf-af-card").forEach((card) => {
+      const r = d.refs[Number(card.dataset.i)];
+      card.querySelector(".kf-af-del").addEventListener("click", async () => {
+        try {
+          await api(`/api/ads/${adId}/auto-face?kind=${encodeURIComponent(r.kind)}`, { method: "DELETE" });
+          toast("Réf visage auto retirée.");
+          kfAutoFacePanel(adId);
+        } catch (e) { toast(e.message); }
+      });
+      card.querySelector(".kf-af-change").addEventListener("click", async () => {
+        const pick = await pickFaceSource(r);
+        if (!pick) return;
+        try {
+          await post(`/api/ads/${adId}/auto-face/${r.id}`, pick);
+          toast("Réf visage mise à jour ✓ — elle part sur les prochains plans de ce perso.");
+          kfAutoFacePanel(adId);
+        } catch (e) { toast(e.message); }
+      });
+    });
+  }
+
+  // « Changer » : choisir l'image de plan source, puis recadrer le visage à la main (ou laisser l'auto).
+  function pickFaceSource(r) {
+    return new Promise((resolve) => {
+      const ov = document.createElement("div");
+      ov.className = "modal-overlay kf-rect-overlay";
+      const thumbs = (r.candidates || []).map((c) =>
+        `<button type="button" class="kf-af-src${c.clip_id === r.source_clip_id ? " current" : ""}" data-id="${c.clip_id}">` +
+        `<img src="${esc(c.image_url)}" alt="plan ${c.n}" /><span class="small">Plan ${c.n}</span></button>`).join("");
+      ov.innerHTML =
+        `<div class="modal wide" role="dialog" aria-modal="true">` +
+        `<h3 class="modal-title">Changer la réf visage</h3>` +
+        `<p class="muted small">Choisis l'image d'un plan où ce perso apparaît, puis trace le cadre du visage ` +
+        `(« Recadrage auto » garde le recadrage automatique).</p>` +
+        (thumbs ? `<div class="kf-af-srcs">${thumbs}</div>` : `<p class="muted">Aucun plan avec image pour ce perso.</p>`) +
+        `<div class="modal-actions"><button class="btn" type="button" data-act="cancel">Annuler</button></div></div>`;
+      document.body.appendChild(ov);
+      const close = (val) => { ov.remove(); resolve(val); };
+      ov.querySelector('[data-act="cancel"]').addEventListener("click", () => close(null));
+      ov.addEventListener("click", (ev) => { if (ev.target === ov) close(null); });
+      ov.querySelectorAll(".kf-af-src").forEach((b) => b.addEventListener("click", async () => {
+        const clipId = Number(b.dataset.id);
+        const url = b.querySelector("img").getAttribute("src");
+        ov.style.display = "none";
+        const rect = await pickRect(url, {
+          title: "Recadrer le visage",
+          hint: "Trace un cadre autour du visage (cheveux et menton compris). Sans tracé : recadrage automatique.",
+          confirmText: "Utiliser ce visage",
+        });
+        if (rect === null && !(await showModal({
+          title: "Recadrage automatique ?", message: "Aucun cadre tracé : utiliser le recadrage automatique sur cette image ?",
+          confirmText: "Oui", cancelText: "Non",
+        }))) return close(null);
+        close(rect ? { clip_id: clipId, x: rect.x, y: rect.y, w: rect.w, h: rect.h } : { clip_id: clipId });
+      }));
+    });
   }
 
   window.kfTools = kfTools;

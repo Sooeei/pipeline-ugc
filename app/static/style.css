@@ -693,3 +693,14 @@ label.inline select { margin: 0; min-width: 160px; }
 .kf-af-refs { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
 .kf-af-ref { display: inline-flex; align-items: center; gap: 6px; }
 .kf-af-ref img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; }
+
+/* Réf visage auto : une carte par perso (image, méthode de recadrage, Changer / Retirer). */
+.kf-af-card { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: 8px; padding: 6px; max-width: 320px; }
+.kf-af-card img { width: 72px; height: 72px; object-fit: cover; border-radius: 6px; }
+.kf-af-card.kf-af-warn { border-color: var(--warn); }
+.kf-af-card .kf-af-method { color: var(--muted); }
+.kf-af-card.kf-af-warn .kf-af-method { color: var(--warn); }
+.kf-af-srcs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; max-height: 60vh; overflow: auto; }
+.kf-af-src { display: flex; flex-direction: column; align-items: center; gap: 4px; background: none; border: 2px solid var(--line); border-radius: 8px; padding: 4px; cursor: pointer; color: inherit; }
+.kf-af-src.current { border-color: var(--accent); }
+.kf-af-src img { width: 90px; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 6px; }

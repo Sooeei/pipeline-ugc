@@ -364,19 +364,42 @@ def media_plan_size() -> tuple[int, int]:
 
 
 # ==================================================================== réf visage automatique
-def face_box(img: Any) -> tuple[int, int, int, int]:
-    """Boîte (x0, y0, x1, y1) du visage : plus grand visage détecté (Haar cascade OpenCV si
-    disponible), élargie pour garder cheveux et menton ; sinon recadrage CENTRÉ en HAUT."""
-    w, h = img.size
+FACE_DETECTED, FACE_APPROX, FACE_MANUAL = "detected", "approx", "manual"
+
+
+def face_detector_path() -> str:
+    """Fichier Haar cascade de visages livré avec OpenCV ("" si indisponible : OpenCV 5 ne fournit
+    plus cv2.data.haarcascades/haarcascade_frontalface_default.xml NI cv2.CascadeClassifier)."""
     try:
         import os
 
         import cv2
-        import numpy as np
+
+        if not hasattr(cv2, "CascadeClassifier"):
+            return ""
 
         xml = os.path.join(getattr(getattr(cv2, "data", None), "haarcascades", "") or "",
                            "haarcascade_frontalface_default.xml")
-        if os.path.isfile(xml):
+        return xml if os.path.isfile(xml) else ""
+    except Exception:  # noqa: BLE001 - OpenCV absent
+        return ""
+
+
+def face_box(img: Any) -> tuple[int, int, int, int]:
+    return face_box_ex(img)[0]
+
+
+def face_box_ex(img: Any) -> tuple[tuple[int, int, int, int], str]:
+    """(boîte (x0, y0, x1, y1), méthode) du visage : plus grand visage DÉTECTÉ (Haar cascade
+    OpenCV si disponible), élargi pour garder cheveux et menton → « detected » ; sinon recadrage
+    CENTRÉ en HAUT de l'image → « approx » (à vérifier par l'utilisateur)."""
+    w, h = img.size
+    try:
+        import cv2
+        import numpy as np
+
+        xml = face_detector_path()
+        if xml:
             gray = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2GRAY)
             faces = cv2.CascadeClassifier(xml).detectMultiScale(gray, 1.1, 5, minSize=(40, 40))
             if len(faces):
@@ -384,20 +407,27 @@ def face_box(img: Any) -> tuple[int, int, int, int]:
                 side = int(max(fw, fh) * 1.8)
                 cx, cy = fx + fw // 2, fy + fh // 2
                 x0, y0 = max(0, cx - side // 2), max(0, cy - side // 2)
-                return x0, y0, min(w, x0 + side), min(h, y0 + side)
+                return (x0, y0, min(w, x0 + side), min(h, y0 + side)), FACE_DETECTED
     except Exception:  # noqa: BLE001 - détection facultative → repli
         pass
     side = int(min(w, h * 0.5) * 0.7)
     x0 = (w - side) // 2
     y0 = int(h * 0.06)
-    return x0, y0, x0 + side, min(h, y0 + side)
+    return (x0, y0, x0 + side, min(h, y0 + side)), FACE_APPROX
 
 
-def face_crop(src: str, dest: Path) -> Path:
+def face_crop(src: str, dest: Path, rect: tuple[float, float, float, float] | None = None) -> tuple[Path, str]:
+    """Recadre le visage de `src` dans `dest` → (dest, méthode). `rect` = rectangle RELATIF
+    borné (x0, y0, x1, y1 dans 0..1, cf. `_rect`) tracé à la main → méthode « manual »."""
     im = _open_rgb(src)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    im.crop(face_box(im)).save(dest, format="PNG")
-    return dest
+    if rect:
+        box = _px(rect, im.size)
+        method = FACE_MANUAL
+    else:
+        box, method = face_box_ex(im)
+    im.crop(box).save(dest, format="PNG")
+    return dest, method
 
 
 def auto_face_enabled(ad: dict[str, Any] | None) -> bool:
@@ -427,11 +457,11 @@ def maybe_auto_face_ref(clip_id: int) -> dict[str, Any] | None:
         if kind in have:
             return None
         folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"])) / "refs"
-        dest = face_crop(str(clip["image_path"]), folder / f"auto_{kind}_plan{int(clip['scene_n'])}.png")
-        rid = db.add_auto_ref_image(int(ad["id"]), str(dest), kind, clip_id)
+        dest, method = face_crop(str(clip["image_path"]), folder / f"auto_{kind}_plan{int(clip['scene_n'])}.png")
+        rid = db.add_auto_ref_image(int(ad["id"]), str(dest), kind, clip_id, method)
         db.log_activity("avatar_omni", f"Réf « Visage perso {n} » créée automatiquement depuis le "
                                        f"plan {clip['scene_n']} validé.")
-        return {"id": rid, "kind": kind, "path": str(dest), "character": n}
+        return {"id": rid, "kind": kind, "path": str(dest), "character": n, "method": method}
     except Exception as exc:  # noqa: BLE001 - jamais bloquant pour la validation
         print(f"[KEYFRAMES] réf visage auto impossible : {exc!r}", flush=True)
         return None
@@ -615,21 +645,122 @@ def api_retouch(clip_id: int, body: RetouchIn) -> dict[str, Any]:
         raise HTTPException(400, "Confirmation requise (une retouche Nano Banana Pro est payante).")
     if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
-    try:
-        return retouch(cfg, clip_id, body.instruction, with_product_refs=body.with_product_refs)
-    except (LookupError, ToolError) as exc:
-        raise _err(exc) from exc
-    except Exception as exc:  # noqa: BLE001 - erreur fournisseur lisible
-        from .pipeline import _user_error_message
+    clip = db.get_clip(clip_id) or {}
+    cur = str(clip.get("image_path") or "")
+    if not cur or not Path(cur).is_file():
+        raise _err(ToolError("Ce plan n'a pas encore d'image à retoucher."))
+    if not " ".join(str(body.instruction or "").split()):
+        raise _err(ToolError("Écris la retouche voulue (ex. « le pull en bleu »)."))
+    # Job de FOND (≈ 30 s en réel) : l'interface suit la progression via /api/jobs/{id}, comme
+    # les autres générations ; un échec n'est pas reporté sur la pub (le plan garde son image).
+    from . import jobs
 
-        raise HTTPException(502, _user_error_message(exc)) from exc
+    n = int(clip["scene_n"])
+    ad = db.get_ad(int(clip["ad_id"])) or {}
+
+    def _run(on_update: Any) -> dict[str, Any]:
+        on_update({"scene": n, "phase": "image", "status": "en_cours",
+                   "message": f"Plan {n} : retouche en cours…"})
+        try:
+            res = retouch(cfg, clip_id, body.instruction, with_product_refs=body.with_product_refs)
+        except Exception as exc:
+            on_update({"scene": n, "phase": "erreur", "status": "echec", "message": str(exc)})
+            raise
+        on_update({"scene": n, "phase": "pret", "status": "ok", "image": res.get("image_url"),
+                   "message": f"Plan {n} : retouche prête (v{res.get('v')})."})
+        return {"ok": 1, "echec": 0, "v": res.get("v"), "image_url": res.get("image_url")}
+
+    job = jobs.manager.start(cfg, int(clip["ad_id"]), str(ad.get("name") or ""), [{"n": n}], "",
+                             output_mode="retouche", only_clip_id=clip_id, runner=_run)
+    return {"ok": True, "job_id": job.id, "clip_id": clip_id, "dry_run": cfg.dry_run}
+
+
+_FACE_METHOD_LABELS = {
+    FACE_DETECTED: "visage détecté",
+    FACE_APPROX: "recadrage approximatif (haut de l'image) — vérifie-le",
+    FACE_MANUAL: "recadrée à la main",
+}
 
 
 def _auto_face_view(ad_id: int) -> dict[str, Any]:
+    """Réfs visage AUTO par perso (nom, plan source, méthode) + images de plans utilisables pour
+    « Changer » (plans avec image où le perso est à l'image)."""
+    from . import pipeline
+
     ad = db.get_ad(ad_id) or {}
-    refs = [{"id": int(r["id"]), "kind": r["kind"], "url": _media_url(r["path"])}
-            for r in db.list_ref_images_typed(ad_id) if int(r.get("auto") or 0)]
-    return {"ad_id": ad_id, "enabled": auto_face_enabled(ad), "refs": refs}
+    names = pipeline.ad_character_names(ad) if ad else {}
+    clips = db.clips_for_ad(ad_id) if ad else []
+    by_id = {int(c["id"]): c for c in clips}
+    refs = []
+    for r in db.list_auto_ref_images(ad_id):
+        n = config_app.omni_face_index(r["kind"])
+        src = by_id.get(int(r["source_clip_id"] or 0)) or {}
+        candidates = []
+        for c in clips:
+            img = str(c.get("image_path") or "")
+            if not img or not Path(img).is_file():
+                continue
+            try:
+                in_frame = n in pipeline.clip_characters_in_frame(c, ad)
+            except Exception:  # noqa: BLE001 - repli : tous les plans avec image
+                in_frame = True
+            if in_frame:
+                candidates.append({"clip_id": int(c["id"]), "n": int(c["scene_n"]),
+                                   "image_url": _media_url(img)})
+        method = str(r.get("auto_method") or "")
+        refs.append({
+            "id": int(r["id"]), "kind": r["kind"], "character": n, "name": names.get(n, ""),
+            "url": _media_url(r["path"]), "source_clip_id": int(r["source_clip_id"] or 0) or None,
+            "source_n": int(src["scene_n"]) if src else None, "method": method,
+            "method_label": _FACE_METHOD_LABELS.get(method, ""), "candidates": candidates,
+        })
+    return {"ad_id": ad_id, "enabled": auto_face_enabled(ad), "refs": refs,
+            "detector": "haar" if face_detector_path() else "",
+            "detector_label": ("détection de visage OpenCV active" if face_detector_path() else
+                               "pas de détecteur de visage dans cet OpenCV : recadrage approximatif, "
+                               "vérifie chaque réf et utilise « Changer » si besoin")}
+
+
+class AutoFaceChangeIn(BaseModel):
+    clip_id: int | None = None      # image source (plan) ; None = plan source actuel
+    x: float | None = None          # rectangle RELATIF tracé à la main (0..1) ; absent = auto
+    y: float | None = None
+    w: float | None = None
+    h: float | None = None
+
+
+def change_auto_face(ad_id: int, ref_id: int, body: AutoFaceChangeIn) -> dict[str, Any]:
+    """« Changer » une réf visage AUTO : autre image de plan et/ou recadrage à la main. Nouveau
+    fichier (jamais d'écrasement : l'URL change, pas de cache), ancien fichier auto supprimé."""
+    from . import pipeline
+
+    ad = db.get_ad(ad_id)
+    ref = next((r for r in db.list_auto_ref_images(ad_id) if int(r["id"]) == int(ref_id)), None)
+    if ad is None or ref is None:
+        raise LookupError("Réf visage auto introuvable.")
+    clip_id = int(body.clip_id or ref.get("source_clip_id") or 0)
+    clip = db.get_clip(clip_id) if clip_id else None
+    if clip is None or int(clip["ad_id"]) != int(ad_id):
+        raise LookupError("Plan source introuvable.")
+    src = str(clip.get("image_path") or "")
+    if not src or not Path(src).is_file():
+        raise ToolError("Ce plan n'a pas d'image.")
+    rect = None
+    if None not in (body.x, body.y, body.w, body.h):
+        rect = _rect(body.x, body.y, body.w, body.h)
+    folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"])) / "refs"
+    import time
+
+    dest = folder / f"auto_{ref['kind']}_plan{int(clip['scene_n'])}_{int(time.time() * 1000)}.png"
+    dest, method = face_crop(src, dest, rect)
+    old = Path(str(ref["path"]))
+    db.update_auto_ref_image(int(ref_id), str(dest), clip_id, method)
+    try:
+        if old != dest and old.is_file() and old.parent == folder and old.name.startswith("auto_"):
+            old.unlink()
+    except OSError:
+        pass
+    return _auto_face_view(ad_id)
 
 
 @router.get("/api/ads/{ad_id}/auto-face")
@@ -645,6 +776,14 @@ def api_auto_face_set(ad_id: int, body: AutoFaceIn) -> dict[str, Any]:
         raise HTTPException(404, "Pub introuvable.")
     db.set_ad_fields(ad_id, auto_face_ref=1 if body.enabled else 0)
     return _auto_face_view(ad_id)
+
+
+@router.post("/api/ads/{ad_id}/auto-face/{ref_id}")
+def api_auto_face_change(ad_id: int, ref_id: int, body: AutoFaceChangeIn) -> dict[str, Any]:
+    try:
+        return change_auto_face(ad_id, ref_id, body)
+    except (LookupError, ToolError) as exc:
+        raise _err(exc) from exc
 
 
 @router.delete("/api/ads/{ad_id}/auto-face")

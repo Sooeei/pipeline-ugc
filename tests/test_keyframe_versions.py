@@ -161,11 +161,15 @@ def test_retouch_sends_current_image_first_and_creates_version(monkeypatch):
     db.add_ref_image(ad_id, _img(pipeline.objet_dir(ad_id, "ao") / "refs" / "v.png"), "visage1")
     with TestClient(app) as c:
         c.post("/api/settings", json={"dry_run": True})
+        # Job de FOND : la réponse rend la main tout de suite (job_id), la retouche suit.
         r = c.post(f"/api/clips/{cid}/retouch", json={"instruction": "the sweater in navy blue"})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 200 and r.json()["job_id"], r.text
+        assert _wait_job(c, r.json()["job_id"])["state"] == "termine"
         r2 = c.post(f"/api/clips/{cid}/retouch",
                     json={"instruction": "remove the ring", "with_product_refs": True})
         assert r2.status_code == 200, r2.text
+        snap = _wait_job(c, r2.json()["job_id"])
+        assert snap["state"] == "termine" and snap["summary"]["v"] == 3
         assert c.post(f"/api/clips/{cid}/retouch", json={"instruction": "  "}).status_code == 400
     first, second = k.calls
     assert first["refs"] == [cur] and first["roles"] == [pp.ROLE_ANCHOR]
@@ -181,6 +185,38 @@ def test_retouch_sends_current_image_first_and_creates_version(monkeypatch):
     vs = keyframe_versions.list_view(cid)["versions"]
     assert [(v["v"], v["source"]) for v in vs] == [(3, "retouche"), (2, "retouche"), (1, "generation")]
     assert vs[0]["note"] == "remove the ring"
+
+
+def _wait_job(c, job_id, tries=300):
+    import time
+
+    snap = {}
+    for _ in range(tries):
+        snap = c.get(f"/api/jobs/{job_id}").json()
+        if snap["state"] not in ("en_cours", "en_attente"):
+            return snap
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} bloqué : {snap}")
+
+
+def test_retouch_failure_is_reported_on_job_not_on_ad(monkeypatch):
+    """Échec fournisseur pendant la retouche : job « echec » avec message lisible ; la pub
+    n'est PAS mise en échec et le plan garde son image."""
+    def boom(*a, **k):
+        raise RuntimeError("OpenRouter indisponible")
+
+    monkeypatch.setattr(pipeline, "nano_banana_generate_image", boom)
+    ad_id = db.create_ad("ao", "", "[]", kind="avatar_omni")
+    cid = db.create_clip(ad_id, 1, "Salut.", "smile", prompt_image="A woman")
+    cur = _plan_img(ad_id, cid)
+    db.set_ad_status(ad_id, "objet_images")
+    with TestClient(app) as c:
+        c.post("/api/settings", json={"dry_run": True})
+        r = c.post(f"/api/clips/{cid}/retouch", json={"instruction": "blue sweater"})
+        snap = _wait_job(c, r.json()["job_id"])
+    assert snap["state"] == "echec" and snap["summary"]["message"]
+    assert db.get_ad(ad_id)["status"] == "objet_images"
+    assert db.get_clip(cid)["image_path"] == cur
 
 
 def test_retouch_requires_image_and_confirmation_in_real_mode(monkeypatch):
@@ -464,3 +500,63 @@ def test_face_box_fallback_is_top_centered():
     im = Image.new("RGB", (720, 1280), (128, 128, 128))
     x0, y0, x1, y1 = keyframe_versions.face_box(im)
     assert x1 - x0 == y1 - y0 and y0 < 200 and abs((x0 + x1) / 2 - 360) <= 1
+
+
+def test_auto_face_reports_method_and_can_be_changed_by_hand(tmp_path, monkeypatch):
+    """Sans détecteur (OpenCV 5 ne livre plus le fichier Haar) : réf en recadrage APPROXIMATIF,
+    signalée ; « Changer » = autre plan source et/ou cadre tracé à la main (nouveau fichier)."""
+    monkeypatch.setattr(keyframe_versions, "face_detector_path", lambda: "")
+    ad_id, cid = _ao_one_person(tmp_path)
+    with TestClient(app) as c:
+        auto = c.post(f"/api/avatar-omni/validate/{cid}", json={"valide": True}).json()["auto_face_ref"]
+        assert auto["method"] == keyframe_versions.FACE_APPROX
+        view = c.get(f"/api/ads/{ad_id}/auto-face").json()
+        assert view["detector"] == "" and "approximatif" in view["detector_label"]
+        ref = view["refs"][0]
+        assert ref["character"] == 1 and ref["source_clip_id"] == cid and "approximatif" in ref["method_label"]
+        assert [x["clip_id"] for x in ref["candidates"]] == [cid] and "?v=" in ref["candidates"][0]["image_url"]
+        old = auto["path"]
+        # cadre tracé à la main sur l'image du plan (moitié haute centrée)
+        r = c.post(f"/api/ads/{ad_id}/auto-face/{ref['id']}",
+                   json={"clip_id": cid, "x": 0.25, "y": 0.05, "w": 0.5, "h": 0.3})
+        assert r.status_code == 200, r.text
+        new = r.json()["refs"][0]
+        assert new["method"] == keyframe_versions.FACE_MANUAL and "à la main" in new["method_label"]
+        path = db.list_auto_ref_images(ad_id)[0]["path"]
+        assert path != old and Path(path).is_file() and not Path(old).exists()
+        with Image.open(db.get_clip(cid)["image_path"]) as src, Image.open(path) as face:
+            assert face.size == (round(0.75 * src.width) - round(0.25 * src.width),
+                                 round(0.35 * src.height) - round(0.05 * src.height))
+        assert c.post(f"/api/ads/{ad_id}/auto-face/999", json={}).status_code in (400, 404)
+
+
+def test_face_detector_used_when_haar_file_available(tmp_path, monkeypatch):
+    """Avec un fichier Haar disponible, le visage DÉTECTÉ est recadré (méthode « detected »)."""
+    import cv2
+
+    xml = tmp_path / "haar.xml"
+    xml.write_text("x")
+    monkeypatch.setattr(keyframe_versions, "face_detector_path", lambda: str(xml))
+
+    class FakeCascade:
+        def __init__(self, path):
+            assert path == str(xml)
+
+        def detectMultiScale(self, gray, *a, **k):
+            return [(300, 400, 100, 100)]
+
+    monkeypatch.setattr(cv2, "CascadeClassifier", FakeCascade, raising=False)   # absent d'OpenCV 5
+    im = Image.new("RGB", (720, 1280), (200, 180, 160))
+    box, method = keyframe_versions.face_box_ex(im)
+    assert method == keyframe_versions.FACE_DETECTED
+    assert box == (260, 360, 440, 540)                           # visage élargi ×1,8 autour du centre
+
+
+def test_face_detector_absent_with_opencv5_without_cascade(monkeypatch):
+    """OpenCV 5 : ni fichier Haar ni CascadeClassifier → pas de détecteur (repli approximatif)."""
+    import cv2
+
+    monkeypatch.delattr(cv2, "CascadeClassifier", raising=False)
+    assert keyframe_versions.face_detector_path() == ""
+    _box, method = keyframe_versions.face_box_ex(Image.new("RGB", (720, 1280)))
+    assert method == keyframe_versions.FACE_APPROX

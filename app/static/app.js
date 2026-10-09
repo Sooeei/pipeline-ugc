@@ -2216,11 +2216,58 @@ function libAdHeader(ad, asset, hasFiles) {
         // agent C : export des clips validés dans le dossier du client (outils_c.js)
         (asset === "video" ? ` <button class="btn small btn-export-pub" type="button" data-ad-id="${ad.id}">📤 Exporter la pub</button>` : "")
       : "";
+  // « Ouvrir dans l'éditeur » : modes qui ont un éditeur de plans (Objet animé, Mashup, Avatar IA).
+  const edit = ad.id != null && EDITOR_FLOWS[ad.kind]
+    ? ` <button class="btn small btn-open-editor" type="button" data-ad-id="${ad.id}" data-kind="${esc(ad.kind)}" ` +
+      `title="Recharge la pub (plans, versions, réglages, réfs) dans l'éditeur, comme juste après sa création">✏️ Ouvrir dans l'éditeur</button>`
+    : "";
   return (
     `<div class="lib-ad-head"><h2>${esc(ad.name)} ` +
-    `<span class="date">${fmtDate(ad.created_at)} · ${esc(ad.status)}</span></h2>${dl}</div>`
+    `<span class="date">${fmtDate(ad.created_at)} · ${esc(ad.status)}</span></h2>${dl}${edit}</div>`
   );
 }
+
+// Type de pub → carte de style de « Nouvelle pub » qui porte son éditeur de plans. Les modes sans
+// éditeur de plans (Avatar HeyGen historique, Voix off) n'ont pas de bouton.
+const EDITOR_FLOWS = { objet: "objet_vivant", mashup: "mashup", avatar_omni: "avatar_omni" };
+
+// Rouvre une pub existante dans l'éditeur, exactement comme juste après sa création : bon style,
+// identifiant de pub courant, galerie des plans (versions, réglages, réfs, fiche produit…).
+async function openAdInEditor(kind, adId) {
+  const style = EDITOR_FLOWS[kind];
+  if (!style || !adId) return;
+  gotoSection("new");
+  const card = document.querySelector(`.style-card[data-style="${style}"]`);
+  if (card) card.click();
+  let target = null;
+  try {
+    if (kind === "objet") {
+      objAdId = adId;
+      objAdState = null;
+      await loadObjGallery(adId);
+      target = $("objValidation");
+    } else if (kind === "mashup") {
+      mashAdId = adId;
+      await loadMashGallery(adId);
+      target = $("mashValidation");
+    } else {
+      aoAdId = adId;
+      aoVoiceUnlockedBy = {};
+      aoAdState = null;
+      await loadAoGallery(adId);
+      target = $("aoValidation");
+    }
+  } catch (e) {
+    return toast(e.message);
+  }
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  toast("Pub rouverte dans l'éditeur ✓");
+}
+
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest && ev.target.closest(".btn-open-editor");
+  if (b) openAdInEditor(b.dataset.kind, Number(b.dataset.adId));
+});
 
 function renderClipAds(root, ads, emptyMsg) {
   root.innerHTML = "";

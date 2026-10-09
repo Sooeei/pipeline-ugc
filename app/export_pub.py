@@ -140,12 +140,58 @@ def clip_dialogue(clip: dict[str, Any]) -> str:
     return str(clip.get("script") or clip.get("dialogue") or "")
 
 
+def clip_is_variant(clip: dict[str, Any]) -> bool:
+    """Plan VARIANTE (HOOK 2 / HOOK 3 / VARIANTE du découpage client)."""
+    try:
+        return bool(int(clip.get("variant") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def clip_is_excluded(clip: dict[str, Any]) -> bool:
+    """Plan exclu (choix manuel, ou variante non demandée)."""
+    try:
+        return bool(int(clip.get("excluded") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def variant_suffix(clip: dict[str, Any]) -> str:
+    """Suffixe d'export d'une variante : `variant_label` slugifié (« hook2 », « variante »…)."""
+    return slugify(clip.get("variant_label") or "", max_words=3, max_chars=20).replace("-", "") or "variante"
+
+
 def clip_export_name(index: int, width: int, clip: dict[str, Any], ad: dict[str, Any]) -> str:
-    """`NN_<perso>_<debut-de-replique>.mp4` ; sans réplique → `NN_<perso>.mp4`."""
+    """`NN_<perso>_<debut-de-replique>.mp4` ; sans réplique → `NN_<perso>.mp4`. Variante de hook :
+    suffixe `_hook2` / `_variante` (variant_label) → `01_nadia_..._hook2.mp4`."""
     perso = slugify(plan_speaker_name(clip, ad), max_words=3, max_chars=24) or "plan"
     line = slugify(clip_dialogue(clip))
     parts = [str(index).zfill(width), perso] + ([line] if line else [])
+    if clip_is_variant(clip):
+        parts.append(variant_suffix(clip))
     return "_".join(parts) + ".mp4"
+
+
+def export_numbers(clips: list[dict[str, Any]]) -> dict[int, int]:
+    """Numéro NN de chaque plan exporté (clé = id du clip), dans l'ordre du script :
+    - plans du montage principal (ni variante, ni exclus) : 1, 2, 3… (les variantes ne décalent
+      PAS la numérotation des plans suivants) ;
+    - variante : même NN que le plan qu'elle remplace = le plan principal qui la précède (HOOK 1
+      avant HOOK 2/3) ; s'il n'est pas identifiable (variante en tête), son propre rang."""
+    ordered = sorted(clips, key=lambda c: (int(c["scene_n"]), int(c["id"])))
+    out: dict[int, int] = {}
+    rank = 0
+    last_main: int | None = None
+    for pos, c in enumerate(ordered, 1):
+        if clip_is_variant(c):
+            out[int(c["id"])] = last_main if last_main is not None else pos
+            continue
+        if clip_is_excluded(c):
+            continue
+        rank += 1
+        last_main = rank
+        out[int(c["id"])] = rank
+    return out
 
 
 def ad_folder_slug(ad: dict[str, Any]) -> str:
@@ -197,18 +243,22 @@ def export_plan(ad_id: int, export_dir: str, subdir: str = "") -> dict[str, Any]
     dest = (base / sub) if base and sub else None
     files: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for rank, c in enumerate(clips, 1):
+    numbers = export_numbers(clips)
+    for c in clips:
         src = str(c.get("mp4_path") or "")
+        if clip_is_excluded(c) and not clip_is_variant(c):
+            skipped.append({"scene_n": c["scene_n"], "reason": "plan exclu"})
+            continue
         if c.get("status") != EXPORTABLE_STATUS:
             skipped.append({"scene_n": c["scene_n"], "reason": "non validé / pas encore animé"})
             continue
         if not src or not Path(src).is_file():
             skipped.append({"scene_n": c["scene_n"], "reason": "fichier vidéo introuvable"})
             continue
-        name = clip_export_name(rank, width, c, ad)
+        name = clip_export_name(numbers[int(c["id"])], width, c, ad)
         files.append({
             "clip_id": int(c["id"]), "scene_n": int(c["scene_n"]), "src": src, "name": name,
-            "speaker": plan_speaker_name(c, ad),
+            "speaker": plan_speaker_name(c, ad), "variant": clip_is_variant(c),
             "exists": bool(dest and (dest / name).exists()),
         })
     return {

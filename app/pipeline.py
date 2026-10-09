@@ -2156,7 +2156,9 @@ def animate_avatar_omni_clips(
     elif not int(ad.get("keyframes_ok") or 0):
         clips = []
     else:
-        clips = [c for c in all_clips if omni_clip_animatable(c) and c.get("status") in ("valide", "echec")]
+        # Plans exclus / variantes de hook non demandées : seulement via « Tester ce plan ».
+        clips = [c for c in all_clips if omni_clip_animatable(c) and c.get("status") in ("valide", "echec")
+                 and not clip_excluded(c)]
     resolution = config_app.normalize_omni_resolution(ad.get("omni_resolution"))
     wps_for = ad_wps_for(ad)          # débit de la fiche voix de CHAQUE speaker
     sheet_for = ad_voice_sheet_for(ad)

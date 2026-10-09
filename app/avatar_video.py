@@ -83,6 +83,115 @@ def model_resolution(model: str, wanted: Any) -> str:
     return config_app.normalize_omni_resolution(want)
 
 
+def resolution_warning(model: str, wanted: Any) -> str:
+    """Avertissement FR quand la résolution demandée pour la pub (ex. 1080p exigé par le client)
+    n'est pas disponible avec le modèle vidéo : la vidéo sort dans la résolution bornée."""
+    want = str(wanted or "").strip().lower()
+    if not want:
+        return ""
+    got = model_resolution(model, want)
+    if got == want:
+        return ""
+    spec = config_app.AVATAR_VIDEO_MODELS.get(model)
+    label = spec["label"] if spec else model
+    return (f"Résolution {want} demandée pour cette pub, mais {label} ne la propose pas : la vidéo "
+            f"sortira en {got}." + (" Passe en Google Omni pour du 1080p." if want == "1080p" else ""))
+
+
+# ============================================================ variantes de hook / plans exclus
+def clip_variant(c: dict[str, Any]) -> bool:
+    """Plan VARIANTE (HOOK 2 / HOOK 3 / VARIANTE du découpage client) : générable à la demande,
+    jamais dans l'assemblage principal."""
+    try:
+        return bool(int(c.get("variant") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def in_main_cut(c: dict[str, Any]) -> bool:
+    """Plan du montage PRINCIPAL : ni exclu (choix manuel / variante non demandée), ni variante.
+    Une variante générée à la demande (« Générer cette variante ») reste hors assemblage."""
+    return not pipeline.clip_excluded(c) and not clip_variant(c)
+
+
+def variant_label(c: dict[str, Any]) -> str:
+    """Libellé de la variante (« hook2 », « variante »…) ; « variante » par défaut."""
+    return str(c.get("variant_label") or "").strip() or "variante"
+
+
+# ============================================================ durée cible (découpage client)
+def clip_target(c: dict[str, Any]) -> float | None:
+    """Durée cible du plan en secondes (timecodes du découpage client), None si absente."""
+    try:
+        v = float(c.get("target_seconds"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def speech_need_seconds(c: dict[str, Any], wps: float | None = None) -> float:
+    """Temps dont la réplique a besoin : parole estimée au débit du perso + marge native
+    (AVATAR_NATIVE_MARGIN_S). 0 pour un plan muet."""
+    speech = pipeline.omni_speech_seconds(str(c.get("script") or ""), wps)
+    return round(speech + config_app.AVATAR_NATIVE_MARGIN_S, 2) if speech > 0 else 0.0
+
+
+def _snap(target: float, durations: tuple[int, ...] | list[int]) -> int:
+    """Plus petite durée ACCEPTÉE ≥ cible (arrondie au-dessus), bornée au max du modèle."""
+    import math
+
+    allowed = sorted(int(d) for d in durations)
+    want = math.ceil(round(float(target), 6))
+    for d in allowed:
+        if d >= want:
+            return d
+    return allowed[-1]
+
+
+def target_clip_seconds(c: dict[str, Any], model: str, wps: float | None = None) -> int | None:
+    """Durée envoyée au modèle quand le plan a une durée CIBLE : la cible, allongée seulement si la
+    réplique en a besoin (parole au débit du perso + marge), arrondie à une durée acceptée par le
+    modèle (Omni 3–10 s, Grok 4–12 s). None sans cible."""
+    tgt = clip_target(c)
+    if tgt is None:
+        return None
+    need = speech_need_seconds(c, wps)
+    return _snap(max(tgt, need), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
+
+
+def target_warning(c: dict[str, Any], wps: float | None = None) -> str:
+    """« Plan N : la réplique demande ~X s pour une cible de Y s » si elle ne tient pas."""
+    tgt = clip_target(c)
+    if tgt is None:
+        return ""
+    need = speech_need_seconds(c, wps)
+    if need <= tgt + 1e-6:
+        return ""
+    n = c.get("block_n") or c.get("scene_n")
+    return (f"Plan {n} : la réplique demande ~{need:.1f} s pour une cible de {tgt:g} s "
+            "(durée allongée — raccourcis la réplique pour tenir le timing du client).")
+
+
+def duration_totals(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str, Any]:
+    """Totaux affichés : durée GÉNÉRÉE (Σ clip_seconds des clips prêts du montage principal) et
+    durée VISÉE (Σ target_seconds des plans non exclus du montage principal), + alertes FR par
+    plan (montage principal et variantes)."""
+    wps_for = pipeline.ad_wps_for(ad)
+    main = [c for c in clips if in_main_cut(c)]
+    generated = sum(float(c.get("clip_seconds") or 0) for c in main
+                    if c.get("status") == "pret" and c.get("mp4_path"))
+    targets = [t for c in main if (t := clip_target(c)) is not None]
+    alerts = []
+    for c in sorted(clips, key=lambda x: int(x["scene_n"])):
+        if pipeline.clip_excluded(c) and not clip_variant(c):
+            continue
+        if w := target_warning(c, wps_for(_speaker(c))):
+            alerts.append(w)
+    return {"seconds_generated": round(generated, 1),
+            "seconds_target": round(sum(targets), 1) if targets else None,
+            "duration_alerts": alerts}
+
+
 def _speaker(c: dict[str, Any]) -> int:
     try:
         return max(1, int(c.get("speaker") or 1))
@@ -105,10 +214,15 @@ def clip_target_seconds(
     sinon avatar_clip_seconds(wav_seconds) ; sans audio : durée estimée du texte au débit de la
     fiche voix (estimation de coût avant l'étape Voix)."""
     if config_app.normalize_voice_mode(voice_mode) == "native":
-        # + secondes demandées via « Régénérer (+1 s) » (réplique coupée), bornées au max du modèle.
+        # Durée CIBLE du découpage client (timecodes) prioritaire, allongée seulement si la
+        # réplique en a besoin ; + secondes demandées via « Régénérer (+1 s) » (réplique coupée),
+        # bornées au max du modèle.
+        wps = float(wps_for(_speaker(c))) if wps_for else None
+        base = target_clip_seconds(c, model, wps)
+        if base is None:
+            base = config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model)
         return config_app.with_extra_seconds(
-            config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model),
-            c.get("extra_seconds"), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
+            base, c.get("extra_seconds"), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
     durations = config_app.AVATAR_VIDEO_MODELS[model]["durations"]
     wav = float(c.get("wav_seconds") or 0.0)
     stored = int(c.get("clip_seconds") or 0)
@@ -325,7 +439,8 @@ def estimate(
         dry_run = cfg.dry_run if cfg is not None else db.get_setting("dry_run", "1") == "1"
     model = effective_video_model(ad, cfg)
     if clips is None:
-        clips = [c for c in db.clips_for_ad(int(ad["id"])) if c.get("status") != "pret"]
+        clips = [c for c in db.clips_for_ad(int(ad["id"]))
+                 if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
     wps_for = pipeline.ad_wps_for(ad)
     mode = voice_mode_of(ad)
     secs = [clip_target_seconds(c, model, wps_for, mode) for c in clips]
@@ -368,6 +483,11 @@ def clip_v2_fields(c: dict[str, Any]) -> dict[str, Any]:
         "drift_flag": bool(int(c.get("drift_flag") or 0)),
         "mp4_url": media_url(c.get("mp4_path")),
         "speech_cut": bool(int(c.get("speech_cut") or 0)),
+        # Pilotage : exclusion / variante de hook (générable à la demande) / durée cible.
+        "excluded": pipeline.clip_excluded(c),
+        "variant": clip_variant(c),
+        "variant_label": variant_label(c) if clip_variant(c) else "",
+        "target_seconds": clip_target(c),
     }
 
 
@@ -378,7 +498,18 @@ def ad_v2_fields(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> dict[
     except Exception as exc:  # noqa: BLE001 - affichage : jamais d'erreur
         _log_detail(f"estimate v2 : {exc!r}")
         est = {}
+    model = effective_video_model(ad, cfg)
+    try:
+        totals = duration_totals(ad, db.clips_for_ad(int(ad["id"])))
+    except Exception as exc:  # noqa: BLE001 - affichage : jamais d'erreur
+        _log_detail(f"duration_totals : {exc!r}")
+        totals = {"seconds_generated": 0.0, "seconds_target": None, "duration_alerts": []}
+    res_warn = resolution_warning(model, ad.get("omni_resolution"))
     return {
+        **totals,
+        "resolution_effective": model_resolution(model, ad.get("omni_resolution")),
+        "resolution_warning": res_warn,
+        "pilot_alerts": totals["duration_alerts"] + ([res_warn] if res_warn else []),
         "pipeline_version": int(ad.get("pipeline_version") or 1),
         "voice_mode": voice_mode_of(ad),
         "video_model": effective_video_model(ad, cfg),
@@ -537,14 +668,18 @@ def animate_blocks(
     voice_mode = voice_mode_of(ad)
     all_clips = db.clips_for_ad(ad_id)
     if only_clip_id is not None:
+        # Plan précis (« Tester ce plan », « Générer cette variante ») : même exclu / variante.
         clips = [c for c in all_clips if int(c["id"]) == int(only_clip_id)
                  and not clip_block_reason(c, model, voice_mode)]
     elif not int(ad.get("keyframes_ok") or 0) or (
             voice_mode == "elevenlabs" and not int(ad.get("voices_ok") or 0)):
         clips = []
     else:
+        # Run global : les plans exclus (variantes non demandées comprises) sont ignorés.
         clips = [c for c in all_clips
-                 if c.get("status") != "pret" and not clip_block_reason(c, model, voice_mode)]
+                 if c.get("status") != "pret" and not pipeline.clip_excluded(c)
+                 and not clip_block_reason(c, model, voice_mode)]
+    wps_for = pipeline.ad_wps_for(ad)
     if not clips:
         raise RuntimeError("Aucun bloc prêt à animer : valide d'abord les keyframes"
                            + (" et les voix." if voice_mode == "elevenlabs" else "."))
@@ -564,7 +699,10 @@ def animate_blocks(
             wav = _wav_file(c)
             if voice_mode == "elevenlabs" and float(c.get("wav_seconds") or 0) <= 0:
                 c = {**c, "wav_seconds": media.mp4_duration(wav) or 0.0}
-            seconds = clip_target_seconds(c, model, voice_mode=voice_mode)
+            seconds = clip_target_seconds(c, model, wps_for, voice_mode=voice_mode)
+            if w := target_warning(c, wps_for(_speaker(c))):
+                _log_detail(w)
+                db.log_activity("avatar_omni", w)
             prompt = _clip_prompt(c, ad, model)
             db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
                            clip_seconds=seconds, error=None)
@@ -614,7 +752,8 @@ def animate_blocks(
                     db.log_activity("avatar_omni", w)
         ok, ko = pipeline._run_parallel(clips, _one, MAX_PARALLEL.get(model, 1))
     assembled = False
-    fresh = db.clips_for_ad(ad_id)
+    # Assemblage automatique du montage PRINCIPAL (variantes et plans exclus hors montage).
+    fresh = [c for c in db.clips_for_ad(ad_id) if in_main_cut(c)]
     if fresh and all(c.get("status") == "pret" and c.get("mp4_path") for c in fresh):
         try:
             assemble(ad_id)
@@ -699,7 +838,7 @@ def _animate_voice_chains(
     camera_key, style = pipeline.ad_omni_camera(ad), pipeline.ad_style(ad)
 
     def seconds_of(c: dict[str, Any]) -> int:
-        return clip_target_seconds(c, "omni", voice_mode="native")
+        return clip_target_seconds(c, "omni", pipeline.ad_wps_for(ad), voice_mode="native")
 
     chains = plan_voice_chains(clips, seconds_of)
     _chain_log(f"pub {ad_id} : {len(chains)} chaîne(s) — "
@@ -800,11 +939,12 @@ def _animate_voice_chains(
 
 def assemble(ad_id: int) -> dict[str, Any]:
     """Concatène les clips {n}.mp4 dans l'ordre → final.mp4 et les voix → voix_complete.mp3 ;
-    enregistre ads.final_path / final_audio_path. RuntimeError si un bloc n'est pas prêt."""
+    enregistre ads.final_path / final_audio_path. RuntimeError si un bloc n'est pas prêt.
+    Montage PRINCIPAL seulement : plans exclus et variantes de hook (même générées) ignorés."""
     ad = db.get_ad(ad_id)
     if ad is None:
         raise RuntimeError("Pub introuvable.")
-    clips = sorted(db.clips_for_ad(ad_id), key=lambda c: int(c["scene_n"]))
+    clips = sorted((c for c in db.clips_for_ad(ad_id) if in_main_cut(c)), key=lambda c: int(c["scene_n"]))
     missing = [int(c["scene_n"]) for c in clips
                if c.get("status") != "pret" or not c.get("mp4_path") or not Path(str(c["mp4_path"])).is_file()]
     if not clips or missing:
@@ -890,7 +1030,8 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
         if not int(ad.get("keyframes_ok") or 0):
             raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») avant "
                                      "de générer les vidéos.")
-        candidates = [c for c in clips if c.get("status") != "pret"]
+        # Plans exclus (variantes de hook non demandées comprises) : hors run global.
+        candidates = [c for c in clips if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
         blocked = [(int(c["scene_n"]), r) for c in candidates if (r := clip_block_reason(c, model, voice_mode_of(ad)))]
         if blocked:
             return JSONResponse(status_code=409, content={
@@ -909,17 +1050,24 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
     if relaunch is not None:
         db.update_clip(int(relaunch["id"]), status="valide", mp4_path=None, raw_mp4_path="",
                        frame0_path="", drift_score=None, drift_flag=0, error=None, omni_prompt="")
-        db.set_ad_fields(ad_id, final_path="", final_audio_path="")
+        if in_main_cut(relaunch):   # une variante n'est pas dans final.mp4 : on le garde
+            db.set_ad_fields(ad_id, final_path="", final_audio_path="")
     job = jobs.manager.start(
         cfg, ad_id, str(ad["name"]), [{"n": int(c["scene_n"])} for c in candidates], "",
         output_mode="avatar_video",
         only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
     )
+    wanted = (db.get_ad(ad_id) or {}).get("omni_resolution")
+    single = candidates[0] if body.clip_id is not None else None
     return {
         "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
         "n_plans": len(candidates), "estimate": est, "video_model": model,
         "voice_mode": voice_mode_of(ad), "relaunch_video_only": relaunch is not None,
-        "resolution": model_resolution(model, (db.get_ad(ad_id) or {}).get("omni_resolution")),
+        "resolution": model_resolution(model, wanted),
+        "resolution_warning": resolution_warning(model, wanted),
+        # « Générer cette variante » : animée seule, hors assemblage principal.
+        "variant": bool(single and clip_variant(single)),
+        "variant_label": variant_label(single) if single and clip_variant(single) else "",
     }
 
 
@@ -938,7 +1086,9 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
         vm = body.video_model.strip().lower()
         if vm and vm not in config_app.AVATAR_VIDEO_MODELS:
             raise HTTPException(400, "Modèle vidéo inconnu (grok | kling | omni).")
-        fields["video_model"] = vm
+        # "" = réglage global AU MOMENT DU CHOIX, figé sur la pub : un changement ultérieur du
+        # réglage global ne doit jamais changer le modèle d'une pub existante.
+        fields["video_model"] = vm or effective_video_model({})
     if body.voice_mode is not None:
         mode = body.voice_mode.strip().lower()
         if mode not in config_app.ACTIVE_VOICE_MODES:
@@ -961,9 +1111,12 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
     if fields:
         model = effective_video_model(fresh)
         mode = voice_mode_of(fresh)
+        wps_for = pipeline.ad_wps_for(fresh)
         for c in db.clips_for_ad(ad_id):
             wav = float(c.get("wav_seconds") or 0)
-            if mode == "native" or wav > 0:
+            if mode == "native":   # durée cible du découpage client prise en compte
+                db.update_clip(int(c["id"]), clip_seconds=clip_target_seconds(c, model, wps_for, mode))
+            elif wav > 0:
                 db.update_clip(int(c["id"]), clip_seconds=config_app.avatar_block_clip_seconds(
                     str(c.get("script") or ""), wav, model, mode))
     return {"ok": True, "video_model": effective_video_model(fresh),

@@ -264,6 +264,74 @@ def set_feedback_reason(feedback_id: int, reason: str) -> bool:
 
 
 # ---------------------------------------------------------------- page Stats
+def _avg(xs: list[int]) -> float | None:
+    return round(sum(xs) / len(xs), 2) if xs else None
+
+
+def attempts_per_plan(last_feedback: dict[tuple[Any, str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Nombre d'ESSAIS par plan validé : générations image (keyframe + régénérations + retouches)
+    et vidéo du plan jusqu'à son état gardé.
+
+    Plan validé côté image : keyframe validé (clips.keyframe_ok) ou dernière décision image =
+    « gardé » ; côté vidéo : clip prêt (status « pret ») ou dernière décision vidéo = « gardé ».
+    Quand la décision « gardé » est horodatée, les générations APRÈS elle ne comptent pas.
+    → {image: {plans, moyenne, max}, video: {...}, by_mode: [...], by_model: [...]}.
+    Le mode / modèle d'un plan = ceux de sa dernière génération retenue (l'état gardé)."""
+    from app import db
+
+    con = db.connect()
+    try:
+        gens = [dict(r) for r in con.execute(
+            "SELECT clip_id, kind, mode, model, ts FROM generations "
+            "WHERE clip_id IS NOT NULL AND kind IN ('image', 'video') ORDER BY id").fetchall()]
+        clips = {int(r["id"]): dict(r) for r in con.execute(
+            "SELECT id, status, keyframe_ok FROM clips").fetchall()}
+    finally:
+        con.close()
+    if last_feedback is None:
+        last_feedback = {}
+        for f in reversed(db.list_plan_feedback(limit=100000)):
+            last_feedback[(f.get("clip_id"), str(f.get("kind") or ""))] = f
+    per: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
+    for g in gens:
+        per[(int(g["clip_id"]), str(g["kind"]))].append(g)
+
+    rows: list[dict[str, Any]] = []
+    for (clip_id, kind), lst in per.items():
+        clip = clips.get(clip_id)
+        fb = last_feedback.get((clip_id, kind))
+        kept_fb = bool(fb and fb.get("action") == "gardé")
+        if kind == "image":
+            kept = kept_fb or bool(clip and int(clip.get("keyframe_ok") or 0))
+        else:
+            kept = kept_fb or bool(clip and clip.get("status") == "pret")
+        if not kept:
+            continue
+        upto = [g for g in lst if not kept_fb or float(g.get("ts") or 0) <= float(fb.get("ts") or 0)] or lst
+        last = upto[-1]
+        rows.append({"clip_id": clip_id, "kind": kind, "n": len(upto),
+                     "mode": str(last.get("mode") or ""), "model": str(last.get("model") or "")})
+
+    def _summary(sel: list[dict[str, Any]]) -> dict[str, Any]:
+        ns = [r["n"] for r in sel]
+        return {"plans": len(ns), "moyenne": _avg(ns), "max": max(ns) if ns else None}
+
+    by_mode: list[dict[str, Any]] = []
+    for m in sorted({r["mode"] for r in rows}):
+        img = [r for r in rows if r["mode"] == m and r["kind"] == "image"]
+        vid = [r for r in rows if r["mode"] == m and r["kind"] == "video"]
+        by_mode.append({"mode": m, "mode_label": MODE_LABELS.get(m, m),
+                        "image": _summary(img), "video": _summary(vid)})
+    by_model: list[dict[str, Any]] = []
+    for (m, kind, model) in sorted({(r["mode"], r["kind"], r["model"]) for r in rows}):
+        sel = [r for r in rows if (r["mode"], r["kind"], r["model"]) == (m, kind, model)]
+        by_model.append({"mode": m, "mode_label": MODE_LABELS.get(m, m), "kind": kind,
+                         "model": model, **_summary(sel)})
+    return {"image": _summary([r for r in rows if r["kind"] == "image"]),
+            "video": _summary([r for r in rows if r["kind"] == "video"]),
+            "by_mode": by_mode, "by_model": by_model}
+
+
 def stats() -> dict[str, Any]:
     """Taux de plans gardés par modèle et par mode, raisons de rejet les plus fréquentes, coût
     moyen par plan gardé (journal des générations + feedback + cost_events)."""
@@ -325,7 +393,9 @@ def stats() -> dict[str, Any]:
             "usd_estime_par_plan_garde": round(est_by_mode[m] / kept, 2) if kept else None,
         })
     n_kept = len(kept_plans)
+    tries = attempts_per_plan(last_by_plan)
     return {
+        "essais": tries,
         "by_model": by_model,
         "by_mode": by_mode,
         "reasons": [{"reason": r, "label": REASONS.get(r, r), "count": n} for r, n in reasons.most_common()],

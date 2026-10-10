@@ -1780,7 +1780,7 @@ def build_omni_prompt(
     text_only = bool(scene_desc.strip())
     if images is None:
         images = omni_images_for(text_only=text_only, has_anchor=has_anchor)
-    text = brain.strip_brackets((dialogue or "").strip())
+    text = spoken_dialogue(dialogue)   # « : » « ; » → « . » (bug « de Dour »), horaires gardés
     spoken = bool(text)
     off = bool(offscreen) and spoken
     cam = camera.strip() or omni_camera_sentence(
@@ -2631,14 +2631,14 @@ def animate_avatar_omni_clips(
                     res = omni_generate_video(
                         cfg, image, prompt, part, seconds, anchor_path=anchor,
                         model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
-                        resolution=resolution, dialogue=str(turn.get("text") or ""),
+                        resolution=resolution, dialogue=spoken_dialogue(turn.get("text")),
                     )
                 else:
                     with gen_trace.context(step="extension"):
                         res = omni_extend_video(
                             cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
                             model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
-                            resolution=resolution, dialogue=str(turn.get("text") or ""),
+                            resolution=resolution, dialogue=spoken_dialogue(turn.get("text")),
                         )
                 if not cfg.dry_run:
                     cost.record_omni_clip(ad_id, seconds)   # 1 tour = sa durée réelle

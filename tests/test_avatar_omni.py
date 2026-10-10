@@ -269,7 +269,7 @@ def test_build_omni_prompt_structure_and_order():
     assert "In a single continuous shot. No scene cuts." in p
     assert "Locked off static camera, framing identical to the first frame." in p   # parlé → fixe
     assert "spoken in French" in p and "in a warm voice" in p
-    assert '"Il dit “wow” et “ok”."' in p     # verbatim, guillemets internes “ ”
+    assert '"Il dit wow et ok."' in p     # dialogue nettoyé (spoken_dialogue) : guillemets retirés
     # OMNI_INTRO_SECONDS = 0 (défaut) : plus de « [0-1s] …, silent. [1-7s] » → la parole démarre tout de suite.
     assert "[0-1s]" not in p and "[1-7s]" not in p and "silent. [" not in p
     assert "The person says, spoken in French" in p

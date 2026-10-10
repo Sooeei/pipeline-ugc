@@ -1055,11 +1055,14 @@ class VideoAnimateIn(BaseModel):
     # Plans montrés dans l'aperçu confirmé (POST …/video/preview) : si la sélection a changé
     # entre-temps (plan lancé ailleurs, terminé, refusé…) → 409, l'utilisateur reconfirme.
     expected_clip_ids: list[int] | None = None
+    # Run global RESTREINT à ces plans (« Reprendre les plans en échec ») ; None = tous.
+    only_clip_ids: list[int] | None = None
 
 
 class VideoPreviewIn(BaseModel):
     clip_id: int | None = None
     resolution: str = ""
+    only_clip_ids: list[int] | None = None
 
 
 class OptionsIn(BaseModel):
@@ -1091,11 +1094,13 @@ SELECTION_CHANGED_MSG = ("La sélection de plans a changé depuis l'aperçu (pla
 _LAUNCH_LOCK = threading.Lock()
 
 
-def animate_selection(clips: list[dict[str, Any]], clip_id: int | None = None) -> dict[str, Any]:
+def animate_selection(clips: list[dict[str, Any]], clip_id: int | None = None,
+                      only_clip_ids: list[int] | None = None) -> dict[str, Any]:
     """Plans qu'un lancement animerait MAINTENANT (même calcul pour l'aperçu du coût et le
     lancement → `expected_clip_ids` comparables). Plan seul (`clip_id`) : lui, sauf s'il est déjà
     en cours dans un job. Run global : tous les plans du montage, SAUF exclus (variantes non
     demandées comprises), en cours (réservés par un job), déjà prêts, refusés par Google.
+    `only_clip_ids` (reprise des plans en échec) : le run global ne regarde QUE ces plans.
     → {candidates, single, skipped:{busy, done, blocked, excluded} (numéros de plan)}."""
     busy = set(jobs.manager.busy_clip_ids())
     skipped: dict[str, list[int]] = {"busy": [], "done": [], "blocked": [], "excluded": []}
@@ -1108,6 +1113,9 @@ def animate_selection(clips: list[dict[str, Any]], clip_id: int | None = None) -
             return {"candidates": [], "single": clip, "skipped": skipped}
         return {"candidates": [clip], "single": clip, "skipped": skipped}
     candidates: list[dict[str, Any]] = []
+    if only_clip_ids is not None:
+        keep = {int(x) for x in only_clip_ids}
+        clips = [c for c in clips if int(c["id"]) in keep]
     for c in sorted(clips, key=lambda x: int(x["scene_n"])):
         n = int(c["scene_n"])
         if pipeline.clip_excluded(c):
@@ -1166,12 +1174,12 @@ def already_billed_video_usd(ad_id: int) -> float:
 
 
 def preview(ad: dict[str, Any], cfg: ProviderConfig, clip_id: int | None = None,
-            resolution: str = "") -> dict[str, Any] | JSONResponse:
+            resolution: str = "", only_clip_ids: list[int] | None = None) -> dict[str, Any] | JSONResponse:
     """Aperçu AVANT génération payante (contrat K7) : plans qui partiraient (miniature, durée,
     coût), total, plans ignorés (en cours / prêts / refusés par Google / exclus), vidéo déjà
     facturée sur la pub. Aucune écriture, aucun appel réseau."""
     model = effective_video_model(ad, cfg)
-    sel = animate_selection(db.clips_for_ad(int(ad["id"])), clip_id)
+    sel = animate_selection(db.clips_for_ad(int(ad["id"])), clip_id, only_clip_ids)
     gate = _launch_gate(ad, sel, model)
     if gate is not None:
         return gate
@@ -1211,7 +1219,7 @@ def video_preview(ad_id: int, body: VideoPreviewIn) -> Any:
         raise HTTPException(409, "Pub de l'ancien pipeline : utilise « Générer les vidéos » (Omni).")
     if body.resolution.strip() and body.resolution.strip().lower() not in config_app.OMNI_RESOLUTIONS:
         raise HTTPException(400, "Résolution inconnue (720p | 1080p).")
-    return preview(ad, load_provider_config(), body.clip_id, body.resolution)
+    return preview(ad, load_provider_config(), body.clip_id, body.resolution, body.only_clip_ids)
 
 
 @router.post("/api/avatar-omni/video/animate/{ad_id}")
@@ -1236,7 +1244,7 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
         db.set_ad_omni_resolution(ad_id, body.resolution.strip().lower())
     model = effective_video_model(ad, cfg)
     with _LAUNCH_LOCK:
-        sel = animate_selection(db.clips_for_ad(ad_id), body.clip_id)
+        sel = animate_selection(db.clips_for_ad(ad_id), body.clip_id, body.only_clip_ids)
         if body.clip_id is not None and not sel["candidates"]:
             raise HTTPException(409, BUSY_CLIP_MSG)
         gate = _launch_gate(ad, sel, model)

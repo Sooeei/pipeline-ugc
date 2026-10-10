@@ -1009,7 +1009,8 @@ def create_app() -> FastAPI:
         _check_spend_cap(cfg, est["usd_video"], body.confirm_over_cap)
         # Scènes = les plans animés (pour que la barre de progression compte correctement).
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
-        job = jobs.manager.start(
+        job = _start_reserved(
+            [int(c["id"]) for c in candidates],
             cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="objet_animate",
         )
         return {
@@ -1032,13 +1033,19 @@ def create_app() -> FastAPI:
         is_v2 = kind == "avatar_omni" and int(ad.get("pipeline_version") or 1) == 2
         if kind != "objet" and not is_v2:
             raise HTTPException(400, "« Régénérer (+1 s) » n'existe que pour Objet animé et Avatar IA.")
-        if is_v2 and avatar_video.effective_video_model(ad) != "grok":
-            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok.")
-        durations = config_app.AVATAR_VIDEO_MODELS["grok"]["durations"]
-        current = int(clip.get("clip_seconds") or 0)
+        model = avatar_video.effective_video_model(ad) if is_v2 else "grok"
+        if model not in ("grok", "omni"):
+            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok et Omni.")
+        durations = config_app.AVATAR_VIDEO_MODELS[model]["durations"]
+        if is_v2:   # durée réellement envoyée (Omni : débit de la fiche voix + 0,3 s + extra)
+            current = avatar_video.clip_target_seconds(
+                clip, model, pipeline.ad_wps_for(ad), avatar_video.voice_mode_of(ad))
+        else:
+            current = int(clip.get("clip_seconds") or 0)
         if current >= max(durations):
-            raise HTTPException(400, f"Durée déjà au maximum Grok ({max(durations)} s) — raccourcis "
-                                     "plutôt la réplique.")
+            label = config_app.AVATAR_VIDEO_MODELS[model]["label"]
+            raise HTTPException(400, f"Durée déjà au maximum {label} ({max(durations)} s) — "
+                                     "raccourcis plutôt la réplique.")
         old_extra = int(clip.get("extra_seconds") or 0)
         db.update_clip(clip_id, extra_seconds=old_extra + 1)
         try:
@@ -1056,7 +1063,8 @@ def create_app() -> FastAPI:
             secs = config_app.with_extra_seconds(max(current, min(durations)), 1, durations)
             usd = secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE
             _check_spend_cap(cfg, usd, body.confirm_over_cap)
-            job = jobs.manager.start(
+            job = _start_reserved(
+                [int(clip_id)],
                 cfg, int(ad["id"]), str(ad["name"]), [{"n": int(clip["scene_n"])}], "",
                 output_mode="objet_animate", only_clip_id=clip_id,
             )
@@ -1214,6 +1222,8 @@ def create_app() -> FastAPI:
         REMPLACE la précédente (jamais d'empilement ; vide = aucune). Le keyframe repart à
         valider (keyframe_ok=0) et « Valider les keyframes » est à refaire (ads.keyframes_ok=0)."""
         clip = db.get_clip(clip_id)
+        if clip is not None:   # vidéo/retouche de ce plan en cours → 409 AVANT toute écriture
+            _raise_if_clips_busy(int(clip["ad_id"]), [int(clip_id)])
         correction = body.correction
         side = body.same_framing.strip().lower()
         if clip is not None and side:
@@ -1780,7 +1790,8 @@ def create_app() -> FastAPI:
         est = cost.estimate_mashup(len(candidates), avg_seconds=avg, model=cfg.mashup_video_model)
         _check_spend_cap(cfg, est["usd_total"], body.confirm_over_cap)
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
-        job = jobs.manager.start(
+        job = _start_reserved(
+            [int(c["id"]) for c in candidates],
             cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="mashup_animate",
             only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
         )
@@ -2221,6 +2232,8 @@ class ValidateIn(BaseModel):
 class AnimateIn(BaseModel):
     confirm: bool = False
     confirm_over_cap: bool = False   # confirmation explicite du dépassement du plafond de dépense
+    # Reprise Avatar IA v2 : plans montrés dans l'aperçu confirmé (409 si la sélection a changé).
+    expected_clip_ids: list[int] | None = None
 
 
 class DialogueIn(BaseModel):
@@ -3313,6 +3326,7 @@ def _regenerate_image(
         raise HTTPException(400, f"Ce plan n'appartient pas à {kind_label}.")
     if not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
+    _raise_if_clips_busy(int(ad["id"]), [int(clip_id)])   # vidéo/retouche de ce plan en cours → 409
     # Cohérence : la référence (ancre validée sinon 1er plan validé) est passée en 1re image SI
     # elle existe et n'est pas le plan régénéré (le préfixe de cohérence dépend du kind, pipeline).
     ref = _consistency_ref(db.clips_for_ad(int(ad["id"])))
@@ -3333,7 +3347,8 @@ def _regenerate_image(
     prompt_image = keyframe_versions.prompt_with_correction(base, keyframe_versions.to_english(cfg, fix))
     shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
             "refs_needed": clip.get("refs_needed"), "correction": fix}
-    job = jobs.manager.start(
+    job = _start_reserved(
+        [int(clip_id)],
         cfg, int(ad["id"]), str(ad["name"]), [shot], "",
         output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
         character_ref=character_ref,
@@ -3395,8 +3410,11 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         # Pub « audio-first » (v2) : la vidéo passe par avatar_video (job « avatar_video » :
         # Grok / Kling / Omni selon la pub, verrou des plans, plans refusés ignorés) — jamais par
         # l'ancien pipeline Omni.
+        # UNIQUEMENT les plans en échec (jamais les plans « valide » encore jamais générés).
         res = avatar_video.video_animate(ad_id, avatar_video.VideoAnimateIn(
-            confirm=body.confirm, confirm_over_cap=body.confirm_over_cap))
+            confirm=body.confirm, confirm_over_cap=body.confirm_over_cap,
+            only_clip_ids=[int(c["id"]) for c in echec],
+            expected_clip_ids=body.expected_clip_ids))
         if isinstance(res, dict):
             return {**res, "phase": "animation", "n": res.get("n_plans", 0)}
         return res
@@ -3470,8 +3488,10 @@ def _run_consistency(
          "refs_needed": c.get("refs_needed")}
         for c in targets
     ]
+    _raise_if_clips_busy(ad_id, [int(c["id"]) for c in targets])
     db.reset_clips_pending([c["id"] for c in targets])
-    job = jobs.manager.start(
+    job = _start_reserved(
+        [int(c["id"]) for c in targets],
         cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
         ref_paths=db.list_ref_images(ad_id), character_ref=str(ref["image_path"]),
     )

@@ -1644,9 +1644,27 @@ async function resumeFailedPlans(kind, adId, shots = []) {
   const omniNote = kind === "avatar_omni"
     ? " Avatar IA : si l'animation est relancée, Google Omni facture ~0,10 $/s (quota Tier 1 : 10 $ par tranche de 10 min)."
     : "";
+  // Avatar IA v2 : aperçu serveur restreint aux plans en échec (vrais plans, durées, coût) ; la
+  // liste confirmée est renvoyée en `expected_clip_ids` (409 si elle a changé entre-temps).
+  let clips = paidClipsFromShots(failed);
+  let expected = null;
+  const withImage = failed.filter((s) => s.image_path || s.image_url);
+  if (kind === "avatar_omni" && withImage.length === failed.length && failed.length) {
+    try {
+      const r = await srvFetch(AO_API + "/video/preview/" + adId, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ only_clip_ids: failed.map((s) => s.clip_id) }),
+      });
+      if (r.ok) {
+        const p = await r.json();
+        clips = p.clips || clips;
+        expected = (p.clips || []).map((c) => c.clip_id);
+      }
+    } catch (e) { /* ancien pipeline / serveur sans aperçu : liste locale */ }
+  }
   const ok = await confirmPaidVideo({
     title: "Reprendre les plans en échec — coût réel",
-    clips: paidClipsFromShots(failed),
+    clips,
     detail: "Relance UNIQUEMENT les plans en échec (les plans déjà prêts ne sont pas retouchés ; un plan sans image " +
       "repasse d'abord par la génération d'image)." + omniNote,
     confirmText: "Reprendre",
@@ -1655,7 +1673,8 @@ async function resumeFailedPlans(kind, adId, shots = []) {
   const post = (over) =>
     api("/api/" + (KIND_API[kind] || kind) + "/resume/" + adId, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: true, confirm_over_cap: !!over }),
+      body: JSON.stringify(Object.assign({ confirm: true, confirm_over_cap: !!over },
+        expected ? { expected_clip_ids: expected } : {})),
     });
   let res;
   try {
@@ -2441,7 +2460,7 @@ function aoLibClip(div, ad, c) {
     `<div class="ao-lib-media${v2 ? " v2" : ""}">${kf}${frame0}${vid}</div>` +
     `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}${v2 && ok ? speechCutBadge(c) : ""}` +
     (ok ? `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a>` : "") + `</div>` +
-    (v2 && ok ? speechCutActions(c) : "") +
+    (v2 && ok ? speechCutActions(c, omni.length > 0) : "") +
     prompts +
     `<div class="ao-lib-actions"><button class="btn small btn-relaunch" type="button" ` +
     (v2
@@ -2451,7 +2470,7 @@ function aoLibClip(div, ad, c) {
   const btn = div.querySelector(".btn-relaunch");
   const state = div.querySelector(".ao-lib-state");
   btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
-  if (v2 && ok) bindSpeechCut(div, c);
+  if (v2 && ok) bindSpeechCut(div, c, omni.length > 0);
   traceDetails(div, c.id);   // tracabilite.js
 }
 
@@ -2463,25 +2482,29 @@ function speechCutBadge(c) {
     ? `<span class="badge ko" title="La voix continue jusqu'à la toute fin du clip : la réplique est peut-être coupée.">Réplique peut-être coupée</span>`
     : "";
 }
-function speechCutActions(c) {
-  if (!(c.speech_cut && Number(c.speech_cut))) return "";
+// Omni : pas de détection automatique → bouton toujours proposé (fin de réplique coupée à l'écoute).
+function speechCutActions(c, isOmni = false) {
+  if (!isOmni && !(c.speech_cut && Number(c.speech_cut))) return "";
   return `<div class="ao-lib-actions"><button class="btn small btn-speech-longer" type="button" ` +
     `title="Refait uniquement la vidéo de ce plan avec 1 s de plus (même image, même réplique)">⏱ Régénérer (+1 s)</button>` +
     `<span class="speech-state muted small"></span></div>`;
 }
-function bindSpeechCut(div, c) {
+function bindSpeechCut(div, c, isOmni = false) {
   const btn = div.querySelector(".btn-speech-longer");
   if (!btn) return;
   const state = div.querySelector(".speech-state");
   btn.addEventListener("click", async () => {
     {
       const sec = (Number(c.duration_s) || 0) + 1;
+      const perS = isOmni ? 0.10 : 0.14;
       const ok = await confirmPaidVideo({
-        title: "Régénérer (+1 s) — coût Grok (réel)",
+        title: `Régénérer (+1 s) — coût ${isOmni ? "Google Omni" : "Grok"} (réel)`,
         clips: [{ clip_id: c.id, n: c.scene_n, label: "+1 s", image_url: c.image_url || "", seconds: sec > 1 ? sec : 0 }],
-        usd: sec > 1 ? sec * 0.14 + 0.01 : null,
-        model: "Grok Imagine",
-        detail: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $).",
+        usd: sec > 1 ? sec * perS + (isOmni ? 0 : 0.01) : null,
+        model: isOmni ? "Google Omni" : "Grok Imagine",
+        detail: isOmni
+          ? "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Google Omni, ~0,10 $/s). À utiliser si la fin de la réplique est coupée."
+          : "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $).",
         confirmText: "Régénérer",
       });
       if (!ok) return;

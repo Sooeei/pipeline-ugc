@@ -1511,7 +1511,11 @@ def omni_blocked_error(code: Any, message: Any) -> OmniBlockedError | None:
     kind = _omni_block_kind(code, message)
     if kind is None:
         return None
-    return OmniBlockedError(kind, str(message or "").strip() or str(code or "").strip())
+    # Corps réel Google : la phrase explicite (« …violated … Prohibited Use policy ») est parfois
+    # dans `code` (texte), `message` ne disant que « modify your input and retry » → les deux.
+    msg, cd = str(message or "").strip(), str(code or "").strip()
+    lead = cd if cd and not cd.isdigit() and cd not in msg else ""
+    return OmniBlockedError(kind, " — ".join(p for p in (lead, msg) if p) or cd)
 
 
 def _omni_file_id(uri: str) -> str:

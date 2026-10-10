@@ -258,6 +258,15 @@ _MIGRATIONS["ref_images"].extend([
     ("auto", "INTEGER DEFAULT 0"),           # 1 = réf créée automatiquement (visage auto)
     ("source_clip_id", "INTEGER"),           # plan dont l'image a servi (réf auto)
 ])
+# Coût par pub exact (zone C) : chaque événement de coût est rattaché à SA génération (journal
+# `generations`) → une génération n'est jamais comptée deux fois (index unique partiel), et la
+# ventilation images / retouches / vidéos / relances se fait par plan et par étape.
+_MIGRATIONS["cost_events"].extend([
+    ("generation_id", "INTEGER"),
+    ("clip_id", "INTEGER"),
+    ("step", "TEXT DEFAULT ''"),
+    ("category", "TEXT DEFAULT ''"),   # image | video | voice | brain | other
+])
 
 CORRECTION_MARK = "CORRECTION:"
 
@@ -315,11 +324,70 @@ def init_db() -> None:
         _migrate_objet_image_model(con)
         _migrate_objet_anchor_characters(con)
         _migrate_traceability(con)
+        _migrate_cost_links(con)
         _freeze_ad_video_models(con)
         _migrate_inactive_voice_mode(con)
         con.commit()
     finally:
         con.close()
+
+
+COST_CATEGORY_BY_SERVICE = {
+    "openrouter": "image",
+    "grok": "video", "kling": "video", "gemini": "video", "heygen": "video",
+    "gradium": "voice", "elevenlabs": "voice",
+    "anthropic": "brain", "claude_code": "brain",
+}
+# Rattachement a posteriori d'un ancien événement de coût à sa génération : la génération est
+# journalisée juste AVANT l'événement de coût (même thread) → fenêtre courte autour de created_at.
+_COST_LINK_WINDOW_BEFORE_S = 900.0
+_COST_LINK_WINDOW_AFTER_S = 5.0
+
+
+def cost_category(service: str) -> str:
+    return COST_CATEGORY_BY_SERVICE.get(str(service or ""), "other")
+
+
+def _migrate_cost_links(con: sqlite3.Connection) -> None:
+    """Coût par pub exact (idempotent) :
+    - index unique PARTIEL sur cost_events.generation_id (une génération = au plus 1 coût) ;
+    - backfill des anciens événements (category vide) : catégorie d'après le service et, pour les
+      images / vidéos d'une pub, lien vers la génération RÉELLE la plus proche dans le temps (même
+      pub, même type, pas encore liée) → clip_id / step. Un événement traité reçoit sa catégorie :
+      il n'est plus jamais re-parcouru (aucun coût au démarrage suivant)."""
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_cost_events_generation ON cost_events(generation_id) "
+        "WHERE generation_id IS NOT NULL"
+    )
+    rows = con.execute(
+        "SELECT id, ad_id, service, created_at FROM cost_events "
+        "WHERE COALESCE(category, '')='' ORDER BY created_at, id"
+    ).fetchall()
+    if not rows:
+        return
+    used = {int(r[0]) for r in con.execute(
+        "SELECT generation_id FROM cost_events WHERE generation_id IS NOT NULL").fetchall()}
+    for r in rows:
+        cat = cost_category(r["service"])
+        gen = None
+        if cat in ("image", "video") and r["ad_id"] is not None:
+            ts = float(r["created_at"] or 0)
+            cands = con.execute(
+                "SELECT id, clip_id, step, ts FROM generations WHERE ad_id=? AND kind=? "
+                "AND COALESCE(dry_run, 0)=0 AND ts BETWEEN ? AND ? ORDER BY ts",
+                (int(r["ad_id"]), cat, ts - _COST_LINK_WINDOW_BEFORE_S, ts + _COST_LINK_WINDOW_AFTER_S),
+            ).fetchall()
+            free = [g for g in cands if int(g["id"]) not in used]
+            if free:
+                gen = min(free, key=lambda g: (float(g["ts"]) > ts, abs(ts - float(g["ts"]))))
+        if gen is not None:
+            used.add(int(gen["id"]))
+            con.execute(
+                "UPDATE cost_events SET category=?, generation_id=?, clip_id=?, step=? WHERE id=?",
+                (cat, int(gen["id"]), gen["clip_id"], str(gen["step"] or ""), int(r["id"])),
+            )
+        else:
+            con.execute("UPDATE cost_events SET category=? WHERE id=?", (cat, int(r["id"])))
 
 
 def _freeze_ad_video_models(con: sqlite3.Connection) -> None:
@@ -1057,18 +1125,25 @@ def reset_clips_pending(clip_ids: list[int]) -> None:
 # ---------------------------------------------------------------- coûts / dépenses (réel)
 def add_cost_event(
     service: str, unit: str, qty: float = 0.0, *, usd: float = 0.0, credits: float = 0.0,
-    ad_id: int | None = None, detail: str = "",
-) -> None:
+    ad_id: int | None = None, detail: str = "", generation_id: int | None = None,
+    clip_id: int | None = None, step: str = "", category: str = "",
+) -> bool:
     """Enregistre un événement de coût RÉEL (une génération payante). La simulation n'appelle
-    jamais ceci. `usd`/`credits` sont des estimations d'après les tarifs API."""
+    jamais ceci. `usd`/`credits` sont des estimations d'après les tarifs API.
+    `generation_id` (journal `generations`) : une même génération n'est JAMAIS comptée deux fois
+    (INSERT OR IGNORE sur l'index unique partiel) → renvoie False si l'événement était un doublon."""
     con = connect()
     try:
-        con.execute(
-            "INSERT INTO cost_events(ad_id, service, unit, qty, usd, credits, detail, created_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (ad_id, service, unit, float(qty), float(usd), float(credits), detail, time.time()),
+        cur = con.execute(
+            "INSERT OR IGNORE INTO cost_events(ad_id, service, unit, qty, usd, credits, detail,"
+            " created_at, generation_id, clip_id, step, category) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ad_id, service, unit, float(qty), float(usd), float(credits), detail, time.time(),
+             int(generation_id) if generation_id is not None else None,
+             int(clip_id) if clip_id is not None else None, str(step or ""),
+             str(category or cost_category(service))),
         )
         con.commit()
+        return bool(cur.rowcount)
     finally:
         con.close()
 
@@ -1127,10 +1202,17 @@ def cost_by_ad(archive_id: int | None = None) -> list[dict[str, Any]]:
         con.close()
 
 
-def cost_for_ad(ad_id: int, archive_id: int | None = None) -> dict[str, Any]:
-    """Coût RÉEL cumulé (actif) pour UNE pub : {usd, credits, n}. Sert à la vue « reprise »
-    (jalon 3) — montrer ce qui a déjà été facturé, y compris sur des plans en échec."""
-    where, params = _archive_where(archive_id)
+def cost_for_ad(ad_id: int, archive_id: int | None = None, *,
+                include_archives: bool = True) -> dict[str, Any]:
+    """Coût RÉEL cumulé pour UNE pub : {usd, credits, n}. Sert au bandeau de la pub et à la vue
+    « reprise » — montrer ce qui a déjà été facturé, y compris sur des plans en échec.
+    Par défaut archives COMPRISES (même total que la boîte de coût de la pub : archiver la
+    période des Coûts ne fait pas « disparaître » le coût d'une pub). `include_archives=False`
+    → périmètre `archive_id` (None = actif seulement, entier = une archive)."""
+    if include_archives and archive_id is None:
+        where, params = "1=1", ()
+    else:
+        where, params = _archive_where(archive_id)
     con = connect()
     try:
         r = con.execute(
@@ -1421,6 +1503,22 @@ def cost_by_service_for_ad(ad_id: int) -> list[dict[str, Any]]:
             "COALESCE(SUM(usd),0) AS usd, COALESCE(SUM(credits),0) AS credits "
             "FROM cost_events WHERE ad_id=? GROUP BY service, unit",
             (ad_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def cost_events_for_ad(ad_id: int) -> list[dict[str, Any]]:
+    """Événements de coût d'UNE pub (archives COMPRISES), dans l'ordre chronologique — base de la
+    ventilation images / retouches / vidéos / relances (cost.ad_cost_breakdown)."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT id, service, unit, qty, usd, credits, created_at, generation_id, clip_id, "
+            "COALESCE(step, '') AS step, COALESCE(category, '') AS category, archive_id "
+            "FROM cost_events WHERE ad_id=? ORDER BY created_at, id",
+            (int(ad_id),),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

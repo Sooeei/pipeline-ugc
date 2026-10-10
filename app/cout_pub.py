@@ -51,7 +51,10 @@ def pub_cost(ad_id: int) -> dict[str, Any]:
     if ad is None:
         raise HTTPException(404, "Pub introuvable.")
     kind = str(ad.get("kind") or "")
-    out: dict[str, Any] = {"ad_id": ad_id, "kind": kind, "real": cost.ad_real_cost(ad_id)}
+    real = cost.ad_real_cost(ad_id)
+    # Ventilation images / retouches / vidéos / relances : même total que le bandeau de la pub.
+    out: dict[str, Any] = {"ad_id": ad_id, "kind": kind, "real": real,
+                           "cost_breakdown": real["breakdown"]}
     if kind in ("objet", "mashup"):
         shots = [
             {"n": c["scene_n"], "dialogue": c.get("script") or "", "duration_s": c.get("duration_s")}

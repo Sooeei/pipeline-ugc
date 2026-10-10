@@ -98,6 +98,9 @@ def _quiet_connection_resets() -> None:
 # la fenêtre de l'app l'interroge encore (cf. run() — le process navigateur peut se terminer
 # alors que la fenêtre reste ouverte).
 _LAST_REQUEST = [0.0]
+# Requêtes HTTP en cours (téléchargement d'un zip, export, génération synchrone…) : le serveur
+# ne s'arrête JAMAIS pendant l'une d'elles (cf. _server_busy).
+_INFLIGHT_REQUESTS = [0]
 SERVER_INTERNAL_ERROR_MSG = (
     "Erreur interne du serveur — réessaie ; si ça persiste, relance l'app (LANCER.bat). "
     "Le détail technique est dans app.log."
@@ -120,9 +123,16 @@ def _install_robustness(app: FastAPI) -> None:
             self.inner = inner
 
         async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-            if scope.get("type") == "http":
-                _LAST_REQUEST[0] = _time.monotonic()
-            await self.inner(scope, receive, send)
+            if scope.get("type") != "http":
+                await self.inner(scope, receive, send)
+                return
+            _LAST_REQUEST[0] = _time.monotonic()
+            _INFLIGHT_REQUESTS[0] += 1
+            try:
+                await self.inner(scope, receive, send)
+            finally:
+                _INFLIGHT_REQUESTS[0] = max(0, _INFLIGHT_REQUESTS[0] - 1)
+                _LAST_REQUEST[0] = _time.monotonic()   # fin d'une longue requête = activité
 
     app.add_middleware(_TrackLastRequest)
 
@@ -255,6 +265,13 @@ def create_app() -> FastAPI:
             "objet_image_models": [
                 {"key": k, "label": m["label"]} for k, m in config_app.OBJET_IMAGE_MODELS.items()
             ],
+            # Résolution de sortie des images Nano Banana (2K = même prix que 1K ; 4K plus chère).
+            "nb_image_size": config_app.normalize_nb_image_size(
+                s.get("nb_image_size", config_app.DEFAULT_NB_IMAGE_SIZE)),
+            "nb_image_sizes": [
+                {"key": z, "usd": config_app.image_usd("google/gemini-3-pro-image-preview", z)}
+                for z in config_app.NB_IMAGE_SIZES
+            ],
             "objet_video_model": s.get("objet_video_model", config_app.DEFAULT_OBJET_VIDEO_MODEL),
             "objet_video_models": [
                 {"key": k, "label": m["label"]} for k, m in config_app.OBJET_VIDEO_MODELS.items()
@@ -269,7 +286,8 @@ def create_app() -> FastAPI:
             ],
             "objet_voice_style": s.get("objet_voice_style", config_app.DEFAULT_GROK_VOICE_STYLE),
             "objet_voice_styles": [
-                {"key": k, "label": v["label"]} for k, v in config_app.GROK_VOICE_STYLES.items()
+                {"key": k, "label": v["label"], "default_extra": v.get("default_extra", "")}
+                for k, v in config_app.GROK_VOICE_STYLES.items()
             ],
             "objet_voice_pace": s.get("objet_voice_pace", config_app.DEFAULT_GROK_VOICE_PACE),
             "objet_voice_paces": [
@@ -367,6 +385,8 @@ def create_app() -> FastAPI:
             else config_app.DEFAULT_OBJET_IMAGE_MODEL
         )
         db.set_setting("objet_image_model", img_model)
+        if body.nb_image_size:   # "" = ne pas changer ; valeur inconnue → 2K
+            db.set_setting("nb_image_size", config_app.normalize_nb_image_size(body.nb_image_size))
         vid_model = (
             body.objet_video_model if body.objet_video_model in config_app.OBJET_VIDEO_MODELS
             else config_app.DEFAULT_OBJET_VIDEO_MODEL
@@ -1069,7 +1089,7 @@ def create_app() -> FastAPI:
         if clip is None:
             raise HTTPException(404, "Plan introuvable.")
         _check_voiceover_len(body.text)
-        db.update_clip(clip_id, script=body.text)
+        db.update_clip(clip_id, script=body.text, error_kind="", error_detail="")
         return {"ok": True}
 
     # -------------------------------------------------- AVATAR IA (Omni : Nano Banana → Google Omni)
@@ -1195,6 +1215,14 @@ def create_app() -> FastAPI:
         valider (keyframe_ok=0) et « Valider les keyframes » est à refaire (ads.keyframes_ok=0)."""
         clip = db.get_clip(clip_id)
         correction = body.correction
+        side = body.same_framing.strip().lower()
+        if clip is not None and side:
+            # « Même cadrage que le plan 1 » : correction anglaise toute faite (remplace la
+            # précédente), ancrée sur le plan de référence (ancre, sinon 1er plan validé).
+            ref = _consistency_ref(db.clips_for_ad(int(clip["ad_id"])))
+            anchor_n = int(ref["scene_n"]) if ref else 1
+            correction = prompt_profiles.same_framing_correction(
+                side if side in ("droite", "gauche") else "auto", anchor_n)
         if clip is not None and clip.get("shot_prompt") is not None:
             # Découpage client : le texte édité = CE QUI CHANGE dans ce plan ; la bible est
             # ajoutée par le code. Nouvelle image → la chaîne de tours repart de zéro.
@@ -1237,7 +1265,7 @@ def create_app() -> FastAPI:
             int(clip["scene_n"]), clip_id)
         keyframe_versions.record(clip_id, dest, "upload", keyframe_source="upload")
         db.update_clip(clip_id, image_path=str(dest), keyframe_source="upload",
-                       status="image_pret", error=None)
+                       status="image_pret", error=None, error_kind="", error_detail="")
         _reset_keyframe(clip_id)
         return {"ok": True, "clip_id": clip_id, "image_url": _media_url_v(str(dest))}
 
@@ -1378,7 +1406,8 @@ def create_app() -> FastAPI:
         if (db.get_ad(int(clip["ad_id"])) or {}).get("kind") != "avatar_omni":
             raise HTTPException(400, "Ce plan n'appartient pas à un « Avatar IA ».")
         _check_voiceover_len(body.text, what="Texte", hint="")
-        db.update_clip(clip_id, script=body.text)
+        # Dialogue édité → un ancien refus Google (omni_blocked) ne s'applique plus.
+        db.update_clip(clip_id, script=body.text, error_kind="", error_detail="")
         ad = db.get_ad(int(clip["ad_id"])) or {}
         if int(ad.get("pipeline_version") or 1) == 2 and body.text != (clip.get("script") or ""):
             # v2 audio-first : la réplique a changé → son audio ElevenLabs est à refaire.
@@ -1608,6 +1637,10 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "Clé API Google (Gemini) manquante (Réglages).")
         est = _omni_clips_estimate(ad, candidates)
         _check_spend_cap(cfg, est["usd_video"], body.confirm_over_cap)
+        # Verrou anti-double facturation : un plan déjà en cours de génération n'est pas relancé
+        # (vérifié AVANT de toucher au plan ; la réservation atomique se fait au start).
+        clip_ids = [int(c["id"]) for c in candidates]
+        _raise_if_clips_busy(ad_id, clip_ids)
         if relaunch is not None:
             # RELANCE VIDÉO SEULE : même keyframe (image_path inchangé), tours et mp4 remis à zéro.
             db.update_clip(int(relaunch["id"]), status="valide", mp4_path=None, error=None,
@@ -1615,8 +1648,8 @@ def create_app() -> FastAPI:
                                pipeline.reset_segments_progress(pipeline.clip_segments(relaunch)))
                            if pipeline.clip_segments(relaunch) else relaunch.get("segments"))
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
-        job = jobs.manager.start(
-            cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="avatar_omni_animate",
+        job = _start_reserved(
+            clip_ids, cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="avatar_omni_animate",
             only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
         )
         return {
@@ -1990,13 +2023,18 @@ def create_app() -> FastAPI:
         return FileResponse(row["mp4_path"], media_type="video/mp4", filename=fname)
 
     @app.get("/api/ads/{ad_id}/download")
-    def download_ad_zip(ad_id: int, asset: str = "auto") -> StreamingResponse:
+    def download_ad_zip(ad_id: int, asset: str = "auto", denoise: bool = False) -> StreamingResponse:
         """« Télécharger tout » : ZIP de TOUS les fichiers d'une pub, numérotés (1.mp4, 2.mp4…)
         dans l'ordre des scènes. `asset` choisit le type selon la sous-section (video | audio |
-        image | auto). Le ZIP est nommé d'après la pub."""
+        image | auto). Le ZIP est nommé d'après la pub. `denoise=1` : vidéos / audios débruités
+        (copies temporaires, originaux intacts ; échec d'un fichier → original ; sans ffmpeg → 503)."""
+        import tempfile
+
         ad = db.get_ad(ad_id)
         if ad is None:
             raise HTTPException(404, "Pub introuvable.")
+        if denoise and not media.ffmpeg_available():
+            raise HTTPException(503, media.FFMPEG_MISSING_MSG)
 
         def _pick(c: dict[str, Any]) -> str | None:
             if asset == "video":
@@ -2010,13 +2048,21 @@ def create_app() -> FastAPI:
         clips = sorted(db.clips_for_ad(ad_id), key=lambda c: int(c["scene_n"]))
         buf = io.BytesIO()
         added = 0
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        with tempfile.TemporaryDirectory(prefix="ugc_denoise_") as tmp, \
+                zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for c in clips:
                 path = _pick(c)
                 if not path or not Path(path).exists():
                     continue
                 ext = Path(path).suffix.lower() or ".bin"
-                z.write(path, arcname=f"{int(c['scene_n'])}{ext}")
+                src = str(path)
+                if denoise and ext in (".mp4", ".mov", ".m4v", ".wav", ".mp3"):
+                    try:
+                        src = str(media.denoise_copy(path, Path(tmp) / f"{int(c['scene_n'])}{ext}"))
+                    except Exception as exc:  # noqa: BLE001 - un fichier en échec → l'original
+                        prov._log_detail(f"[DEBRUITAGE] {Path(path).name} : {exc!r} → original livré.")
+                        src = str(path)
+                z.write(src, arcname=f"{int(c['scene_n'])}{ext}")
                 added += 1
         if added == 0:
             raise HTTPException(404, "Aucun fichier téléchargeable pour cette pub.")
@@ -2052,6 +2098,7 @@ class SettingsIn(BaseModel):
     claude_code_model: str = ""   # sonnet | opus | haiku ; "" = ne pas changer
     cost_mode: str = ""
     objet_image_model: str = ""
+    nb_image_size: str = ""   # « 2K » | « 4K » ; "" = ne pas changer ; valeur inconnue → 2K
     objet_video_model: str = ""
     mashup_video_model: str = ""
     objet_voice_style: str = ""
@@ -2152,6 +2199,9 @@ class RegenerateIn(BaseModel):
     confirm: bool = False
     # Correction libre → « CORRECTION: … » ajoutée à la BASE du prompt ; remplace la précédente.
     correction: str = ""
+    # Avatar IA : « Même cadrage que le plan 1 » — « droite » | « gauche » | « auto » (côté du
+    # logo) ; non vide → correction prompt_profiles.same_framing_correction (remplace la précédente).
+    same_framing: str = ""
 
 
 class KeyframeModeIn(BaseModel):
@@ -2782,6 +2832,33 @@ def _omni_clip_or_404(clip_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
     return clip, ad
 
 
+CLIP_BUSY_MSG = "Ce plan est déjà en cours de génération"
+
+
+def _busy_detail(ad_id: int, clip_ids: list[int]) -> str:
+    by_id = {int(c["id"]): int(c["scene_n"]) for c in db.clips_for_ad(ad_id)}
+    ns = sorted(by_id.get(int(c), int(c)) for c in clip_ids)
+    if len(ns) == 1:
+        return f"{CLIP_BUSY_MSG} (plan {ns[0]}) : attends la fin de la génération en cours."
+    return (f"Plans déjà en cours de génération ({', '.join(map(str, ns))}) : attends la fin de "
+            "la génération en cours.")
+
+
+def _raise_if_clips_busy(ad_id: int, clip_ids: list[int]) -> None:
+    """409 si un des plans est déjà réservé par un job en cours (verrou anti-double facturation)."""
+    busy = set(jobs.manager.busy_clip_ids(ad_id)) & {int(c) for c in clip_ids}
+    if busy:
+        raise HTTPException(409, _busy_detail(ad_id, sorted(busy)))
+
+
+def _start_reserved(clip_ids: list[int], *args: Any, **kwargs: Any) -> Any:
+    """jobs.manager.start avec réservation des plans ; ClipsBusy (course) → 409."""
+    try:
+        return jobs.manager.start(*args, clip_ids=clip_ids, **kwargs)
+    except jobs.ClipsBusy as exc:
+        raise HTTPException(409, _busy_detail(int(args[1]), exc.clip_ids)) from exc
+
+
 def _reset_keyframe(clip_id: int) -> None:
     """Tout changement de keyframe (régénérer / importer / dévalider / mode) : keyframe_ok=0 sur
     le plan et « Valider les keyframes » à refaire (ads.keyframes_ok=0)."""
@@ -3171,12 +3248,14 @@ def _ad_overview(ad_id: int, clips: list[dict[str, Any]]) -> dict[str, Any]:
         st = str(c.get("status") or "?")
         by_status[st] = by_status.get(st, 0) + 1
     n_echec = by_status.get("echec", 0)
-    real = db.cost_for_ad(ad_id)
+    real = db.cost_for_ad(ad_id)   # archives comprises : même total que la boîte de coût
     return {
         "counts": by_status,
         "n_echec": n_echec,
         "cost_real_usd": round(real["usd"], 2),
         "cost_real_credits": round(real["credits"], 2),
+        # Contrat K13 : {usd, images, retouches, videos, relances, (autres)} — chaque {n, usd}.
+        "cost_breakdown": cost.ad_cost_breakdown(ad_id),
         # Des plans ont échoué ALORS QUE des coûts réels ont été enregistrés : certains services
         # facturent même en cas d'échec → on l'affiche pour éviter la mauvaise surprise.
         "billed_despite_failure": bool(n_echec and real["usd"] > 0),
@@ -3248,8 +3327,9 @@ def _regenerate_image(
     else:
         base = keyframe_versions.prompt_base(clip)
     fix = " ".join(str(correction or body.correction or "").split())[:2000]
+    # Nouvelle image → un ancien refus Google (omni_blocked) ne s'applique plus.
     db.update_clip(clip_id, prompt_image=base, prompt_base=base, last_correction=fix,
-                   status="en_attente", error=None)
+                   status="en_attente", error=None, error_kind="", error_detail="")
     prompt_image = keyframe_versions.prompt_with_correction(base, keyframe_versions.to_english(cfg, fix))
     shot = {"clip_id": clip_id, "n": int(clip["scene_n"]), "prompt_image": prompt_image,
             "refs_needed": clip.get("refs_needed"), "correction": fix}
@@ -3271,9 +3351,15 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
     ad = db.get_ad(ad_id)
     if ad is None or ad.get("kind") != kind:
         raise HTTPException(400, "Pub introuvable.")
-    clips = db.clips_for_ad(ad_id)
+    all_clips = db.clips_for_ad(ad_id)
+    # Plans refusés par Google (omni_blocked) : JAMAIS relancés automatiquement (il faut d'abord
+    # changer l'image ou le dialogue, ce qui efface le refus).
+    clips = [c for c in all_clips if str(c.get("error_kind") or "") != "omni_blocked"]
     echec = [c for c in clips if c.get("status") == "echec"]
     if not echec:
+        if len(clips) < len(all_clips):
+            raise HTTPException(400, "Aucun plan à reprendre : les plans en échec ont été refusés par "
+                                     "Google — modifie leur image ou leur dialogue, puis relance-les.")
         raise HTTPException(400, "Aucun plan en échec à reprendre.")
     img_fail = [c for c in echec if not c.get("image_path")]
 
@@ -3293,9 +3379,11 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
              "refs_needed": c.get("refs_needed")}
             for c in img_fail
         ]
-        db.reset_clips_pending([c["id"] for c in img_fail])
-        job = jobs.manager.start(
-            cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
+        img_ids = [int(c["id"]) for c in img_fail]
+        _raise_if_clips_busy(ad_id, img_ids)
+        db.reset_clips_pending(img_ids)
+        job = _start_reserved(
+            img_ids, cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
             ref_paths=db.list_ref_images(ad_id),
             character_ref=str(ref["image_path"]) if ref else "",
         )
@@ -3303,6 +3391,15 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
                 "n": len(img_fail), "dry_run": cfg.dry_run}
 
     # --- Phase ANIMATION : réanimer les plans avec image non encore « pret » (skip pret automatique).
+    if kind == "avatar_omni" and int(ad.get("pipeline_version") or 1) == 2:
+        # Pub « audio-first » (v2) : la vidéo passe par avatar_video (job « avatar_video » :
+        # Grok / Kling / Omni selon la pub, verrou des plans, plans refusés ignorés) — jamais par
+        # l'ancien pipeline Omni.
+        res = avatar_video.video_animate(ad_id, avatar_video.VideoAnimateIn(
+            confirm=body.confirm, confirm_over_cap=body.confirm_over_cap))
+        if isinstance(res, dict):
+            return {**res, "phase": "animation", "n": res.get("n_plans", 0)}
+        return res
     to_anim = _animatable_clips(clips)
     if not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise avant de réanimer (coût vidéo).")
@@ -3329,7 +3426,9 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         mode = "mashup_animate"
     _check_spend_cap(cfg, est, body.confirm_over_cap)
     anim_scenes = [{"n": int(c["scene_n"])} for c in to_anim]
-    job = jobs.manager.start(cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode=mode)
+    anim_ids = [int(c["id"]) for c in to_anim]
+    _raise_if_clips_busy(ad_id, anim_ids)
+    job = _start_reserved(anim_ids, cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode=mode)
     return {"ok": True, "job_id": job.id, "ad_id": ad_id, "phase": "animation",
             "n": len(to_anim), "dry_run": cfg.dry_run}
 
@@ -3456,6 +3555,8 @@ def run() -> None:
     import time
 
     _prepare_streams()  # pythonw : sinon uvicorn plante (« Unable to configure formatter »)
+    prov._log_detail(f"[APP] démarrage pid {os.getpid()} "
+                     f"(redémarrage={'oui' if os.environ.get('UGC_RESTART_WAIT_PID') else 'non'})")
 
     try:
         restarted = _wait_previous_instance()   # « Redémarrer le serveur » : l'ancien s'arrête
@@ -3527,8 +3628,8 @@ def run() -> None:
         # déjà lancé, redémarrage après mise à jour…) → on coupait le serveur sous les pieds de
         # l'utilisateur. Désormais on ne l'arrête que lorsque la fenêtre ne l'interroge plus
         # (heartbeat /api/health toutes les 10 s côté front).
-        _wait_until_window_idle()
-        prov._log_detail("[APP] fenêtre fermée (plus aucune requête) → arrêt du serveur.")
+        reason = _wait_until_window_idle()
+        prov._log_detail(f"[APP] arrêt du serveur : {reason}.")
         server.should_exit = True  # fenêtre fermée -> on arrête le serveur en fond
         time.sleep(0.5)
         try:
@@ -3540,7 +3641,10 @@ def run() -> None:
         raise
 
 
-WINDOW_IDLE_SHUTDOWN_S = 45.0   # sans requête depuis 45 s (heartbeat 10 s) = fenêtre fermée
+# Sans requête depuis 10 min = fenêtre fermée. 45 s était trop court : Chrome bride les minuteurs
+# d'une fenêtre en arrière-plan (≥ 60 s entre deux heartbeats) → le serveur s'arrêtait en plein
+# job (threads daemon tués). Et jamais d'arrêt tant qu'un job tourne (_server_busy).
+WINDOW_IDLE_SHUTDOWN_S = 600.0
 
 # ---------------------------------------------------------------- redémarrage (Réglages)
 # État du process lancé par run() : serveur uvicorn, port, type de fenêtre ouverte
@@ -3571,6 +3675,9 @@ def restart_env(port: int, window: str) -> dict[str, str]:
         env["UGC_REUSE_WINDOW"] = "1"
     else:
         env.pop("UGC_REUSE_WINDOW", None)
+    # Process détaché sans console : ses print vont dans app.log (sinon perdus), en UTF-8.
+    env["UGC_LOG_TO_FILE"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -3578,8 +3685,12 @@ def _spawn_process(cmd: list[str], env: dict[str, str]) -> None:
     """Lance le nouveau process DÉTACHÉ (il survit à l'arrêt de l'ancien)."""
     import subprocess
 
+    # stdout/stderr DEVNULL explicites : sous pythonw, subprocess créait sinon un pipe dont il
+    # fermait la lecture → l'enfant avait un stdout cassé (non None) et tous ses print étaient
+    # avalés. L'enfant redirige lui-même vers app.log (UGC_LOG_TO_FILE=1, _prepare_streams).
     kw: dict[str, Any] = {"cwd": str(_PROJECT_ROOT), "env": env, "close_fds": True,
-                          "stdin": subprocess.DEVNULL}
+                          "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                          "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         kw["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0x8)
                                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200))
@@ -3647,11 +3758,43 @@ def _wait_port_free(port: int, max_s: float = RESTART_WAIT_MAX_S) -> None:
         time.sleep(0.25)
 
 
-def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: float = 2.0) -> None:
-    """Bloque tant que la fenêtre interroge le serveur (dernière requête < idle_s)."""
+def _server_busy() -> str:
+    """Raison pour laquelle le serveur NE DOIT PAS s'arrêter ("" = rien en cours) : job inscrit
+    en base (jobs_inflight), job en mémoire (jobs.manager) ou requête HTTP en cours. Une base
+    illisible compte comme « occupé » (dans le doute, on ne coupe pas un job payant)."""
+    try:
+        n = len(db.jobs_inflight())
+    except Exception:  # noqa: BLE001 - dans le doute : occupé
+        return "base des jobs illisible"
+    if n:
+        return f"{n} job(s) en cours"
+    try:
+        if jobs.manager.has_running():
+            return "job en cours"
+    except Exception:  # noqa: BLE001
+        return "état des jobs inconnu"
+    if _INFLIGHT_REQUESTS[0] > 0:
+        return f"{_INFLIGHT_REQUESTS[0]} requête(s) en cours"
+    return ""
+
+
+def _wait_until_window_idle(idle_s: float = WINDOW_IDLE_SHUTDOWN_S, poll_s: float = 2.0) -> str:
+    """Bloque tant que la fenêtre interroge le serveur (dernière requête < idle_s) OU qu'un job /
+    une requête est en cours. Renvoie la raison de l'arrêt (journalisée par run())."""
     import time
 
-    while time.monotonic() - _LAST_REQUEST[0] < idle_s:
+    logged_busy = ""
+    while True:
+        idle = time.monotonic() - _LAST_REQUEST[0]
+        if idle < idle_s:
+            time.sleep(poll_s)
+            continue
+        busy = _server_busy()
+        if not busy:
+            return f"fenêtre fermée (aucune requête depuis {int(idle)} s, aucun job en cours)"
+        if busy != logged_busy:
+            prov._log_detail(f"[APP] fenêtre muette depuis {int(idle)} s mais {busy} → serveur maintenu.")
+            logged_busy = busy
         time.sleep(poll_s)
 
 
@@ -3751,6 +3894,10 @@ def _try_chromium_app(url: str) -> bool:
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--window-size=1200,840",
+                # Fenêtre en arrière-plan : pas de bridage des minuteurs (heartbeat régulier).
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
             ]
         )
         proc.wait()  # bloque tant que la fenêtre app est ouverte
@@ -3761,17 +3908,21 @@ def _try_chromium_app(url: str) -> bool:
 
 def _prepare_streams() -> None:
     """Sous pythonw.exe (aucune console), sys.stdout/sys.stderr valent None, ce qui fait
-    planter uvicorn (« Unable to configure formatter »). On les redirige vers un fichier log."""
+    planter uvicorn (« Unable to configure formatter »). On les redirige vers un fichier log.
+    Process relancé par « Redémarrer le serveur » (UGC_LOG_TO_FILE=1) : redirection forcée des
+    deux flux (ses flux hérités ne mènent nulle part), en UTF-8 (jamais cp1252)."""
     import sys
 
-    if sys.stdout is not None and sys.stderr is not None:
+    force = os.environ.get("UGC_LOG_TO_FILE") == "1"
+    if not force and sys.stdout is not None and sys.stderr is not None:
         return
     try:
         config_app.ensure_dirs()
-        logf = open(config_app.DATA_DIR / "app.log", "a", encoding="utf-8", buffering=1)
-        if sys.stdout is None:
+        logf = open(config_app.DATA_DIR / "app.log", "a", encoding="utf-8", errors="replace",  # noqa: SIM115
+                    buffering=1)
+        if force or sys.stdout is None:
             sys.stdout = logf
-        if sys.stderr is None:
+        if force or sys.stderr is None:
             sys.stderr = logf
     except Exception:  # noqa: BLE001
         pass

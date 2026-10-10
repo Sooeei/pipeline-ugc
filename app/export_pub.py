@@ -1,8 +1,9 @@
 """Bouton « Exporter la pub » (agent C) : copie les clips VALIDÉS d'une pub, renommés dans l'ordre
 du script, dans le dossier du CLIENT.
 
-Nommage : `NN_<perso>_<debut-de-replique>.mp4` (ex. `01_blonde_encore-plein-de-commandes.mp4`),
-dans un sous-dossier par pub `ADSx_<nom-de-la-pub>` sous le dossier d'export du client
+Nommage : `NN_<titre-du-bloc>.mp4` quand le plan vient d'un découpage client (ex. `01_hook.mp4`,
+`01_hook-2.mp4` pour la variante, `09_cta.mp4`) ; sinon `NN_<perso>_<debut-de-replique>.mp4`
+(ex. `01_blonde_encore-plein-de-commandes.mp4`), dans un sous-dossier par pub `ADSx_<nom-de-la-pub>` sous le dossier d'export du client
 (`export_dir`, stocké dans les données du preset client — clé `export_dir`, cf. app/presets.py).
 
 Endpoints (`router`, inclus par main.py) :
@@ -161,9 +162,36 @@ def variant_suffix(clip: dict[str, Any]) -> str:
     return slugify(clip.get("variant_label") or "", max_words=3, max_chars=20).replace("-", "") or "variante"
 
 
+def _int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def clip_block_slug(clip: dict[str, Any]) -> str:
+    """Titre du bloc du découpage client slugifié (« MOELLEUX MAIS TENU » → moelleux-mais-tenu,
+    « PRÉSENTATION » → presentation, « HOOK 2 » → hook-2) ; bloc découpé en plusieurs plans →
+    `-<n° du sous-plan>` (presentation-1, presentation-2). "" si le plan n'a pas de titre de bloc."""
+    slug = slugify(clip.get("block_title") or "", max_words=6, max_chars=40)
+    if slug and _int(clip.get("block_count")) > 1 and _int(clip.get("block_sub")) > 0:
+        slug = f"{slug}-{_int(clip.get('block_sub'))}"
+    return slug
+
+
 def clip_export_name(index: int, width: int, clip: dict[str, Any], ad: dict[str, Any]) -> str:
-    """`NN_<perso>_<debut-de-replique>.mp4` ; sans réplique → `NN_<perso>.mp4`. Variante de hook :
-    suffixe `_hook2` / `_variante` (variant_label) → `01_nadia_..._hook2.mp4`."""
+    """Plan avec titre de bloc (découpage client) : `NN_<titre-du-bloc>.mp4` (ex. `01_hook.mp4`,
+    variante `01_hook-2.mp4` avec le MÊME NN que le hook, `03_presentation-2.mp4`).
+    Sinon (ancien format) : `NN_<perso>_<debut-de-replique>.mp4` ; sans réplique →
+    `NN_<perso>.mp4` ; variante : suffixe `_hook2` / `_variante` (variant_label)."""
+    block = clip_block_slug(clip)
+    if block:
+        parts = [str(index).zfill(width), block]
+        if clip_is_variant(clip):
+            suffix = variant_suffix(clip)
+            if suffix not in block.replace("-", ""):   # « HOOK 2 » porte déjà sa variante
+                parts.append(suffix)
+        return "_".join(parts) + ".mp4"
     perso = slugify(plan_speaker_name(clip, ad), max_words=3, max_chars=24) or "plan"
     line = slugify(clip_dialogue(clip))
     parts = [str(index).zfill(width), perso] + ([line] if line else [])
@@ -268,11 +296,38 @@ def export_plan(ad_id: int, export_dir: str, subdir: str = "") -> dict[str, Any]
     }
 
 
-def run_export(ad_id: int, export_dir: str, subdir: str = "", on_conflict: str = "suffix") -> dict[str, Any]:
+def _copy_clip(src: str, target: Path, denoise: bool) -> bool:
+    """Copie un clip ; `denoise` → copie à l'audio débruité (media.denoise_copy). Échec du
+    débruitage → copie de l'original (journalisée). Renvoie True si le fichier est débruité."""
+    if denoise:
+        from . import media
+
+        try:
+            media.denoise_copy(src, target)
+            return True
+        except Exception as exc:  # noqa: BLE001 - jamais bloquant : on livre l'original
+            print(f"[EXPORT] débruitage impossible pour {Path(src).name} : {exc!r} → original copié.",
+                  flush=True)
+            try:
+                target.unlink()
+            except OSError:
+                pass
+    shutil.copy2(src, target)
+    return False
+
+
+def run_export(ad_id: int, export_dir: str, subdir: str = "", on_conflict: str = "suffix",
+               denoise: bool = False) -> dict[str, Any]:
     """Copie les clips validés. `on_conflict` : « suffix » (nom_2.mp4…) ou « skip » (on n'y
-    touche pas). Jamais d'écrasement. Crée le dossier au besoin."""
+    touche pas). Jamais d'écrasement. Crée le dossier au besoin. `denoise` : audio débruité
+    (copies seulement, les originaux ne sont jamais modifiés ; ffmpeg absent → 503)."""
     if not export_dir or not Path(export_dir).is_absolute():
         raise HTTPException(400, "Indique un dossier d'export complet (ex. D:\\clients\\Mon client\\IA).")
+    if denoise:
+        from . import media
+
+        if not media.ffmpeg_available():
+            raise HTTPException(503, media.FFMPEG_MISSING_MSG)
     plan = export_plan(ad_id, export_dir, subdir)
     if not plan["files"]:
         raise HTTPException(400, "Aucun clip validé à exporter (anime et valide d'abord des plans).")
@@ -291,13 +346,14 @@ def run_export(ad_id: int, export_dir: str, subdir: str = "", on_conflict: str =
                 continue
             target = _unique_path(target)
         try:
-            shutil.copy2(f["src"], target)
+            denoised = _copy_clip(f["src"], target, denoise)
         except OSError as exc:
             raise HTTPException(500, f"Copie impossible vers « {target} » : {exc.strerror or exc}.") from exc
-        copied.append({"scene_n": f["scene_n"], "name": target.name, "renamed": target.name != f["name"]})
+        copied.append({"scene_n": f["scene_n"], "name": target.name, "renamed": target.name != f["name"],
+                       "denoised": denoised})
     return {
         "ok": True, "dest": str(dest), "subdir": plan["subdir"], "copied": copied,
-        "kept_existing": kept, "skipped": plan["skipped"],
+        "kept_existing": kept, "skipped": plan["skipped"], "denoise": bool(denoise),
     }
 
 
@@ -381,6 +437,7 @@ class ExportIn(BaseModel):
     preset_id: int | None = None
     remember_for_client: bool = True   # mémorise export_dir dans le preset client choisi
     on_conflict: str = "suffix"        # suffix | skip
+    denoise: bool = False              # copies à l'audio débruité (grésillements)
 
 
 @router.get("/api/export/{ad_id}")
@@ -407,7 +464,7 @@ def export_run(ad_id: int, body: ExportIn) -> dict[str, Any]:
     _get_ad_or_404(ad_id)
     export_dir = body.export_dir.strip()
     on_conflict = body.on_conflict if body.on_conflict in ("suffix", "skip") else "suffix"
-    res = run_export(ad_id, export_dir, body.subdir, on_conflict)
+    res = run_export(ad_id, export_dir, body.subdir, on_conflict, denoise=body.denoise)
     db.set_ad_fields(ad_id, export_dir=export_dir, export_subdir=res["subdir"],
                      export_preset_id=body.preset_id)
     db.set_setting("export_last_dir", export_dir)

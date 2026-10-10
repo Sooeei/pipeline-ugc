@@ -52,17 +52,26 @@ def models_table(settings: dict[str, str] | None = None) -> list[dict[str, Any]]
     vid_sel = s.get("objet_video_model") or config_app.DEFAULT_OBJET_VIDEO_MODEL
     mash_sel = s.get("mashup_video_model") or config_app.DEFAULT_MASHUP_VIDEO_MODEL
     av_sel = config_app.normalize_avatar_video_model(s.get("avatar_video_model"))
+    size_sel = config_app.normalize_nb_image_size(s.get("nb_image_size"))
     rows: list[dict[str, Any]] = []
 
     def img_price(model_id: str) -> str:
-        usd = config_app.COST_USD_PER_IMAGE.get(model_id, config_app.COST_USD_PER_IMAGE_DEFAULT)
-        return _fmt_usd(usd) + " / image"
+        """Prix par taille de sortie (2K / 4K) si le modèle gère la 4K, sinon prix unique."""
+        if config_app.nb_image_size_supported(model_id):
+            return " · ".join(f"{z} {_fmt_usd(config_app.image_usd(model_id, z))} / image"
+                              for z in config_app.NB_IMAGE_SIZES)
+        return _fmt_usd(config_app.image_usd(model_id)) + " / image"
+
+    def img_note(model_id: str, base: str = "") -> str:
+        """Taille de sortie ACTIVE (réglage « Taille des images »), ramenée à 2K si non gérée."""
+        size = config_app.normalize_nb_image_size(size_sel, model_id)
+        return " · ".join(x for x in (base, f"taille active : {size}") if x)
 
     # Images (Objet animé + Mashup partagent le réglage « Modèle d'image »)
     for mode in ("Objet animé", "Mashup IA"):
         for key, m in config_app.OBJET_IMAGE_MODELS.items():
             rows.append(_row(mode, "Images (keyframes)", "OpenRouter", m["model"], m["label"],
-                             img_price(m["model"]), actif=key == img_sel))
+                             img_price(m["model"]), actif=key == img_sel, note=img_note(m["model"])))
     # Objet animé : vidéo + voix + lip-sync (Grok)
     for key, m in config_app.OBJET_VIDEO_MODELS.items():
         rows.append(_row(
@@ -80,7 +89,7 @@ def models_table(settings: dict[str, str] | None = None) -> list[dict[str, Any]]
     # Avatar IA : keyframes (toujours Nano Banana Pro)
     kf = config_app.OBJET_IMAGE_MODELS[config_app.OMNI_KEYFRAME_IMAGE_MODEL]
     rows.append(_row("Avatar IA", "Keyframes", "OpenRouter", kf["model"], kf["label"],
-                     img_price(kf["model"]), note="imposé (qualité max)"))
+                     img_price(kf["model"]), note=img_note(kf["model"], "imposé (qualité max)")))
     # Avatar IA v2 : vidéo (1 appel par bloc)
     for key, m in config_app.AVATAR_VIDEO_MODELS.items():
         prix = _fmt_usd(m["cost_per_second_usd"]) + " / s"
@@ -199,7 +208,8 @@ def _dry_run() -> bool:
 def modeles() -> dict[str, Any]:
     s = db.get_all_settings()
     return {"rows": models_table(s), "keys": keys_presence(s), "dry_run": _dry_run(),
-            "usd_to_eur": config_app.USD_TO_EUR}
+            "usd_to_eur": config_app.USD_TO_EUR,
+            "nb_image_size": config_app.normalize_nb_image_size(s.get("nb_image_size"))}
 
 
 @router.post("/api/modeles/cles/verifier")

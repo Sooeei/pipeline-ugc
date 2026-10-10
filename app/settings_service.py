@@ -40,6 +40,11 @@ def load_provider_config() -> ProviderConfig:
         drift_threshold=config_app.normalize_drift_threshold(
             s.get("drift_threshold", config_app.DRIFT_THRESHOLD_DEFAULT)
         ),
+        # Résolution de sortie des images Nano Banana (« 2K » | « 4K ») ; providers la ramène à
+        # 2K si le modèle ne gère pas la 4K.
+        image_size=config_app.normalize_nb_image_size(
+            s.get("nb_image_size", config_app.DEFAULT_NB_IMAGE_SIZE)
+        ),
         dry_run=s.get("dry_run", "1") == "1",
     )
 

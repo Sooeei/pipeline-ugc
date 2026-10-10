@@ -221,9 +221,9 @@ def test_pixar_in_dialogue_never_scrubbed_manual(monkeypatch):
 
 # ============================================================ MAX_WORDS
 def test_max_words_values_per_pace():
-    assert config_app.omni_max_words(2.5) == 22
-    assert config_app.omni_max_words(2.0) == 18
-    assert config_app.omni_max_words(3.0) == 27
+    assert config_app.omni_max_words(2.5) == 25   # intro muette 0 s
+    assert config_app.omni_max_words(2.0) == 20
+    assert config_app.omni_max_words(3.0) == 30
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
         # Plan v2 : mots max d'un bloc = AVATAR_MAX_BLOCK_S (10 s) × débit de la fiche voix.
@@ -239,7 +239,7 @@ def test_auto_dialogues_within_max_words_except_single_long_sentence():
               + long_sentence + " Fin du script ici.").strip()
     res = brain.generate_avatar_omni_plan(_sim(), script, words_per_sec=2.5)
     mw = res["max_words"]
-    assert mw == 22
+    assert mw == 25
     assert " ".join(s["dialogue"] for s in res["shots"]) == script
     over = [s for s in res["shots"] if len(s["dialogue"].split()) > mw]
     assert len(over) == 1 and over[0]["dialogue"] == long_sentence   # phrase seule, non coupée
@@ -369,7 +369,7 @@ def test_omni_clip_seconds_bounds():
     assert config_app.omni_clip_seconds(_words(80)) == 10
     assert config_app.omni_clip_seconds("Salut.") == 3
     assert 3 <= config_app.omni_clip_seconds("Un deux trois quatre cinq.", 2.5) <= 10
-    assert config_app.omni_clip_seconds(_words(10), 2.5) == 5       # ceil(10/2.5)+1
+    assert config_app.omni_clip_seconds(_words(10), 2.5) == 4       # ceil(10/2.5) (intro 0 s)
 
 
 # ============================================================ fiche voix
@@ -796,7 +796,7 @@ def test_real_animation_records_omni_cost(monkeypatch):
     ad_id, _ = _omni_ad(1, dialogues=[_words(10)], voice_profile=VP)
     pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "o")
     rows = [r for r in db.cost_summary() if r["service"] == "gemini"]
-    assert rows and rows[0]["qty"] == 5 and rows[0]["usd"] == pytest.approx(0.5)
+    assert rows and rows[0]["qty"] == 4 and rows[0]["usd"] == pytest.approx(0.4)
 
 
 def test_estimate_avatar_omni_and_tier1_warning():
@@ -816,7 +816,7 @@ def test_animate_estimate_uses_real_omni_durations():
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 200, r.text
         secs = [config_app.omni_clip_seconds(d, 2.5) for d in dialogues]
-        assert secs == [3, 5, 10, 4]
+        assert secs == [3, 4, 10, 4]
         assert r.json()["seconds_total"] == sum(secs)
         assert r.json()["usd_video"] == round(sum(secs) * 0.10, 2)
         assert r.json()["tier1_warning"] is False

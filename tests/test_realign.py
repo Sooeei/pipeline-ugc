@@ -181,11 +181,11 @@ def test_maquilleuse_script_accepted_with_flattened_claude(monkeypatch, script):
 
 def test_maquilleuse_long_sentence_warning_in_simulation():
     res = brain.generate_avatar_omni_plan(ProviderConfig(dry_run=True), MAQ)
-    assert res["max_words"] == 22
+    assert res["max_words"] == 25
     long_plans = [s for s in res["shots"] if s["dialogue"] == LONG_SENTENCE]
     assert len(long_plans) == 1                                    # reste seule, jamais coupée
     n = long_plans[0]["n"]
-    msg = (f"Plan {n} : 27 mots (max 22 pour un clip de 10 s) — cette phrase est trop longue pour "
+    msg = (f"Plan {n} : 27 mots (max 25 pour un clip de 10 s) — cette phrase est trop longue pour "
            "un seul plan : raccourcis-la dans ton script, sinon la fin risque d'être coupée ou dite "
            "trop vite.")
     assert msg in res["warnings"]

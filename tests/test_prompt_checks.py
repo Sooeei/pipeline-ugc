@@ -55,7 +55,7 @@ def test_assemble_one_line_blocks_end_with_a_period():
 
 
 def test_final_prompt_unchanged():
-    assert providers.nano_banana_final_prompt("X") == "X\n\nOutput a vertical 9:16 (1K) image."
+    assert providers.nano_banana_final_prompt("X") == "X\n\nOutput a vertical 9:16 (2K) image."
 
 
 # ============================================================ contrôles un par un

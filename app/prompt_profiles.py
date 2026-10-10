@@ -226,7 +226,7 @@ PRODUCT_SHEET_LABEL = "PRODUCT:"
 # Toute ligne qui commence par « PRODUCT: » ou « PRODUCT (match exactly): » (fiche produit client).
 _PRODUCT_SHEET_LINE_RE = re.compile(r"^\s*PRODUCT\b[^:\n]{0,40}:")
 
-NB_OUTPUT_FORMAT = "Output a vertical 9:16 (1K) image."
+NB_OUTPUT_FORMAT = "Output a vertical 9:16 (2K) image."
 # Start frames (anglais, collés tels quels) :
 NB_GROUNDING = "The object rests on a real surface with a soft contact shadow, never floating."
 NB_FRAMING_SPOKEN = "spoken"         # plan parlé

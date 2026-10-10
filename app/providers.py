@@ -775,7 +775,7 @@ def nano_banana_generate_image(
     _enforce_preflight(cfg, issues)
     path = _nano_banana_generate_image(cfg, prompt_image, refs, out_path, label, subtitle, index)
     gen_trace.record(kind="image", model=nano_banana_model_id(cfg), prompt=final, images=sent,
-                     params={"aspect": "9:16", "size": "1K"}, dry_run=cfg.dry_run,
+                     params={"aspect": "9:16", "size": "2K"}, dry_run=cfg.dry_run,
                      issues=issues, output_path=str(path))
     return path
 
@@ -819,6 +819,8 @@ def _nano_banana_generate_image(
         "model": model,
         "modalities": ["image", "text"],
         "messages": [{"role": "user", "content": content}],
+        # Résolution de SORTIE (OpenRouter image_config) : 2K = même prix que 1K (1120 tokens).
+        "image_config": {"aspect_ratio": "9:16", "image_size": "2K"},
     }
     headers = {
         "Authorization": f"Bearer {key}",

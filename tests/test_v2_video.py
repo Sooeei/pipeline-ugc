@@ -303,7 +303,8 @@ def test_build_video_prompt_no_decor_no_character_description():
         if model == "grok":   # Grok : bloc « plan unique » puis caméra / cadrage, puis le geste
             assert p.startswith(prompt_profiles.GROK_SINGLE_SHOT) and "raises an eyebrow" in p
         assert ("Character 1 (Léa) talking, expressive mouth, subtle body motion." in p if model != "omni"
-                else "Only Character 1 (Léa) speaks, expressive mouth in sync with every word, subtle body motion." in p)
+                else "Only Character 1 (Léa) speaks, expressive mouth in sync with every word, natural "
+                     "breathing, body otherwise calm." in p)
         assert "Character 2 (Paul) keeps their mouth closed, does not speak." in p
         assert "Franchement, 97 % des femmes adorent ça !" in p
         assert sheet in p

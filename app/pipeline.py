@@ -13,8 +13,9 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from . import (
 from . import prompt_profiles as pp
 from .providers import (
     ContentFilterError,
+    OmniBlockedError,
     ProviderConfig,
     ProviderError,
     _log_detail,
@@ -81,9 +83,40 @@ def _emit_clip_failure(
     progression correspondant, sans bloquer les autres clips. `extra` ajoute des clés à
     l'événement (ex. `voice_ok`). Renvoie toujours False (retour d'un worker en échec)."""
     msg = _user_error_message(exc)
+    if isinstance(exc, OmniBlockedError):
+        # Refus Google : plan marqué « omni_blocked » (ignoré par « Animer tout » et l'aperçu du
+        # coût tant que l'image / le dialogue n'a pas changé) ; jamais de relance automatique.
+        db.update_clip(clip_id, status="echec", error=msg, error_kind=OMNI_BLOCKED,
+                       error_detail=json.dumps(exc.detail(), ensure_ascii=False))
+        db.log_activity("avatar_omni", f"Plan {n} refusé par Google ({exc.kind}) : {exc.google_reason}")
+        emit({"scene": n, "phase": "erreur", "status": "echec", "message": msg,
+              "error_kind": OMNI_BLOCKED, "error_detail": exc.detail(), **(extra or {})})
+        return False
     db.update_clip(clip_id, status="echec", error=msg)
     emit({"scene": n, "phase": "erreur", "status": "echec", "message": msg, **(extra or {})})
     return False
+
+
+OMNI_BLOCKED = "omni_blocked"   # clips.error_kind d'un plan refusé par Google
+
+
+def clip_omni_blocked(c: dict[str, Any]) -> bool:
+    """Plan refusé par Google (clips.error_kind = « omni_blocked ») : ignoré par le run global."""
+    return str(c.get("error_kind") or "") == OMNI_BLOCKED
+
+
+def clip_error_detail(c: dict[str, Any]) -> dict[str, Any] | None:
+    """clips.error_detail décodé (dict) ; None si vide / illisible."""
+    raw = c.get("error_detail")
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _run_parallel(
@@ -975,6 +1008,10 @@ def generate_objet_images(
             )
         if prod["active"] and prod["visible"]:   # bloc DÉDIÉ, juste après le sujet
             start[pp.B_PRODUCT_SHEET] = product_sheet.sheet_block(prod["sheet"], photo_legend)
+        elif prod["active"] and (never := product_sheet.never_line(prod["sheet"])):
+            # Produit pas à l'image : ses interdits (« Never: … ») restent dans le prompt (sinon le
+            # modèle peut faire apparaître le même produit, avec ce qu'il ne faut jamais montrer).
+            start[pp.B_PRODUCT_SHEET] = never
         # Seuls les types de photos RÉELLEMENT envoyées peuvent être cités dans le prompt.
         sent_kinds = [kind_of_path.get(p, "") for p in refs]
         # Journal : étape = keyframe (Avatar IA) / retouche (prompt EDIT de l'ancre) / image.
@@ -1096,8 +1133,9 @@ def omni_refs_overflow_warning(
 _OMNI_REF_ROLES = {
     "produit": "the client's product — reproduce it exactly, a plain object: never give it a face",
     # Ancre perso (clips.is_anchor) / ancre produit (clips.is_product_anchor) : rôles distincts.
-    "ancre": "character anchor: keep the person identical (same people, outfits, set, light; "
-             "only framing, pose and action change)",
+    "ancre": "character anchor: keep the person identical (same people, outfits, set, light, "
+             "same camera position and framing, same product orientation with the logo on the same "
+             "side; only pose and action change unless THIS SHOT asks for another framing)",
     "ancre_produit": "product anchor: keep the product identical (shape, size, material, details)",
     "decor": "the set / background to reproduce",
     "style": "the photographic style and lighting to match",
@@ -1356,7 +1394,8 @@ def _animate_clips(
             # Journal des générations : contexte posé DANS le worker (thread du pool).
             with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=trace_mode, step="video"):
                 render_clip(c, mp4)
-            db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
+            db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None,
+                           error_kind="", error_detail="")
             emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(mp4)})
             return True
         except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
@@ -1676,11 +1715,12 @@ def _omni_ref_subject(images: list[prompt_profiles.SentImage], n_people: int = 1
 def assemble_omni(
     images: list[prompt_profiles.SentImage], *, lead: str = "", camera: str = "",
     subject: list[str] | None = None, performance: list[str] | None = None,
-    audio: list[str] | None = None, spoken: bool = True,
+    audio: list[str] | None = None, spoken: bool = True, single_shot: str = "",
 ) -> str:
     """Prompt Omni final via prompt_profiles.assemble(OMNI, …) dans l'ordre fixe : rôles des
     images (+ `lead` : « Extend this video… ») → plan unique → caméra → sujet → jeu → audio →
-    interdits → phrases de rôle. Les rôles déclarés sont ceux de `images` (= images envoyées)."""
+    interdits → phrases de rôle. Les rôles déclarés sont ceux de `images` (= images envoyées).
+    `single_shot` remplace la phrase « plan unique » (tour chaîné : la coupe est en tête)."""
     P = prompt_profiles
     header = " ".join(x for x in (P.omni_role_header(images), lead) if x)
     negatives = []   # « No other speakers » : porté par « Only X speaks… » (bloc jeu)
@@ -1689,7 +1729,7 @@ def assemble_omni(
     negatives.append(P.OMNI_NEGATIVES)
     return P.assemble(P.OMNI, {
         P.B_IMAGE_ROLES: header,
-        P.B_SINGLE_SHOT: P.OMNI_SINGLE_SHOT,
+        P.B_SINGLE_SHOT: single_shot or P.OMNI_SINGLE_SHOT,
         P.B_CAMERA: _sentence(camera),
         P.B_SUBJECT: " ".join(_sentence(s) for s in subject or [] if str(s or "").strip()),
         P.B_PERFORMANCE: " ".join(_sentence(s) for s in performance or [] if str(s or "").strip()),
@@ -1697,6 +1737,16 @@ def assemble_omni(
         P.B_NEGATIVES: " ".join(negatives),
         P.B_ROLE_SENTENCES: P.omni_role_sentences(images),
     })
+
+
+def _omni_speech_timing(intro: str, seconds: int) -> str:
+    """Timecodes en tête de la réplique d'un plan v1 : « [0-Ns] {intro}, silent. [N-…s] » seulement
+    si une respiration muette est configurée (OMNI_INTRO_SECONDS > 0) ; à 0 (défaut, tests
+    Morphea : plans vides), la parole démarre tout de suite → aucun timecode."""
+    lead = int(config_app.OMNI_INTRO_SECONDS or 0)
+    if lead <= 0:
+        return ""
+    return f"[0-{lead}s] {intro}, silent. [{lead}-{seconds}s] "
 
 
 def build_omni_prompt(
@@ -1747,9 +1797,10 @@ def build_omni_prompt(
     who = f"The speaking character ({speaker})" if speaker else "The person"
     performance: list[str] = []
     audio: list[str] = []
+    timing = _omni_speech_timing(intro, seconds)
     if off:
         performance.append(lipsync_rules.offscreen_voice_line(speaker or "a character off screen"))
-        audio.append(f"[0-1s] {intro}, silent. [1-{seconds}s] Off-screen voice of "
+        audio.append(f"{timing}Off-screen voice of "
                      f"{speaker or 'a character off screen'}, spoken in French, in "
                      f"{voice_i18n.clean_sheet(voice_sheet)}: \"{_omni_quote_dialogue(text)}\"")
         audio.append(lipsync_rules.OFFSCREEN_AUDIO)
@@ -1759,7 +1810,7 @@ def build_omni_prompt(
         if silent:
             performance.append(f"The other character ({silent}) remains silent the whole time: no "
                                "speech and no lip movement, only natural listening reactions")
-        audio.append(f"[0-1s] {intro}, silent. [1-{seconds}s] {who} says, spoken in French, in "
+        audio.append(f"{timing}{who} says, spoken in French, in "
                      f"{voice_i18n.clean_sheet(voice_sheet)}: \"{_omni_quote_dialogue(text)}\"")
         audio.append(_OMNI_SPOKEN_AUDIO)
     else:
@@ -2037,6 +2088,38 @@ def omni_tier1_pacer(cfg: ProviderConfig) -> Tier1Pacer | None:
                       history=db.omni_spend_since(time.time() - window))
 
 
+# -------------------------------------------------------------------- limiteur Omni UNIQUE
+# UN SEUL appel Google Omni à la fois dans TOUTE l'app (tous jobs confondus : « Tester ce plan »,
+# « Animer tout », ancien pipeline, chaîne voix identique), et plafond Tier 1 calculé sur les
+# dépenses RÉELLES déjà enregistrées en base (cost_events) : tant qu'un appel tient le verrou, sa
+# dépense est enregistrée avant la libération → l'appel suivant (même d'un autre job) la voit.
+# Avant (diagnostic pub 87) : pacer et parallélisme propres à chaque job → 2 jobs simultanés
+# doublaient les appels et le plafond.
+_OMNI_CALL_LOCK = threading.Lock()
+OMNI_QUEUE_MESSAGE = "En file d'attente : un autre plan Google Omni est en cours (1 appel à la fois)"
+
+
+@contextmanager
+def omni_call_slot(
+    cfg: ProviderConfig, usd: float, *, pacer: Tier1Pacer | None = None,
+    on_wait: Callable[[float], None] | None = None, on_queue: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Créneau d'UN appel Omni : attend son tour (`on_queue` appelé si un autre appel est en cours),
+    puis le plafond Tier 1 (`pacer` fourni, sinon pacer amorcé sur la base ; aucun en simulation),
+    et garde le verrou jusqu'à la sortie du bloc (appel + enregistrement du coût)."""
+    if not _OMNI_CALL_LOCK.acquire(blocking=False):
+        if on_queue is not None:
+            on_queue()
+        _OMNI_CALL_LOCK.acquire()
+    try:
+        p = pacer if pacer is not None else omni_tier1_pacer(cfg)
+        if p is not None:
+            p.acquire(float(usd), on_wait)
+        yield
+    finally:
+        _OMNI_CALL_LOCK.release()
+
+
 def tier1_wait_message(wait_s: float) -> str:
     """« prochain plan dans X min » (arrondi à la minute, au moins 1)."""
     mins = max(1, math.ceil(wait_s / 60))
@@ -2201,6 +2284,17 @@ def _omni_who(n: int, names: dict[int, str]) -> str:
 
 
 OMNI_GESTURE_MAX_WORDS = 12   # geste / expression du bloc gardé dans le prompt vidéo
+# Tête d'un tour chaîné « voix identique » (previous_interaction_id, JAMAIS task="extend" : il
+# interdit les références) : coupe vers la scène suivante, même personnage, même voix.
+OMNI_CHAIN_CUT_LEAD = "At 0s cut to a new scene with the same character, same voice."
+OMNI_CHAIN_SINGLE_SHOT = "After this cut, a single continuous shot with no further cuts."
+
+
+def spoken_dialogue(dialogue: Any) -> str:
+    """Réplique telle qu'ENVOYÉE au modèle vidéo : crochets retirés puis brain.spoken_clean
+    (ponctuation qui fait dérailler la voix native : « : » « ; » → « . », guillemets retirés,
+    tirets isolés → virgule). Le script stocké (clips.script) reste INTACT."""
+    return brain.spoken_clean(brain.strip_brackets(str(dialogue or "").strip())).strip()
 
 
 def _omni_gesture(video_prompt: str, spoken: bool) -> str:
@@ -2220,7 +2314,7 @@ def build_omni_block_prompt(
     envoyées ; défaut : start frame seule, ou aucune en texte seul) + phrases de rôle à la fin.
     Start frame : AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
     `chain_turn` = tour suivant d'une chaîne « voix identique » (previous_interaction_id) :
-    « Show the same character in the next scene, … » ; la keyframe du bloc éventuelle est une
+    « At 0s cut to a new scene with the same character, same voice. » ; la keyframe du bloc éventuelle est une
     RÉFÉRENCE (cadrage / décor), jamais une 1re image. Réplique VERBATIM (crochets retirés).
     `offscreen` = voix HORS CHAMP de `speaker` : `others_in_frame` = les personnes VISIBLES, qui
     gardent la bouche fermée (lipsync_rules.offscreen_voice_line) ; aucune règle de lip-sync,
@@ -2229,7 +2323,9 @@ def build_omni_block_prompt(
     text_only = bool(scene_desc.strip())
     if images is None:
         images = omni_images_for(text_only=text_only)
-    text = _omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
+    # Dialogue nettoyé À L'ENVOI (brain.spoken_clean : « : » « ; » → « . », guillemets retirés…) :
+    # Omni lisait « de l'année : commandez » « de Dour ». clips.script n'est jamais modifié.
+    text = _omni_quote_dialogue(spoken_dialogue(dialogue))
     spoken = bool(text)
     off = bool(offscreen) and spoken
     first_frame = prompt_profiles.omni_has_first_frame(images)
@@ -2238,14 +2334,13 @@ def build_omni_block_prompt(
     lead = ""
     subject: list[str] = []
     if chain_turn:
+        # Tour chaîné (doc Omni : « After 2s cut to a new scene with the same characters ») :
+        # coupe franche dès 0 s, même personnage, même voix ; la keyframe du bloc (référence)
+        # fixe cadrage, pose et décor, en tête du sujet ; le geste vient après.
         ref = prompt_profiles.omni_ref_tag(images, 0)
-        # Le geste suit une virgule : minuscule initiale, sans point final doublé.
-        tail = gesture.rstrip(" .")
-        tail = tail[:1].lower() + tail[1:]
-        lead = f"Show the same character in the next scene{', ' + tail if tail else ''}."
-        gesture = ""
+        lead = OMNI_CHAIN_CUT_LEAD
         if ref:
-            subject.append(f"Framing, set and outfit as in {ref}")
+            subject.append(f"The new scene's framing, pose and set are exactly as in {ref}")
     if text_only:
         subject.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
         if spoken and not off:
@@ -2268,7 +2363,8 @@ def build_omni_block_prompt(
             audio.append(f"Voice: {voice_i18n.clean_sheet(voice_sheet)}")
         audio.append(lipsync_rules.OFFSCREEN_AUDIO)
     elif spoken:
-        performance.append(f"Only {who} speaks, expressive mouth in sync with every word, subtle body motion")
+        performance.append(f"Only {who} speaks, expressive mouth in sync with every word, "
+                           "natural breathing, body otherwise calm")
         performance.extend(f"{o} keeps their mouth closed, does not speak" for o in others)
         audio.append(f'{who} says, spoken in French: "{text}"')
         if voice_sheet.strip():
@@ -2279,7 +2375,8 @@ def build_omni_block_prompt(
         audio.append("No dialogue. The audio is a quiet natural room tone")
     cam = omni_camera_sentence(camera_key, spoken=spoken, style=style, first_frame=first_frame)
     return assemble_omni(images, lead=lead, camera=cam, subject=subject,
-                         performance=performance, audio=audio, spoken=spoken)
+                         performance=performance, audio=audio, spoken=spoken,
+                         single_shot=OMNI_CHAIN_SINGLE_SHOT if chain_turn else "")
 
 
 def clip_excluded(c: dict[str, Any]) -> bool:
@@ -2346,6 +2443,7 @@ def animate_avatar_omni_clips(
     on_update: UpdateFn | None = None,
     only_clip_id: int | None = None,
     pacer: Tier1Pacer | None = None,
+    clip_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Anime les plans VALIDÉS d'un Avatar IA (image→vidéo Google Omni, VOIX + LIP-SYNC natifs).
 
@@ -2354,7 +2452,11 @@ def animate_avatar_omni_clips(
     L'ancre (ou le 1er plan validé) est envoyée en 2e image pour garder le même visage/la même
     voix. `only_clip_id` → « Tester ce plan ». Plans « valide » ou « echec » (avec image).
     Run réel : les plans sont ESPACÉS pour rester sous le plafond Google Tier 1 (`pacer`, par
-    défaut omni_tier1_pacer) ; le plan qui attend affiche « prochain plan dans X min »."""
+    défaut amorcé sur les dépenses en base à chaque appel) ; le plan qui attend affiche « prochain
+    plan dans X min ». Chaque appel passe par le limiteur Omni UNIQUE de l'app (omni_call_slot :
+    1 appel à la fois, tous jobs confondus). `clip_ids` = plans RÉSERVÉS par le job (jobs.start) :
+    seuls ceux-là sont animés ; un plan réservé par un AUTRE job n'est jamais repris ; le run
+    global ignore les plans refusés par Google (« omni_blocked »)."""
     all_clips = db.clips_for_ad(ad_id)
     ad = db.get_ad(ad_id) or {}
     # GARDE-FOU (défense en profondeur, cf. main) : seuls les keyframes VALIDÉS sont animés ;
@@ -2370,11 +2472,18 @@ def animate_avatar_omni_clips(
     else:
         # Plans exclus / variantes de hook non demandées : seulement via « Tester ce plan ».
         clips = [c for c in all_clips if omni_clip_animatable(c) and c.get("status") in ("valide", "echec")
-                 and not clip_excluded(c)]
+                 and not clip_excluded(c) and not clip_omni_blocked(c)]
+        if clip_ids is not None:
+            clips = [c for c in clips if int(c["id"]) in {int(x) for x in clip_ids}]
+    # Verrou anti-double facturation : jamais un plan réservé par un autre job en cours
+    # (import paresseux : jobs importe pipeline).
+    from . import jobs as _jobs
+
+    busy_elsewhere = set(_jobs.manager.busy_clip_ids()) - {int(x) for x in clip_ids or []}
+    clips = [c for c in clips if int(c["id"]) not in busy_elsewhere]
     resolution = config_app.normalize_omni_resolution(ad.get("omni_resolution"))
     wps_for = ad_wps_for(ad)          # débit de la fiche voix de CHAQUE speaker
     sheet_for = ad_voice_sheet_for(ad)
-    wps = wps_for(1)
     max_spoken = omni_max_spoken()
     style = ad_style(ad)
     # Mêmes descriptions que les images : la bible (si découpage client), sinon les personnages EN
@@ -2387,8 +2496,17 @@ def animate_avatar_omni_clips(
     auto_turns = ad_auto_turns(ad)
 
     emit = on_update or _noop
-    if pacer is None:
-        pacer = omni_tier1_pacer(cfg)
+
+    def _slot(c: dict[str, Any], seconds: int) -> Any:
+        """Créneau du limiteur Omni UNIQUE (1 appel à la fois + Tier 1) pour un appel de `seconds`."""
+        n = int(c["scene_n"])
+        return omni_call_slot(
+            cfg, seconds * config_app.OMNI_COST_PER_SECOND_USD, pacer=pacer,
+            on_wait=lambda w: emit({"scene": n, "phase": "attente_tier1", "status": "en_cours",
+                                    "message": tier1_wait_message(w), "wait_s": round(w)}),
+            on_queue=lambda: emit({"scene": n, "phase": "animation", "status": "en_cours",
+                                   "message": OMNI_QUEUE_MESSAGE}),
+        )
 
     def _use_turns(c: dict[str, Any]) -> bool:
         """Plan à tours : chaîne de tours seulement si le découpage auto est activé, si une chaîne
@@ -2406,15 +2524,6 @@ def animate_avatar_omni_clips(
         return need > config_app.OMNI_MAX_CLIP_SECONDS
 
     def _render(c: dict[str, Any], mp4: Path) -> None:
-        if pacer is not None:
-            n = int(c["scene_n"])
-            usd = clip_omni_seconds(c, wps, wps_for=wps_for, max_spoken=max_spoken) \
-                * config_app.OMNI_COST_PER_SECOND_USD
-            pacer.acquire(usd, lambda w: emit({
-                "scene": n, "phase": "attente_tier1", "status": "en_cours",
-                "message": tier1_wait_message(w), "wait_s": round(w),
-            }))
-            emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
         if clip_segments(c) and _use_turns(c):
             _render_chain(c, mp4)
             return
@@ -2449,15 +2558,18 @@ def animate_avatar_omni_clips(
         )
         _log_omni_plan_warnings(n, dialogue, motion, wps_for(sp))
         db.update_clip(int(c["id"]), omni_prompt=json.dumps([prompt], ensure_ascii=False))
-        res = omni_generate_video(
-            cfg, image, prompt, mp4, seconds, anchor_path=anchor,
-            model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, resolution=resolution,
-            dialogue=dialogue,
-        )
+        with _slot(c, seconds):
+            emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
+            res = omni_generate_video(
+                cfg, image, prompt, mp4, seconds, anchor_path=anchor,
+                model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, resolution=resolution,
+                dialogue=dialogue,
+            )
+            if not cfg.dry_run:
+                cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
         db.update_clip(int(c["id"]), interaction_id=str(res.get("interaction_id") or ""))
         if not cfg.dry_run:
             _log_omni_turn(n, 1, 1, seconds, str(res.get("path") or mp4), res.get("usage"))
-            cost.record_omni_clip(ad_id, seconds)  # 1 clip Omni (vidéo + voix) à la seconde
 
     def _render_chain(c: dict[str, Any], mp4: Path) -> None:
         """Plan à TOURS : 1 plan = 1 vidéo continue = chaîne de tours Omni (1 requête par tour,
@@ -2513,27 +2625,29 @@ def animate_avatar_omni_clips(
             sent = [*sent[:i], prompt]
             db.update_clip(clip_id, omni_prompt=json.dumps(sent, ensure_ascii=False))
             part = mp4.with_name(f"{n}_tour{i + 1}.mp4")
-            if i == 0:
-                res = omni_generate_video(
-                    cfg, image, prompt, part, seconds, anchor_path=anchor,
-                    model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
-                    resolution=resolution, dialogue=str(turn.get("text") or ""),
-                )
-            else:
-                with gen_trace.context(step="extension"):
-                    res = omni_extend_video(
-                        cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
-                        model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
+            with _slot(c, seconds):
+                emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
+                if i == 0:
+                    res = omni_generate_video(
+                        cfg, image, prompt, part, seconds, anchor_path=anchor,
+                        model_value=config_app.OMNI_MODEL, label=ad_name, index=n - 1, store=True,
                         resolution=resolution, dialogue=str(turn.get("text") or ""),
                     )
+                else:
+                    with gen_trace.context(step="extension"):
+                        res = omni_extend_video(
+                            cfg, str(segs[i - 1]["interaction_id"]), prompt, part, seconds,
+                            model_value=config_app.OMNI_MODEL, label=ad_name, index=i,
+                            resolution=resolution, dialogue=str(turn.get("text") or ""),
+                        )
+                if not cfg.dry_run:
+                    cost.record_omni_clip(ad_id, seconds)   # 1 tour = sa durée réelle
             segs[i] = {**s, "seconds": seconds, "interaction_id": str(res.get("interaction_id") or ""),
                        "mp4_path": str(res.get("path") or part), "done": True}
             if not cfg.dry_run:
                 _log_omni_turn(n, i + 1, k, seconds, segs[i]["mp4_path"], res.get("usage"))
             db.update_clip(clip_id, segments=json.dumps(segs, ensure_ascii=False),
                            interaction_id=segs[i]["interaction_id"])
-            if not cfg.dry_run:
-                cost.record_omni_clip(ad_id, seconds)   # 1 tour = sa durée réelle
         _assemble_chain([str(s["mp4_path"]) for s in segs],
                         sum(int(s.get("seconds") or 0) for s in segs), mp4)
 

@@ -132,9 +132,14 @@ def test_chain_turn_prompt_with_reference_keyframe():
     p = pipeline.build_omni_block_prompt("walks to the window", speaker=1, others_in_frame=[],
                                          dialogue="Et ça change tout.", voice_sheet="a warm voice",
                                          names={1: "Léa"}, images=sent, chain_turn=True)
-    assert p.startswith("[# References <IMAGE_REF_0>@Image1] Show the same character in the next "
-                        "scene, walks to the window. In a single continuous shot.")
-    assert "Framing, set and outfit as in <IMAGE_REF_0>." in p
+    # K9 : coupe vers la scène suivante, même personnage, même voix ; keyframe en tête du sujet,
+    # geste APRÈS ; pas de « No scene cuts » (contredirait la coupe).
+    assert p.startswith("[# References <IMAGE_REF_0>@Image1] At 0s cut to a new scene with the same "
+                        "character, same voice. After this cut, a single continuous shot with no "
+                        "further cuts.")
+    assert "No scene cuts" not in p
+    ref = p.index("The new scene's framing, pose and set are exactly as in <IMAGE_REF_0>.")
+    assert ref < p.index("Walks to the window.")
     assert "<FIRST_FRAME>" not in p and "first frame" not in p
     assert '"Et ça change tout."' in p and "spoken in French" in p
     assert p.endswith("Use Image1 as a reference for the video generation. The images should not be "
@@ -266,7 +271,8 @@ def test_chain_simulation_one_clip_per_plan(monkeypatch):
         assert clip["status"] == "pret" and Path(clip["mp4_path"]).is_file()
         assert media.mp4_duration(clip["mp4_path"]) == pytest.approx(clip["clip_seconds"], abs=0.3)
     p2 = json.loads(db.get_clip(ids[1])["omni_prompt"])[0]
-    assert p2.startswith("[# References <IMAGE_REF_0>@Image1] Show the same character in the next scene")
+    assert p2.startswith("[# References <IMAGE_REF_0>@Image1] At 0s cut to a new scene with the same "
+                         "character, same voice.")
     p1 = json.loads(db.get_clip(ids[0])["omni_prompt"])[0]
     assert p1.startswith("[# Sources <FIRST_FRAME>@Image1] ")
     assert any("Chaîne voix identique" in a["message"] for a in db.recent_activity(50))

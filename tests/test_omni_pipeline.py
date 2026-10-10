@@ -265,7 +265,7 @@ def test_old_single_clip_ad_unchanged_path(fake_google, tmp_path):
     pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "solo")
     b = fake_google["bodies"][0]
     secs = config_app.omni_clip_seconds("Une phrase toute simple.", 2.5)
-    assert b["response_format"]["duration"] == f"{secs}s" and "[0-1s]" in b["input"][-1]["text"]
+    assert b["response_format"]["duration"] == f"{secs}s" and "[0-1s]" not in b["input"][-1]["text"]
 
 
 # ============================================================ fiches voix par personnage + verrou

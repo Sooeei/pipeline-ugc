@@ -270,14 +270,16 @@ def test_build_omni_prompt_structure_and_order():
     assert "Locked off static camera, framing identical to the first frame." in p   # parlé → fixe
     assert "spoken in French" in p and "in a warm voice" in p
     assert '"Il dit “wow” et “ok”."' in p     # verbatim, guillemets internes “ ”
-    assert "[1-7s]" in p and "[0-1s]" in p
+    # OMNI_INTRO_SECONDS = 0 (défaut) : plus de « [0-1s] …, silent. [1-7s] » → la parole démarre tout de suite.
+    assert "[0-1s]" not in p and "[1-7s]" not in p and "silent. [" not in p
+    assert "The person says, spoken in French" in p
     assert "Never mirror the image. No music. No subtitles. No on-screen text." in p
     assert p.count("No subtitles") == 1 and p.lower().count("no music") == 1
     assert "nods" not in p.lower() and "Smiles warmly" in p        # geste de tête retiré (lip-sync)
     assert p.endswith("Use Image1 as the starting frame. Use Image2 as a reference for the video "
                       "generation. The images should not be used as literal initial frames.")
     idx = [p.index(x) for x in ("[# Sources", "In a single continuous shot", "Locked off",
-                                "Smiles warmly", "Only the person speaks", "[0-1s]", "Never mirror the image.",
+                                "Smiles warmly", "Only the person speaks", "The person says", "Never mirror the image.",
                                 "Use Image1")]
     assert idx == sorted(idx)
 
@@ -369,7 +371,7 @@ def test_omni_clip_seconds_bounds():
     assert config_app.omni_clip_seconds(_words(80)) == 10
     assert config_app.omni_clip_seconds("Salut.") == 3
     assert 3 <= config_app.omni_clip_seconds("Un deux trois quatre cinq.", 2.5) <= 10
-    assert config_app.omni_clip_seconds(_words(10), 2.5) == 4       # ceil(10/2.5) (intro 0 s)
+    assert config_app.omni_clip_seconds(_words(10), 2.5) == 5       # ceil(10/2.5 + 0,3) (intro 0 s)
 
 
 # ============================================================ fiche voix
@@ -720,7 +722,10 @@ def test_omni_block_messages_three_forms(monkeypatch, omni_env, err, http_msg, e
         monkeypatch.setattr(providers.requests, "post", lambda *a, _r=resp, **k: _r)
         with pytest.raises(ProviderError) as ei:
             providers.omni_generate_video(cfg, img, "P", out, 5)
-        assert str(ei.value) == expected, (resp.text, str(ei.value))
+        # Refus reconnu → OmniBlockedError (jamais de relance auto) : message FR + consigne.
+        assert isinstance(ei.value, providers.OmniBlockedError)
+        assert str(ei.value).startswith(expected), (resp.text, str(ei.value))
+        assert ei.value.suggestions
 
 
 def test_omni_no_video_without_errors_is_generic_safety(monkeypatch, omni_env):
@@ -796,7 +801,7 @@ def test_real_animation_records_omni_cost(monkeypatch):
     ad_id, _ = _omni_ad(1, dialogues=[_words(10)], voice_profile=VP)
     pipeline.animate_avatar_omni_clips(ProviderConfig(dry_run=False, gemini_api_key="k"), ad_id, "o")
     rows = [r for r in db.cost_summary() if r["service"] == "gemini"]
-    assert rows and rows[0]["qty"] == 4 and rows[0]["usd"] == pytest.approx(0.4)
+    assert rows and rows[0]["qty"] == 5 and rows[0]["usd"] == pytest.approx(0.5)   # ceil(10/2,5 + 0,3)
 
 
 def test_estimate_avatar_omni_and_tier1_warning():
@@ -816,7 +821,7 @@ def test_animate_estimate_uses_real_omni_durations():
         r = c.post(f"/api/avatar-omni/animate/{ad_id}", json={"confirm": True})
         assert r.status_code == 200, r.text
         secs = [config_app.omni_clip_seconds(d, 2.5) for d in dialogues]
-        assert secs == [3, 4, 10, 4]
+        assert secs == [3, 5, 10, 4]   # mots / débit + 0,3 s, 3–10 s (muet : 4 s)
         assert r.json()["seconds_total"] == sum(secs)
         assert r.json()["usd_video"] == round(sum(secs) * 0.10, 2)
         assert r.json()["tier1_warning"] is False

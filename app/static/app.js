@@ -50,10 +50,17 @@ async function srvFetch(url, opts) {
       : "Le serveur ne répond pas — réessaie dans un instant.");
   }
 }
-setInterval(() => {
+// Heartbeat : toutes les 10 s, et dès que la fenêtre redevient visible / reprend le focus (un
+// onglet en arrière-plan peut être ralenti par Chromium : on signale tout de suite qu'on est là).
+function heartbeat() {
   if (typeof srvRestarting !== "undefined" && srvRestarting) return;   // redémarrage volontaire
   srvFetch("/api/health", { cache: "no-store" }).catch(() => {});
-}, 10000);
+}
+setInterval(heartbeat, 10000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") heartbeat();
+});
+window.addEventListener("focus", heartbeat);
 
 const api = async (url, opts) => {
   const r = await srvFetch(url, opts);
@@ -71,7 +78,9 @@ const toast = (msg) => {
 };
 
 // Modale intégrée (remplace confirm()/alert() natifs). Retourne une Promise<boolean>.
-function showModal({ title = "", message = "", html = "", confirmText = "Continuer", cancelText = "Annuler", danger = false } = {}) {
+// `enterConfirms` : false → la touche Entrée NE confirme PAS (dépenses : clic explicite exigé).
+function showModal({ title = "", message = "", html = "", confirmText = "Continuer", cancelText = "Annuler", danger = false,
+                     enterConfirms = true } = {}) {
   return new Promise((resolve) => {
     $("modalTitle").textContent = title;
     // `html` : contenu STATIQUE de confiance (jamais de saisie utilisateur) ; sinon texte échappé.
@@ -98,19 +107,56 @@ function showModal({ title = "", message = "", html = "", confirmText = "Continu
     const onBackdrop = (e) => { if (e.target === overlay) done(false); };
     const onKey = (e) => {
       if (e.key === "Escape") done(false);
-      else if (e.key === "Enter") done(true);
+      else if (e.key === "Enter") {
+        if (enterConfirms) done(true);
+        else e.preventDefault();   // dépense : Entrée ne fait rien, clic explicite exigé
+      }
     };
     okBtn.addEventListener("click", onOk);
     noBtn.addEventListener("click", onNo);
     overlay.addEventListener("mousedown", onBackdrop);
     document.addEventListener("keydown", onKey);
-    okBtn.focus();
+    if (enterConfirms) okBtn.focus();
+    else noBtn.focus();
   });
 }
 
 // Simple message d'info (remplace alert()).
 function alertModal(message, title = "Information") {
   return showModal({ title, message, confirmText: "OK", cancelText: "" });
+}
+
+// Lancements vidéo Avatar IA en cours (« all » ou clip_id) : verrou anti double-clic.
+const _aoLaunching = new Set();
+
+// Confirmation d'une génération VIDÉO PAYANTE : miniature de chaque plan (l'image qui sera animée),
+// durée, modèle et coût total estimé. Entrée ne confirme pas (clic explicite). En simulation
+// (et sans `force`) : aucune modale, on renvoie true. Tout texte passe par esc().
+function confirmPaidVideo({ title = "Génération vidéo — coût réel", clips = [], usd = null, model = "", detail = "",
+                            confirmText = "Générer", force = false } = {}) {
+  const dryRun = currentSettings && currentSettings.dry_run;
+  if (dryRun && !force) return Promise.resolve(true);
+  const list = Array.isArray(clips) ? clips : [];
+  const totalS = list.reduce((a, c) => a + (Number(c && c.seconds) || 0), 0);
+  const cards = list.map((c) => {
+    c = c || {};
+    const sec = Number(c.seconds) || 0;
+    const legend = `Plan ${esc(c.n ?? "?")}${c.label ? " · " + esc(c.label) : ""}${sec ? ` · ~${esc(Math.round(sec * 10) / 10)} s` : ""}`;
+    const img = c.image_url
+      ? `<img src="${esc(c.image_url)}" alt="" loading="lazy">`
+      : `<div class="paid-noimg">⚠ pas d'image</div>`;
+    return `<figure class="paid-card">${img}<figcaption>${legend}</figcaption></figure>`;
+  }).join("");
+  const usdTxt = (usd === null || usd === undefined || isNaN(Number(usd))) ? "?" : Number(usd).toFixed(2);
+  const n = list.length;
+  const summary = `${n} vidéo${n > 1 ? "s" : ""}` + (totalS ? ` · ~${esc(Math.round(totalS))} s` : "") +
+    (model ? ` · ${esc(model)}` : "") + ` — coût total estimé ≈ $${esc(usdTxt)}`;
+  const html =
+    (n ? `<div class="paid-grid">${cards}</div>` : "") +
+    `<p class="paid-summary"><b>${summary}</b></p>` +
+    (detail ? `<p class="paid-detail muted">${esc(detail)}</p>` : "") +
+    `<p class="muted small">Débite tes crédits. Vérifie les images ci-dessus : ce sont elles qui seront animées.</p>`;
+  return showModal({ title, html, confirmText, danger: true, enterConfirms: false });
 }
 
 // ------------------------------------------------ navigation
@@ -177,6 +223,7 @@ async function loadSettings() {
     if (m.key === s.objet_image_model) o.selected = true;
     imgSel.appendChild(o);
   });
+  if ($("nbImageSize")) $("nbImageSize").value = s.nb_image_size === "4K" ? "4K" : "2K";
   // Menu du modèle vidéo « Objet animé » (DoP ; l'animation n'est pas encore branchée).
   const vidSel = $("objetVideoModel");
   vidSel.innerHTML = "";
@@ -362,6 +409,7 @@ $("saveSettings").addEventListener("click", async () => {
     brain_model: $("brainModel").value.trim(),
     cost_mode: $("costModeDefault").value,
     objet_image_model: $("objetImageModel").value,
+    nb_image_size: ($("nbImageSize") && $("nbImageSize").value) || "2K",
     objet_video_model: $("objetVideoModel").value,
     mashup_video_model: ($("mashupVideoModel") && $("mashupVideoModel").value) || "",
     objet_voice_style: ($("objetVoiceStyle") && $("objetVoiceStyle").value) || "",
@@ -1554,6 +1602,16 @@ function renderOverviewBanner(gallery, r, kind, adId) {
   let html = `<div class="ov-line"><span class="ov-cost">💸 Coût réel déjà engagé : <strong>${cost}</strong></span>`;
   if (nEchec > 0) html += `<span class="ov-fail">✗ ${nEchec} plan(s) en échec</span>`;
   html += `</div>`;
+  // Détail du coût réel (zone C : images / retouches / vidéos / relances, archives comprises).
+  const cb = r.cost_breakdown;
+  if (cb && typeof cb === "object") {
+    const part = (k, lab) => {
+      const x = cb[k] || {};
+      return `${lab} ${esc(Number(x.n) || 0)} (${money(x.usd || 0)})`;
+    };
+    html += `<div class="ov-breakdown muted">Coût réel : <strong>${money(cb.usd ?? r.cost_real_usd ?? 0)}</strong> — ` +
+      `${part("images", "images")} · ${part("retouches", "retouches")} · ${part("videos", "vidéos")} · ${part("relances", "relances")}</div>`;
+  }
   if (r.billed_despite_failure)
     html += `<div class="ov-warn">⚠ Des coûts ont pu être facturés MALGRÉ des échecs (certains services facturent l'appel même quand le rendu échoue).</div>`;
   banner.innerHTML = html;
@@ -1561,7 +1619,7 @@ function renderOverviewBanner(gallery, r, kind, adId) {
     const btn = document.createElement("button");
     btn.className = "btn small";
     btn.textContent = "↻ Reprendre les plans en échec";
-    btn.addEventListener("click", () => resumeFailedPlans(kind, adId));
+    btn.addEventListener("click", () => resumeFailedPlans(kind, adId, r.shots || []));
     banner.appendChild(btn);
   }
   gallery.before(banner);
@@ -1570,19 +1628,30 @@ function renderOverviewBanner(gallery, r, kind, adId) {
 // Segment d'URL de l'API par kind de pub (le kind « avatar_omni » est servi sous /api/avatar-omni).
 const KIND_API = { objet: "objet", mashup: "mashup", avatar_omni: "avatar-omni" };
 
-async function resumeFailedPlans(kind, adId) {
-  const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
-    const omniNote = kind === "avatar_omni"
-      ? "\n\nAvatar IA : si l'animation est relancée, Google Omni facture ~0,10 $/s (quota Tier 1 : 10 $ par tranche de 10 min)."
-      : "";
-    const ok = await showModal({
-      title: "Reprendre les plans en échec",
-      message: "Relance UNIQUEMENT les plans en échec (les plans déjà prêts ne sont pas retouchés). Étape payante. Continuer ?" + omniNote,
-      confirmText: "Reprendre", cancelText: "Annuler", danger: true,
-    });
-    if (!ok) return;
-  }
+// Plans → format attendu par confirmPaidVideo.
+function paidClipsFromShots(shots) {
+  return (shots || []).map((s) => ({
+    clip_id: s.clip_id,
+    n: s.n,
+    label: s.variant_label || s.block_title || "",
+    image_url: s.image_url || "",
+    seconds: Number(s.duration_s) || 0,
+  }));
+}
+
+async function resumeFailedPlans(kind, adId, shots = []) {
+  const failed = (shots || []).filter((s) => s.status === "echec" && s.error_kind !== "omni_blocked");
+  const omniNote = kind === "avatar_omni"
+    ? " Avatar IA : si l'animation est relancée, Google Omni facture ~0,10 $/s (quota Tier 1 : 10 $ par tranche de 10 min)."
+    : "";
+  const ok = await confirmPaidVideo({
+    title: "Reprendre les plans en échec — coût réel",
+    clips: paidClipsFromShots(failed),
+    detail: "Relance UNIQUEMENT les plans en échec (les plans déjà prêts ne sont pas retouchés ; un plan sans image " +
+      "repasse d'abord par la génération d'image)." + omniNote,
+    confirmText: "Reprendre",
+  });
+  if (!ok) return;
   const post = (over) =>
     api("/api/" + (KIND_API[kind] || kind) + "/resume/" + adId, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1996,13 +2065,17 @@ $("objAnimateBtn").addEventListener("click", async () => {
   if (!dryRun) {
     if (!(currentSettings && currentSettings.xai_api_key_set))
       return toast("Ajoute ta clé xAI (Grok) dans Réglages.");
+  }
+  {
     const usdVid = (lastObjEstimate && lastObjEstimate.usd_video) || 0;
-    const ok = await showModal({
+    const toAnimate = (objShots || []).filter((s) => (s.status === "valide" || s.status === "echec") && s.image_url);
+    const ok = await confirmPaidVideo({
       title: "Animer — coût Grok (réel)",
-      message: `Cette étape anime les plans VALIDÉS (image → vidéo Grok Imagine). Grok facture à la seconde (~$4,20/min à 720p) — estimé ≈ $${usdVid.toFixed(2)} pour tous les plans. Continuer ?`,
+      clips: paidClipsFromShots(toAnimate),
+      usd: usdVid,
+      model: "Grok Imagine",
+      detail: "Anime les plans VALIDÉS (image → vidéo Grok Imagine). Grok facture à la seconde (~$4,20/min à 720p).",
       confirmText: "Animer",
-      cancelText: "Annuler",
-      danger: true,
     });
     if (!ok) return;
   }
@@ -2213,6 +2286,11 @@ function libAdHeader(ad, asset, hasFiles) {
     hasFiles && ad.id != null
       ? `<a class="btn small dl-all" href="/api/ads/${ad.id}/download?asset=${asset}" ` +
         `title="Toutes les pièces de la pub dans un ZIP, numérotées (1, 2, 3…)">⬇ Télécharger tout (ZIP)</a>` +
+        // Débruitage optionnel (vidéo / audio) : ajoute &denoise=1 au lien du ZIP (copies seulement).
+        (asset === "video" || asset === "audio"
+          ? ` <label class="dl-denoise" title="Appliqué sur des copies dans le ZIP, les fichiers d'origine ne sont jamais modifiés">` +
+            `<input type="checkbox" class="dl-denoise-cb"> Débruiter l'audio (grésillements)</label>`
+          : "") +
         // agent C : export des clips validés dans le dossier du client (outils_c.js)
         (asset === "video" ? ` <button class="btn small btn-export-pub" type="button" data-ad-id="${ad.id}">📤 Exporter la pub</button>` : "")
       : "";
@@ -2267,6 +2345,17 @@ async function openAdInEditor(kind, adId) {
 document.addEventListener("click", (ev) => {
   const b = ev.target.closest && ev.target.closest(".btn-open-editor");
   if (b) openAdInEditor(b.dataset.kind, Number(b.dataset.adId));
+});
+
+// Case « Débruiter l'audio » : ajoute / retire &denoise=1 sur le lien « Télécharger tout » voisin.
+document.addEventListener("change", (ev) => {
+  const cb = ev.target;
+  if (!cb || !cb.classList || !cb.classList.contains("dl-denoise-cb")) return;
+  const head = cb.closest(".lib-ad-head");
+  const a = head && head.querySelector(".dl-all");
+  if (!a) return;
+  const href = a.getAttribute("href").replace(/&denoise=1\b/g, "");
+  a.setAttribute("href", cb.checked ? href + "&denoise=1" : href);
 });
 
 function renderClipAds(root, ads, emptyMsg) {
@@ -2385,12 +2474,15 @@ function bindSpeechCut(div, c) {
   if (!btn) return;
   const state = div.querySelector(".speech-state");
   btn.addEventListener("click", async () => {
-    const dryRun = currentSettings && currentSettings.dry_run;
-    if (!dryRun) {
-      const ok = await showModal({
+    {
+      const sec = (Number(c.duration_s) || 0) + 1;
+      const ok = await confirmPaidVideo({
         title: "Régénérer (+1 s) — coût Grok (réel)",
-        message: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $). Continuer ?",
-        confirmText: "Régénérer", cancelText: "Annuler", danger: true,
+        clips: [{ clip_id: c.id, n: c.scene_n, label: "+1 s", image_url: c.image_url || "", seconds: sec > 1 ? sec : 0 }],
+        usd: sec > 1 ? sec * 0.14 + 0.01 : null,
+        model: "Grok Imagine",
+        detail: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (Grok, ~0,14 $/s + 0,01 $ — environ 1 à 1,80 $).",
+        confirmText: "Régénérer",
       });
       if (!ok) return;
     }
@@ -3117,8 +3209,11 @@ $("mashPlanBtn").addEventListener("click", async () => {
   }
 });
 
+// Dernière estimation Mashup (coût vidéo des confirmations « Tester ce plan » / « Animer »).
+let lastMashEstimate = null;
 function renderMashPlan(shots, est) {
   mashLastEstimate = est || null;
+  if (est) lastMashEstimate = est;
   const list = $("mashPlanList");
   list.innerHTML = "";
   shots.forEach((s) => {
@@ -3137,6 +3232,15 @@ function renderMashPlan(shots, est) {
   }
   if (window.renderPubEstimate) window.renderPubEstimate("mashup", shots, $("mashEstimate"));  // agent C
   $("mashPlanArea").classList.remove("hidden");
+}
+
+// Coût vidéo estimé de plans Mashup (taux à la seconde de la dernière estimation) ; null si inconnu.
+function mashVideoUsd(shots) {
+  const est = lastMashEstimate || mashLastEstimate;
+  const rate = est && Number(est.cout_kling_par_seconde_usd);
+  if (!rate) return null;
+  const secs = (shots || []).reduce((t, s) => t + (Number(s.duration_s) || Number(est.clip_seconds) || 5), 0);
+  return Math.round(secs * rate * 100) / 100;
 }
 
 $("mashGenImagesBtn").addEventListener("click", async () => {
@@ -3334,15 +3438,15 @@ function mashShotCard(s) {
   card.querySelector(".btn-test").addEventListener("click", async () => {
     if (!["valide", "echec", "pret"].includes(s.status))
       return toast("Valide ce plan avant de le tester.");
-    const dryRun = currentSettings && currentSettings.dry_run;
-    if (!dryRun) {
-      const ok = await showModal({
-        title: "Tester ce plan",
-        message: "Anime UNIQUEMENT ce plan (payant). Continuer ?",
-        confirmText: "Tester", cancelText: "Annuler", danger: true,
-      });
-      if (!ok) return;
-    }
+    const ok = await confirmPaidVideo({
+      title: "Tester ce plan — coût réel",
+      clips: paidClipsFromShots([s]),
+      usd: mashVideoUsd([s]),
+      model: (currentSettings && currentSettings.mashup_video_model) || "",
+      detail: "Anime UNIQUEMENT ce plan (payant, à la seconde).",
+      confirmText: "Tester",
+    });
+    if (!ok) return;
     try {
       const t0 = traceNow();
       const res = await api("/api/mashup/animate/" + mashAdId, {
@@ -3390,12 +3494,15 @@ $("mashConsistencyBtn").addEventListener("click", async () => {
 
 $("mashAnimateBtn").addEventListener("click", async () => {
   if (!mashAdId) return toast("Génère et valide d'abord tes plans.");
-  const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
-    const ok = await showModal({
-      title: "Animer les plans validés",
-      message: "Anime tous les plans validés avec le modèle vidéo choisi (payant, à la seconde). Continuer ?",
-      confirmText: "Animer", cancelText: "Annuler", danger: true,
+  {
+    const toAnimate = (mashShots || []).filter((s) => (s.status === "valide" || s.status === "echec") && s.image_url);
+    const ok = await confirmPaidVideo({
+      title: "Animer les plans validés — coût réel",
+      clips: paidClipsFromShots(toAnimate),
+      usd: mashVideoUsd(toAnimate),
+      model: (currentSettings && currentSettings.mashup_video_model) || "",
+      detail: "Anime tous les plans validés avec le modèle vidéo choisi (payant, à la seconde).",
+      confirmText: "Animer",
     });
     if (!ok) return;
   }
@@ -3533,6 +3640,21 @@ function aoFillVoiceSelects() {
   });
   aoFillElSelects();
 }
+
+// Timbre « calme » (anti-saturation) : pré-remplit la Précision libre de la même fiche si elle est vide
+// (texte `default_extra` fourni par le serveur, sinon valeur par défaut du contrat).
+const AO_CALM_DEFAULT_EXTRA = "soft-spoken, natural volume, never shouting, clean undistorted lav mic audio, neutral French accent";
+document.addEventListener("change", (ev) => {
+  const sel = ev.target;
+  if (!(sel instanceof HTMLSelectElement) || !/^ao(E?V\d?)Tone$/.test(sel.id || "")) return;
+  if (sel.value !== "calme") return;
+  const extra = $(sel.id.replace(/Tone$/, "Extra"));
+  if (!extra || extra.value.trim()) return;
+  const styles = (currentSettings && currentSettings.objet_voice_styles) || [];
+  const item = styles.find((m) => m && m.key === "calme");
+  extra.value = (item && item.default_extra) || AO_CALM_DEFAULT_EXTRA;
+  extra.dispatchEvent(new Event("input", { bubbles: true }));
+});
 
 // ---- Voix ElevenLabs (pipeline v2) : voice ID par personnage, sauvé dans voice_profile.voice_id ----
 let aoElVoices = null;        // cache GET /api/elevenlabs/voices
@@ -4479,8 +4601,62 @@ async function loadAoGallery(adId) {
     prevBlock = s.block_n || null;
     g.appendChild(aoShotCard(s));
   });
+  aoRenderVariants(r);
   aoApplyAdState(r);
   if (typeof kfAutoFacePanel === "function") kfAutoFacePanel(adId);   // keyframes.js
+}
+
+// ---- Variantes de hook : une ligne par plan `variant` (miniature, statut, « Générer la variante ») ----
+function aoVariantName(s) {
+  const raw = String(s.variant_label || "variante").trim();
+  const m = raw.match(/^hook\s*_?\s*(\d+)$/i);
+  return m ? `HOOK ${m[1]}` : raw.toUpperCase();
+}
+
+function aoRenderVariants(ad) {
+  const box = $("aoVariantsBox");
+  const list = $("aoVariantsList");
+  if (!box || !list) return;
+  const variants = ((ad && ad.shots) || []).filter((s) => s.variant);
+  box.classList.toggle("hidden", !variants.length);
+  list.innerHTML = "";
+  variants.forEach((s) => {
+    const row = document.createElement("div");
+    row.className = "ao-variant-row";
+    const name = aoVariantName(s);
+    const kfOk = aoKfOk(s);
+    const voiceOk = !aoIsV2(ad) || aoVoiceOkShot(s);
+    const status = s.busy ? "⏳ en cours"
+      : s.status === "pret" ? "✓ vidéo générée"
+      : s.error_kind === "omni_blocked" ? "🚫 refusée par Google"
+      : s.status === "echec" ? "✗ échec"
+      : !s.image_url ? "pas d'image"
+      : kfOk ? "image validée" : "image à valider";
+    const thumb = s.image_url
+      ? `<img class="ao-variant-thumb" src="${esc(s.image_url)}" alt="${esc(name)}" loading="lazy">`
+      : `<div class="ao-variant-thumb empty">Pas d'image</div>`;
+    let action;
+    if (!s.image_url) {
+      action = `<button type="button" class="btn small ao-variant-goto">↓ Voir la carte du plan</button>`;
+    } else {
+      const can = kfOk && voiceOk && !s.busy;
+      const why = s.busy ? "Génération déjà en cours" : !kfOk ? "Valide d'abord l'image" : !voiceOk ? "Valide d'abord la voix de ce bloc" : "";
+      action = `<button type="button" class="btn small primary ao-variant-gen"${can ? "" : " disabled"}` +
+        (why ? ` title="${esc(why)}"` : ` title="Anime uniquement cette variante (hors vidéo assemblée) — confirmation avec l'image et le coût"`) +
+        `>🎬 Générer la variante ${esc(name)}</button>`;
+    }
+    row.innerHTML = thumb +
+      `<div class="ao-variant-info"><b>${esc(name)}</b> <span class="muted small">· Plan ${esc(s.n)} · ${esc(status)}</span></div>` +
+      action;
+    const gen = row.querySelector(".ao-variant-gen");
+    if (gen) gen.addEventListener("click", (ev) => aoLaunchAnimation([s], s.clip_id, ev.currentTarget));
+    const go = row.querySelector(".ao-variant-goto");
+    if (go) go.addEventListener("click", () => {
+      const card = document.querySelector(`#aoGallery .obj-shot[data-clip="${s.clip_id}"]`);
+      if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    list.appendChild(row);
+  });
 }
 
 // ---- Étape Keyframes : état par plan + verrou global avant toute vidéo ----
@@ -4531,7 +4707,7 @@ function aoUpdateAnimGate() {
     if (aoUsesElVoices() && !aoVoicesOk) missing.push("les voix (étape 4b, « ✅ Valider les voix »)");
     if (!aoKeyframesOk) missing.push("les keyframes (« ✅ Valider les keyframes »)");
     if (btn) {
-      btn.disabled = missing.length > 0;
+      btn.disabled = missing.length > 0 || _aoLaunching.has("all");
       btn.textContent = "🎬 Générer les vidéos (1 appel par bloc)";
     }
     if (gate) {
@@ -4543,7 +4719,7 @@ function aoUpdateAnimGate() {
     return;
   }
   if (btn) btn.textContent = "🎬 Animer les plans validés";
-  if (btn) btn.disabled = !aoKeyframesOk;
+  if (btn) btn.disabled = !aoKeyframesOk || _aoLaunching.has("all");
   if (gate) {
     gate.textContent = aoKeyframesOk ? ""
       : "🔒 Génération vidéo verrouillée : vérifie chaque keyframe puis clique « ✅ Valider les keyframes ».";
@@ -4559,6 +4735,7 @@ async function aoRefreshCard(card, clipId) {
   const updated = (ad.shots || []).find((x) => x.clip_id === clipId);
   if (updated) card.replaceWith(aoShotCard(updated));
   else card.classList.remove("busy");
+  aoRenderVariants(ad);   // statut / validation d'une variante de hook a pu changer
   if (typeof kfAutoFacePanel === "function") kfAutoFacePanel(aoAdId);   // réf visage auto créée ?
 }
 
@@ -4617,7 +4794,7 @@ async function aoValidateAllKeyframes() {
 
 // Plans candidats à l'animation = comme le backend : keyframe validé + départ dispo + valide/echec.
 function aoCandidates() {
-  return aoGalleryShots.filter((s) => !s.excluded && aoKfOk(s) && aoHasStart(s) &&
+  return aoGalleryShots.filter((s) => !s.excluded && !s.busy && s.error_kind !== "omni_blocked" && aoKfOk(s) && aoHasStart(s) &&
     (s.status === "valide" || s.status === "echec"));
 }
 
@@ -4767,7 +4944,23 @@ function aoShotCard(s) {
   const err = s.image_url && s.error ? `<div class="ao-err" title="${esc(s.error)}">⚠ ${esc(prettyError(s.error))}</div>` : "";
   const v2 = aoIsV2();
   // Plan exclu : pas de test, SAUF une variante de hook (exclue par défaut, générée à la demande).
-  const canTest = (!s.excluded || s.variant) && kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s));
+  const canTest = (!s.excluded || s.variant) && kfOk && aoHasStart(s) && (!v2 || aoVoiceOkShot(s)) && !s.busy;
+  // Verrou serveur : ce plan est déjà en cours de génération (aucune relance possible en parallèle).
+  const busyBadge = s.busy ? ` <span class="badge busy" title="Génération en cours pour ce plan — attends la fin">⏳ en cours</span>` : "";
+  // Refus Google (Omni) : raison renvoyée par Google + suggestions de correction (remplissent le champ).
+  let ed = s.error_detail;
+  if (typeof ed === "string") { try { ed = JSON.parse(ed); } catch (_) { ed = {}; } }
+  if (!ed || typeof ed !== "object") ed = {};
+  const sugg = Array.isArray(ed.suggestions) ? ed.suggestions : [];
+  const blockedBox = s.error_kind === "omni_blocked"
+    ? `<div class="ao-blocked"><div class="ao-blocked-title">🚫 Refusé par Google</div>` +
+      (ed.google_reason ? `<div class="ao-blocked-reason">Raison : ${esc(ed.google_reason)}</div>` : "") +
+      (sugg.length
+        ? `<div class="ao-blocked-sugg"><span class="muted small">Suggestions (remplissent la correction, puis « Regénérer ») :</span> ` +
+          sugg.map((t, i) => `<button type="button" class="btn small ao-sugg" data-i="${i}">${esc(t)}</button>`).join(" ") + `</div>`
+        : "") +
+      `<div class="muted small">Ce plan est ignoré par « Générer les vidéos » tant que l'image ou le dialogue n'a pas changé.</div></div>`
+    : "";
   // Variante de hook (HOOK 2 / HOOK 3…) : générée À LA DEMANDE, jamais dans le montage principal.
   const variantBadge = s.variant
     ? ` <span class="badge" title="Variante du hook : exportée avec le suffixe _${esc(s.variant_label || "variante")}, hors vidéo assemblée">` +
@@ -4777,13 +4970,14 @@ function aoShotCard(s) {
   card.innerHTML =
     `<div class="kf-thumb">${thumb}${srcBadge}${v2 ? aoPlancheCompareHtml(s) : ""}</div>` +
     `<div class="body">` +
-    `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}${variantBadge}</div>` +
+    `<div class="head"><span class="n">${aoPlanTitle(s)}</span>${badge}${busyBadge}${variantBadge}</div>` +
     `<div class="ao-meta"><span class="ao-dur">⏱️ ~${esc(s.duration_s || "?")} s</span>${targetTxt}${clip}</div>` +
     (Array.isArray(s.refs_sent) && s.refs_sent.length
       ? `<div class="muted small" title="Réfs réellement envoyées à Nano Banana, dans l'ordre">📎 Réfs envoyées : ` +
         `${esc(s.refs_sent.map((k) => (k === "ancre" ? "Ancre" : AO_REF_LABEL[k] || "sans type")).join(" › "))}</div>`
       : "") +
     err +
+    blockedBox +
     (s.direction ? `<div class="ao-direction" title="Mise en scène du client">🎬 ${esc(s.direction)}</div>` : "") +
     (isClient
       ? `<div class="lbl">🖼️ Prompt image — ce qui change dans ce plan (la bible est ajoutée automatiquement)</div>` +
@@ -4816,6 +5010,7 @@ function aoShotCard(s) {
     `<button class="btn btn-upload" title="Remplacer le keyframe par ta propre image (PNG, JPG, WebP)">Uploader mon image</button>` +
     `<button class="btn small btn-test"${canTest ? "" : " disabled"} title="${canTest
       ? (s.variant ? "Anime uniquement cette variante (hors vidéo assemblée)" : "Anime uniquement ce plan")
+      : s.busy ? "Ce plan est déjà en cours de génération"
       : v2 ? "Valide d'abord ce keyframe et la voix de ce bloc" : "Valide d'abord ce keyframe"}">${testLabel}</button>` +
     `</div></div>`;
 
@@ -4826,7 +5021,16 @@ function aoShotCard(s) {
   // keyframes.js : versions du keyframe, retouche ciblée, miroir / effacer / recadrer.
   if (typeof kfTools === "function") kfTools(card.querySelector(".body"), s, {
     onChange: () => aoRefreshCard(card, s.clip_id),
+    sameFraming: !s.is_anchor,   // « 📐 Même cadrage que le plan 1 » (keyframes.js, zone A)
   });
+  // Suggestions du refus Google → champ correction de la carte.
+  card.querySelectorAll(".ao-sugg").forEach((b) => b.addEventListener("click", () => {
+    const corr = card.querySelector(".kf-corr");
+    if (!corr) return;
+    corr.value = String(sugg[Number(b.dataset.i)] || "").slice(0, 500);
+    corr.focus();
+    toast("Correction remplie — clique « Regénérer » pour l'appliquer.");
+  }));
   aoBindPlanOptions(card, s);   // exclure / supprimer / voix hors champ
 
   // Dialogue (verbatim) enregistré à la perte de focus ; la durée Omni est recalculée côté serveur.
@@ -4936,9 +5140,10 @@ function aoShotCard(s) {
     }
   });
 
-  card.querySelector(".btn-test").addEventListener("click", () => {
+  card.querySelector(".btn-test").addEventListener("click", (ev) => {
+    if (s.busy) return toast("Ce plan est déjà en cours de génération.");
     if (!canTest) return toast(v2 ? "Valide d'abord ce keyframe et la voix de ce bloc." : "Valide d'abord ce keyframe.");
-    aoLaunchAnimation([s], s.clip_id);
+    aoLaunchAnimation([s], s.clip_id, ev.currentTarget);
   });
 
   return card;
@@ -5021,26 +5226,29 @@ $("aoResolution").addEventListener("change", aoRenderAnimEstimate);
 async function aoPostAnimate(adId, shots, clipId, opt = {}) {
   if (opt.v2) return aoPostAnimateV2(adId, shots, clipId, opt);
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
-    if (!(currentSettings && currentSettings.gemini_api_key_set)) {
-      toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
-      return null;
-    }
+  if (!dryRun && !(currentSettings && currentSettings.gemini_api_key_set)) {
+    toast("Ajoute ta clé API Google (Gemini) dans Réglages.");
+    return null;
+  }
+  {
     const secs = aoSumSeconds(shots);
     const usdVid = secs * aoRate();
-    const tier1 = usdVid > AO_TIER1_USD ? `\n\n⏳ ${aoTier1Text(usdVid)}` : "";
+    const tier1 = usdVid > AO_TIER1_USD ? ` ⏳ ${aoTier1Text(usdVid)}` : "";
     const quota = aoQuotaText(shots);
-    const reqLine = `\n\n🚦 ${aoRequests(shots)} requête(s) Google (1 par tour) — quota ${aoDailyLimit()}/jour.` +
-      (quota ? `\n⚠ ${quota}` : "");
+    const reqLine = ` 🚦 ${aoRequests(shots)} requête(s) Google (1 par tour) — quota ${aoDailyLimit()}/jour.` +
+      (quota ? ` ⚠ ${quota}` : "");
     const resLine = opt.resolution ? ` en ${opt.resolution}` : "";
-    const ok = await showModal({
+    const ok = await confirmPaidVideo({
       title: opt.relaunch ? "Relancer la vidéo seule — coût Google Omni (réel)"
         : clipId ? "Tester ce plan — coût Google Omni (réel)" : "Animer — coût Google Omni (réel)",
-      message:
+      clips: paidClipsFromShots(shots),
+      usd: usdVid,
+      model: "Google Omni" + resLine,
+      detail:
         (opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce plan (même keyframe, aucune nouvelle image)"
-          : clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) + resLine +
-        ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s) — estimé ≈ ${usd(usdVid)} pour ~${secs} s. Continuer ?` + tier1 + reqLine,
-      confirmText: opt.relaunch ? "Relancer" : clipId ? "Tester" : "Animer", cancelText: "Annuler", danger: true,
+          : clipId ? "Anime UNIQUEMENT ce plan" : `Anime ${shots.length} plan(s) validé(s)`) +
+        ` (vidéo + voix Google Omni, ~${usd(aoRate())}/s).` + tier1 + reqLine,
+      confirmText: opt.relaunch ? "Relancer" : clipId ? "Tester" : "Animer",
     });
     if (!ok) return null;
   }
@@ -5069,7 +5277,29 @@ async function aoPostAnimate(adId, shots, clipId, opt = {}) {
 
 // Lance l'animation Omni (tous les candidats, ou un seul plan si clipId) — modale de coût AVANT
 // l'appel payant (estimation = Σ durées Omni × $/s, même formule que le backend), puis 402 plafond.
-async function aoLaunchAnimation(shots, clipId) {
+// Anti double-clic : un lancement à la fois par cible (« all » ou clip_id) ; le bouton déclencheur
+// reste désactivé pendant TOUT l'appel (aperçu + confirmation + POST). (_aoLaunching : en tête.)
+async function aoLaunchAnimation(shots, clipId, btn = null) {
+  const key = clipId ? String(clipId) : "all";
+  if (_aoLaunching.has(key) || (key !== "all" && _aoLaunching.has("all"))) {
+    toast("Lancement déjà en cours…");
+    return;
+  }
+  const trigger = btn || (clipId ? null : $("aoAnimateBtn"));
+  _aoLaunching.add(key);
+  if (trigger) trigger.disabled = true;
+  try {
+    await aoLaunchAnimationInner(shots, clipId);
+  } finally {
+    _aoLaunching.delete(key);
+    if (trigger) {
+      if (trigger === $("aoAnimateBtn")) aoUpdateAnimGate();
+      else trigger.disabled = false;
+    }
+  }
+}
+
+async function aoLaunchAnimationInner(shots, clipId) {
   // Galerie RELUE juste avant la modale : statuts et durées à jour (validations faites depuis,
   // régénérations…) → l'estimation affichée correspond à ce que le backend va réellement animer.
   let v2 = false;
@@ -5153,7 +5383,9 @@ function aoIsSpoken(s) {
 // Blocs à générer en vidéo (v2) : keyframe + voix validés, pas encore prêts.
 function aoV2Candidates() {
   // Plans exclus (variantes de hook non demandées comprises) : hors run global (cf. backend).
-  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret" && !s.excluded);
+  // Plans en cours de génération (s.busy, verrou serveur) ou refusés par Google : hors run global aussi.
+  return aoGalleryShots.filter((s) => aoKfOk(s) && aoVoiceOkShot(s) && s.status !== "pret" && !s.excluded &&
+    !s.busy && s.error_kind !== "omni_blocked");
 }
 
 function aoSpeakerLabel(s) {
@@ -5405,6 +5637,18 @@ function aoRenderOmniOptions(ad) {
   // Découpage en tours : ancien pipeline seulement ; chaîne voix identique : v2 seulement.
   $("aoOmniAutoTurns").parentElement.classList.toggle("hidden", aoIsV2(ad));
   $("aoOmniVoiceChain").parentElement.classList.toggle("hidden", !aoIsV2(ad));
+  // Encart « Voix entre les plans » : ce que Google permet (ou non) pour garder la même voix.
+  if (!$("aoOmniVoiceNote")) {
+    const note = document.createElement("div");
+    note.id = "aoOmniVoiceNote";
+    note.className = "ao-voice-note muted small";
+    note.innerHTML =
+      "🎙️ <b>Voix entre les plans</b> — Google ne permet pas de fixer une voix (pas de voix de référence, pas de seed ; " +
+      "l'audio d'une vidéo de référence est ignoré). Seule la chaîne « Voix identique » garde la voix (cadrage parfois " +
+      "moins fidèle). Sans chaîne : la fiche voix identique sur chaque plan limite les écarts, mais la voix peut varier. " +
+      `<a href="https://ai.google.dev/gemini-api/docs/omni" target="_blank" rel="noopener">Documentation Google Omni</a>`;
+    box.appendChild(note);
+  }
 }
 
 if ($("aoOmniStartFrameOnly")) $("aoOmniStartFrameOnly").addEventListener("change", () =>
@@ -5479,54 +5723,132 @@ function aoVideoKeyOk(model) {
   return s.xai_api_key_set ? "" : "Ajoute ta clé xAI (Grok) dans Réglages.";
 }
 
-// v2 : modale de coût (GET /video/estimate) puis POST /video/animate (+ clip_id) ; 402 plafond.
+// v2 : aperçu serveur (POST /video/preview : plans réellement facturés + images + total) →
+// confirmPaidVideo → POST /video/animate avec `expected_clip_ids` (le serveur refuse en 409 si la
+// sélection a changé entre-temps : on relance l'aperçu). Aperçu absent (404, ancien serveur) →
+// repli sur GET /video/estimate. 402 plafond → confirmation explicite du dépassement.
+async function aoVideoPreview(adId, clipId, resolution) {
+  let r;
+  try {
+    r = await srvFetch(AO_API + "/video/preview/" + adId, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({}, clipId ? { clip_id: clipId } : {}, resolution ? { resolution } : {})),
+    });
+  } catch (e) {
+    return { error: e.message };
+  }
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 404 || r.status === 405) {
+    // Route inconnue (« Not Found ») = serveur sans aperçu → repli. Sinon (pub introuvable…) : erreur.
+    const d = detailToMessage(data.detail);
+    if (!d || /^not found$/i.test(d) || r.status === 405) return { unsupported: true };
+    return { error: d };
+  }
+  if (!r.ok) return { error: detailToMessage(data.detail) || "Aperçu du coût indisponible — réessaie." };
+  return { preview: data };
+}
+
+// Plans ignorés par l'aperçu → une ligne lisible (« en cours : 2, 3 · déjà prêts : 1 … »).
+// Texte BRUT (échappé par l'appelant : confirmPaidVideo / toast).
+function aoSkippedText(p) {
+  const sk = (p && p.skipped) || {};
+  const parts = [];
+  const add = (k, lab) => {
+    const l = Array.isArray(sk[k]) ? sk[k] : [];
+    if (l.length) parts.push(`${lab} : plan${l.length > 1 ? "s" : ""} ${l.map((x) => String(x)).join(", ")}`);
+  };
+  add("busy", "en cours");
+  add("done", "déjà prêts");
+  add("blocked", "refusés par Google");
+  add("excluded", "exclus");
+  let txt = parts.length ? "Plans ignorés — " + parts.join(" · ") + "." : "";
+  const billed = Number(p && p.already_billed_usd) || 0;
+  if (billed > 0) txt += (txt ? " " : "") + `Déjà facturé sur cette pub : ${usd(billed)}.`;
+  return txt;
+}
+
 async function aoPostAnimateV2(adId, shots, clipId, opt = {}) {
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
-    let e = {};
-    try { e = await api(AO_API + "/video/estimate/" + adId); } catch (_) { /* estimation absente */ }
-    const keyMsg = aoVideoKeyOk(e.video_model || (aoAdState && aoAdState.video_model) || "grok");
-    if (keyMsg) { toast(keyMsg); return null; }
-    let usdLine;
-    if (clipId) {
-      const s = shots[0] || {};
-      const secs = Number(s.clip_seconds) || 0;
-      const part = Number(e.seconds_total) > 0 && secs ? (Number(e.usd_video) || 0) * secs / Number(e.seconds_total) : null;
-      usdLine = part != null ? `estimé ≈ ${usd(part)} pour ${secs} s` : "coût d'un clip";
-    } else {
-      usdLine = `estimé ≈ ${usd(e.usd_video)} de vidéo (${usd(e.usd_total)} voix comprises) pour ~${Math.round(Number(e.seconds_total) || 0)} s`;
-    }
-    const model = AO_VIDEO_MODEL_LABEL[e.video_model] || e.video_model || "modèle vidéo";
-    const ok = await showModal({
-      title: opt.relaunch ? "Relancer la vidéo — coût réel" : clipId ? "Tester ce plan — coût réel" : "Générer les vidéos — coût réel",
-      message: (opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce bloc (même keyframe, même voix)"
-        : clipId ? "Génère UNIQUEMENT la vidéo de ce bloc" : `Génère ${shots.length} vidéo(s) (1 appel par bloc)`) +
-        ` avec ${model} — ${usdLine}. Continuer ?`,
-      confirmText: opt.relaunch ? "Relancer" : clipId ? "Tester" : "Générer", cancelText: "Annuler", danger: true,
-    });
-    if (!ok) return null;
-  }
-  const post = (over) =>
+  const title = opt.relaunch ? "Relancer la vidéo — coût réel" : clipId ? "Tester ce plan — coût réel" : "Générer les vidéos — coût réel";
+  const confirmText = opt.relaunch ? "Relancer" : clipId ? "Tester" : "Générer";
+  const intro = opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce bloc (même keyframe, même voix)."
+    : clipId ? "Génère UNIQUEMENT la vidéo de ce bloc." : "1 appel par bloc.";
+  const post = (over, expected) =>
     api(AO_API + "/video/animate/" + adId, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(Object.assign(
         { confirm: true, confirm_over_cap: !!over },
         clipId ? { clip_id: clipId } : {},
-        opt.resolution ? { resolution: opt.resolution } : {}
+        opt.resolution ? { resolution: opt.resolution } : {},
+        Array.isArray(expected) ? { expected_clip_ids: expected } : {}
       )),
     });
-  try {
-    return await post(false);
-  } catch (e) {
-    if (!/plafond/i.test(e.message)) { toast(e.message); return null; }
-    const ok = await showModal({
-      title: "⚠ Dépassement du plafond de dépense",
-      message: e.message + "\n\nConfirmer et générer malgré le plafond ?",
-      confirmText: "Dépasser et générer", cancelText: "Annuler", danger: true,
-    });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // 1) Ce qui sera réellement facturé (aperçu serveur), sinon ancienne estimation.
+    const pv = await aoVideoPreview(adId, clipId, opt.resolution);
+    if (pv.error) { toast(pv.error); return null; }
+    let expected = null;
+    let ok;
+    if (pv.preview && (pv.preview.clips || []).length) {
+      const p = pv.preview;
+      const keyMsg = dryRun ? "" : aoVideoKeyOk((aoAdState && aoAdState.video_model) || p.model || "grok");
+      if (keyMsg) { toast(keyMsg); return null; }
+      expected = p.clips.map((c) => c.clip_id);
+      ok = await confirmPaidVideo({
+        title, confirmText,
+        clips: p.clips,
+        usd: p.usd_total,
+        model: AO_VIDEO_MODEL_LABEL[p.model] || p.model || "",
+        detail: [intro, aoSkippedText(p)].filter(Boolean).join(" "),
+      });
+    } else if (pv.preview && !clipId) {
+      // Aperçu vide : rien à facturer (tout est prêt, en cours, refusé ou exclu).
+      toast("Aucun bloc à générer. " + aoSkippedText(pv.preview));
+      return null;
+    } else {
+      // Repli (serveur sans aperçu, ou re-test / relance d'un bloc déjà prêt — le serveur refuse
+      // lui-même en 409 un bloc en cours) : estimation locale.
+      let e = {};
+      try { e = await api(AO_API + "/video/estimate/" + adId); } catch (_) { /* estimation absente */ }
+      const keyMsg = dryRun ? "" : aoVideoKeyOk(e.video_model || (aoAdState && aoAdState.video_model) || "grok");
+      if (keyMsg) { toast(keyMsg); return null; }
+      let usdVal = null;
+      if (clipId) {
+        const s = shots[0] || {};
+        const secs = Number(s.clip_seconds) || Number(s.duration_s) || 0;
+        if (Number(e.seconds_total) > 0 && secs) usdVal = (Number(e.usd_video) || 0) * secs / Number(e.seconds_total);
+      } else if (e.usd_total != null) {
+        usdVal = Number(e.usd_total);
+      }
+      ok = await confirmPaidVideo({
+        title, confirmText,
+        clips: paidClipsFromShots(shots).map((c, i) => Object.assign(c, { seconds: Number(shots[i].clip_seconds) || c.seconds })),
+        usd: usdVal,
+        model: AO_VIDEO_MODEL_LABEL[e.video_model] || e.video_model || "",
+        detail: intro,
+      });
+    }
     if (!ok) return null;
-    try { return await post(true); } catch (e2) { toast(e2.message); return null; }
+    // 2) Lancement (avec la sélection confirmée).
+    try {
+      return await post(false, expected);
+    } catch (e) {
+      if (expected && /s[ée]lection a chang/i.test(e.message)) {
+        toast("La sélection a changé depuis l'aperçu — nouvelle confirmation…");
+        continue;   // relance l'aperçu
+      }
+      if (!/plafond/i.test(e.message)) { toast(e.message); return null; }
+      const over = await showModal({
+        title: "⚠ Dépassement du plafond de dépense",
+        message: e.message + "\n\nConfirmer et générer malgré le plafond ?",
+        confirmText: "Dépasser et générer", cancelText: "Annuler", danger: true, enterConfirms: false,
+      });
+      if (!over) return null;
+      try { return await post(true, expected); } catch (e2) { toast(e2.message); return null; }
+    }
   }
+  toast("La sélection change sans cesse — réessaie dans un instant.");
+  return null;
 }
 
 function aoRenderFinal(ad) {

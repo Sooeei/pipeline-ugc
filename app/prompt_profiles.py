@@ -226,6 +226,8 @@ PRODUCT_SHEET_LABEL = "PRODUCT:"
 # Toute ligne qui commence par « PRODUCT: » ou « PRODUCT (match exactly): » (fiche produit client).
 _PRODUCT_SHEET_LINE_RE = re.compile(r"^\s*PRODUCT\b[^:\n]{0,40}:")
 
+# Consigne de format par défaut (2K) — gardée pour compatibilité ; la taille réelle vient du
+# réglage « nb_image_size » via nb_output_format(size).
 NB_OUTPUT_FORMAT = "Output a vertical 9:16 (2K) image."
 # Start frames (anglais, collés tels quels) :
 NB_GROUNDING = "The object rests on a real surface with a soft contact shadow, never floating."
@@ -247,16 +249,18 @@ NANO_BANANA_PRO = ModelProfile(
     block_order=NB_BLOCK_ORDER,
     anti_defects=(NB_GROUNDING, NB_NO_FOREIGN_TEXT_REF1),
     limits={
-        "usd_per_image": 0.134,               # 1K/2K = 1120 tokens × 0,00012 $ (OpenRouter)
-        "usd_per_image_4k": 0.24,             # 4K = 2000 tokens
+        "usd_per_image": 0.134,               # 2K (défaut de l'app) = 1120 tokens × 0,00012 $ (OpenRouter)
+        "usd_per_image_4k": 0.24,             # 4K = 2000 tokens × 0,00012 $
         "max_ref_images": 14,                 # total accepté par Google
         "max_object_refs_hifi": 6,            # objets reproduits en haute fidélité
         "max_character_refs": 5,              # personnes / persos (cohérence)
         "max_style_refs": 3,
-        "sizes": ("1K", "2K", "4K"),          # l'app demande du 1K
+        # Tailles proposées par l'app : 2K (défaut) ou 4K, réglage « nb_image_size »
+        # (config_app.NB_IMAGE_SIZES) ; le 1K existe chez Google mais n'est plus demandé.
+        "sizes": ("2K", "4K"),
         "aspect": "9:16",
     },
-    verified_on="2026-10-08",
+    verified_on="2026-10-11",
     sources=(
         "https://ai.google.dev/gemini-api/docs/image-generation — Gemini 3 Pro Image : jusqu'à 14 "
         "images de référence (6 objets haute fidélité, 5 personnages, 3 styles)",

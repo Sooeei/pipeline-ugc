@@ -2,12 +2,13 @@
 // Keyframes — sur la carte d'un plan (Objet animé, Avatar IA, Mashup) :
 //   • historique des VERSIONS de l'image (miniatures + « Utiliser cette version ») ;
 //   • « Retoucher » : retouche ciblée Nano Banana Pro (image actuelle + consigne courte) ;
-//   • outils locaux sans API : « Miroir », « Effacer une zone », « Recadrer » (rectangle tracé
-//     sur l'image agrandie) — chacun crée une nouvelle version.
+//   • outils locaux sans API : « 🧽 Effacer (gratuit) » (petit défaut), « Miroir », « Recadrer »
+//     (rectangle tracé sur l'image agrandie) — chacun crée une nouvelle version ;
+//   • « 📐 Même cadrage que le plan 1 » (Avatar IA, plans hors ancre) : régénération payante.
 // + panneau « Réf visage auto » (Avatar IA).
 // Chargé APRÈS app.js : réutilise $, api, toast, esc, showModal, currentSettings, prettyError.
 // Points d'entrée globaux :
-//   kfTools(container, s, { onChange })   → ajoute le bloc versions + outils à la carte
+//   kfTools(container, s, { onChange, sameFraming })   → ajoute le bloc versions + outils à la carte
 //   kfAutoFacePanel(adId)                 → (re)remplit #aoAutoFace (Avatar IA)
 (function () {
   const fmtTs = (ts) => (ts ? new Date(ts * 1000).toLocaleString("fr-FR") : "");
@@ -129,23 +130,57 @@
   }
 
   // ------------------------------------------------ carte d'un plan
-  function kfTools(container, s, { onChange } = {}) {
+  const ERASE_HINT = "grain de beauté, petite tache, texte, étiquette, trépied… — local, gratuit, immédiat";
+
+  // « 📐 Même cadrage que le plan 1 » : côté du logo du produit (droite / gauche / même côté).
+  function pickFramingSide() {
+    return new Promise((resolve) => {
+      const ov = document.createElement("div");
+      ov.className = "modal-overlay kf-rect-overlay";
+      ov.innerHTML =
+        `<div class="modal" role="dialog" aria-modal="true">` +
+        `<h3 class="modal-title">📐 Même cadrage que le plan 1</h3>` +
+        `<p class="muted small">L'image est regénérée avec la même position de caméra, la même distance et la même ` +
+        `orientation du produit que le plan 1 (l'ancre). De quel côté doit apparaître le logo du produit ?</p>` +
+        `<p class="muted small">Seul le côté du logo est faux ? « ↔️ Miroir » (gratuit) suffit souvent.</p>` +
+        `<div class="modal-actions">` +
+        `<button class="btn" type="button" data-side="gauche">Logo à gauche</button>` +
+        `<button class="btn" type="button" data-side="droite">Logo à droite</button>` +
+        `<button class="btn primary" type="button" data-side="auto">Même côté que le plan 1</button>` +
+        `<button class="btn" type="button" data-act="cancel">Annuler</button></div></div>`;
+      document.body.appendChild(ov);
+      const close = (val) => { ov.remove(); resolve(val); };
+      ov.querySelector('[data-act="cancel"]').addEventListener("click", () => close(null));
+      ov.addEventListener("click", (ev) => { if (ev.target === ov) close(null); });
+      ov.querySelectorAll("[data-side]").forEach((b) => b.addEventListener("click", () => close(b.dataset.side)));
+    });
+  }
+
+  const SIDE_LABELS = { droite: "logo à droite", gauche: "logo à gauche", auto: "logo du même côté" };
+
+  function kfTools(container, s, { onChange, sameFraming } = {}) {
     if (!container || !s || !s.clip_id) return;
     const wrap = document.createElement("div");
     wrap.className = "kf-tools";
     const hasImg = !!s.image_url;
+    const dis = hasImg ? "" : " disabled";
     wrap.innerHTML =
       `<div class="kf-tool-row">` +
-      `<button class="btn small kf-retouch" type="button"${hasImg ? "" : " disabled"} title="Modifie UN détail de l'image actuelle (Nano Banana Pro) — ≠ Regénérer, qui repart de zéro">✏️ Retoucher</button>` +
-      `<button class="btn small kf-mirror" type="button"${hasImg ? "" : " disabled"} title="Miroir horizontal (local, gratuit)">↔️ Miroir</button>` +
-      `<button class="btn small kf-erase" type="button"${hasImg ? "" : " disabled"} title="Efface un texte, une étiquette, une fausse barre d'état… (local, gratuit)">🧽 Effacer une zone</button>` +
-      `<button class="btn small kf-crop" type="button"${hasImg ? "" : " disabled"} title="Recadre puis remet au format 9:16 (local, gratuit)">✂️ Recadrer</button>` +
+      `<button class="btn small kf-retouch" type="button"${dis} title="Modifie UN détail de l'image actuelle (Nano Banana Pro, payant) — ≠ Regénérer, qui repart de zéro">✏️ Retoucher</button>` +
+      `<button class="btn small kf-erase" type="button"${dis} title="Efface un petit défaut : ${esc(ERASE_HINT)}">🧽 Effacer (gratuit)</button>` +
+      `<button class="btn small kf-mirror" type="button"${dis} title="Miroir horizontal (local, gratuit) — ex. logo du produit du mauvais côté">↔️ Miroir</button>` +
+      `<button class="btn small kf-crop" type="button"${dis} title="Recadre puis remet au format 9:16 (local, gratuit)">✂️ Recadrer</button>` +
+      (sameFraming === true
+        ? `<button class="btn small kf-same-framing" type="button" title="Regénère l'image (payant) avec la même position de caméra, distance et orientation du produit que le plan 1. Si seul le côté du logo est faux : « ↔️ Miroir » (gratuit).">📐 Même cadrage que le plan 1</button>`
+        : "") +
       `</div>` +
       `<div class="kf-retouch-form hidden">` +
       `<input type="text" class="kf-retouch-txt" maxlength="300" placeholder="Ce qui change UNIQUEMENT — ex. « le pull en bleu marine »" />` +
-      `<label class="small"><input type="checkbox" class="kf-retouch-prod" /> Envoyer aussi les photos produit</label>` +
+      `<label class="small"><input type="checkbox" class="kf-retouch-prod" /> Envoyer aussi les photos produit (réfs produit + toutes les photos de la fiche)</label>` +
       `<button class="btn small primary kf-retouch-go" type="button">Lancer la retouche</button>` +
       `<span class="kf-retouch-prog muted small" aria-live="polite"></span>` +
+      `<div class="muted small kf-retouch-help">Ta consigne part mot pour mot (le français est compris). ` +
+      `Petit défaut ? 🧽 Effacer : local, gratuit, immédiat.</div>` +
       `</div>` +
       `<details class="kf-ver-box"><summary>🗂️ Versions de l'image<span class="kf-ver-count"></span></summary><div class="kf-ver-body"></div></details>`;
     container.appendChild(wrap);
@@ -221,11 +256,42 @@
       run(() => post(`/api/clips/${s.clip_id}/tools/mirror`), "Miroir appliqué ✓ — nouvelle version."));
     wrap.querySelector(".kf-erase").addEventListener("click", async () => {
       const r = await pickRect(s.image_url, {
-        title: "Effacer une zone",
-        hint: "Trace un rectangle autour du texte, de l'étiquette ou de la barre d'état à effacer (seuls les pixels contrastés de la zone sont repeints).",
+        title: "🧽 Effacer (gratuit)",
+        hint: `Trace un rectangle autour du défaut à effacer : ${ERASE_HINT}. Seuls les pixels contrastés de la zone sont repeints.`,
         confirmText: "Effacer",
       });
       if (r) run(() => post(`/api/clips/${s.clip_id}/tools/erase`, r), "Zone effacée ✓ — nouvelle version.");
+    });
+    const sf = wrap.querySelector(".kf-same-framing");
+    if (sf) sf.addEventListener("click", async () => {
+      const side = await pickFramingSide();
+      if (!side) return;
+      if (!isDry()) {
+        const ok = await showModal({
+          title: "📐 Même cadrage que le plan 1",
+          message: `Regénérer cette image via Nano Banana Pro (payant) avec le cadrage du plan 1 (${SIDE_LABELS[side]}). ` +
+            "Le keyframe devra être revalidé. Continuer ?",
+          confirmText: "Regénérer", cancelText: "Annuler", danger: true,
+        });
+        if (!ok) return;
+      }
+      card.classList.add("busy");
+      sf.disabled = true;
+      try {
+        const r = await post(`/api/avatar-omni/regenerate-image/${s.clip_id}`, { same_framing: side, confirm: true });
+        if (r && r.job_id) {
+          const j = await waitJob(r.job_id);
+          if (j.state === "echec") throw new Error((j.summary && j.summary.message) || "Régénération en échec.");
+        }
+        toast("Même cadrage que le plan 1 ✓ — nouvelle image à valider.");
+        if (onChange) await onChange();
+        else card.classList.remove("busy");
+      } catch (e) {
+        card.classList.remove("busy");
+        toast(typeof prettyError === "function" ? prettyError(e.message) : e.message);
+      } finally {
+        sf.disabled = false;
+      }
     });
     wrap.querySelector(".kf-crop").addEventListener("click", async () => {
       const r = await pickRect(s.image_url, {

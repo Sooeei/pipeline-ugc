@@ -317,7 +317,8 @@ def test_bible_photos_seen_by_claude_with_character_labels(monkeypatch):
         {"kind": "visage4", "media_type": "image/png", "data": "x"}])
     assert calls[0]["images"][0]["label"] == 'Photo de référence "visage4" = PERSONNAGE 4 :'
     assert "PERSONNAGE 3 « Pot » (parle)" in calls[0]["user"]
-    assert bible["character4"] == 'EXACTLY the person in the "visage4" reference photo — a friend'
+    # Description de l'utilisateur insérée VERBATIM après le préfixe photo ; l'ajout de Claude suit.
+    assert bible["character4"].startswith('EXACTLY the person in the "visage4" reference photo — une amie')
 
 
 def test_client_refs_four_faces_order_and_product():

@@ -5,7 +5,8 @@
 - « warning » : signalé (journal des générations + app.log), l'envoi part quand même.
 
 Contrôles (heuristiques déterministes, aucun appel réseau) :
-- dialogue_altered (error)     : le dialogue fourni n'apparaît pas MOT POUR MOT dans le prompt ;
+- dialogue_altered (error)     : le dialogue fourni n'apparaît pas MOT POUR MOT dans le prompt
+                                 (forme brute OU nettoyée pour l'oral brain.spoken_clean) ;
 - too_many_images (error)      : plus d'images que la limite du modèle ;
 - image_role_missing (error)   : une image envoyée sans rôle, ou avec un rôle inconnu du modèle ;
 - omni_roles_undeclared (error) : Omni — le prompt ne commence pas par la déclaration
@@ -48,17 +49,37 @@ def normalize_dialogue(dialogue: str) -> str:
     return _norm(brain.strip_brackets(str(dialogue or "").strip()))
 
 
+def dialogue_forms(dialogue: str) -> list[str]:
+    """Formes ACCEPTÉES du dialogue dans un prompt : brute normalisée, ou nettoyée pour l'oral
+    (brain.spoken_clean, appliqué à l'envoi : « : » → « . », guillemets retirés…). Un mot
+    manquant ou modifié n'est dans aucune des deux formes."""
+    from app import brain
+
+    raw = normalize_dialogue(dialogue)
+    if not raw:
+        return []
+    spoken = _norm(brain.spoken_clean(raw))
+    return list(dict.fromkeys(f for f in (raw, spoken) if f))
+
+
+def dialogue_in_prompt(dialogue: str, prompt: str) -> str:
+    """Forme du dialogue trouvée MOT POUR MOT dans le prompt ("" si aucune)."""
+    p = _norm(prompt)
+    return next((f for f in dialogue_forms(dialogue) if f in p), "")
+
+
 # Segments entre guillemets (dialogue) retirés avant les contrôles de langue / longueur.
 _QUOTED_RE = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»')
 
 
 def strip_dialogue(prompt: str, dialogue: str = "") -> str:
-    """Texte « hors dialogue » : dialogue fourni retiré, puis tout segment entre guillemets."""
+    """Texte « hors dialogue » : dialogue fourni retiré (forme brute ou nettoyée pour l'oral),
+    puis tout segment entre guillemets."""
     text = str(prompt or "")
     d = str(dialogue or "").strip()
     if d:
-        norm_d = normalize_dialogue(d)
-        text = _norm(text).replace(norm_d, " ") if norm_d else text
+        found = dialogue_in_prompt(d, text) or normalize_dialogue(d)
+        text = _norm(text).replace(found, " ") if found else text
     return _QUOTED_RE.sub(" ", text)
 
 
@@ -219,9 +240,10 @@ def _check(profile: ModelProfile, prompt: str, images: list[SentImage], dialogue
     issues: list[PreflightIssue] = []
     label = profile.label
 
-    # 1. Dialogue intact (MOT POUR MOT après la normalisation déterministe de l'app).
+    # 1. Dialogue intact (MOT POUR MOT après la normalisation déterministe de l'app ; la forme
+    #    nettoyée pour l'oral brain.spoken_clean, appliquée à l'envoi, est aussi acceptée).
     if dialogue.strip():
-        if normalize_dialogue(dialogue) not in _norm(prompt):
+        if not dialogue_in_prompt(dialogue, prompt):
             issues.append(_issue("error", "dialogue_altered",
                                  f"Le dialogue n'est pas repris mot pour mot dans le prompt {label} "
                                  "— envoi bloqué pour ne pas faire dire autre chose."))

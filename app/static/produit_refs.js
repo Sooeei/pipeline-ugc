@@ -41,11 +41,11 @@
     box.appendChild(wrap);
     const q = (sel) => wrap.querySelector(sel);
 
-    const fill = (s) => {
-      q(".ps-name").value = s.name || "";
-      q(".ps-desc").value = s.description || "";
-      q(".ps-never").value = (s.never || []).join(", ");
-      q(".ps-notext").checked = !!s.no_text;
+    // Pub liée à un client : « ↺ Depuis le client » par angle (recopie la photo de CET angle).
+    let presetId = opts.ad ? (d.preset_id || null) : null;
+    // Photos (+ aperçu) seulement : un changement de photo ne touche pas aux textes en cours de saisie.
+    const fillPhotos = (s) => {
+      if (opts.ad && s.preset_id !== undefined) presetId = s.preset_id || null;
       q(".ps-preview").innerHTML = s.preview
         ? `<b>Bloc envoyé :</b> <code>${esc(s.preview)}</code>` : "Fiche vide : rien n'est ajouté aux prompts.";
       q(".ps-warn").innerHTML = (s.warnings || []).map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join("");
@@ -58,23 +58,41 @@
         cell.innerHTML =
           (cur.url ? `<img src="${esc(cur.url)}" alt="${esc(label)}" />` : `<div class="thumb empty">—</div>`) +
           `<span>${esc(label)}</span>` +
-          `<label class="btn small">📷<input type="file" accept="image/*" hidden /></label>` +
-          (cur.url ? `<button type="button" class="btn small danger-outline" title="Retirer">✕</button>` : "");
+          `<label class="btn small" title="${cur.url ? "Remplacer la photo de cet angle (les autres ne bougent pas)" : "Ajouter une photo pour cet angle"}">` +
+          `${cur.url ? "📷 Remplacer" : "📷 Ajouter"}<input type="file" accept="image/*" hidden /></label>` +
+          (presetId ? `<button type="button" class="btn small ps-from-preset" title="Recopie la photo « ${esc(label)} » du client (les autres angles ne bougent pas)">↺ Depuis le client</button>` : "") +
+          (cur.url ? `<button type="button" class="btn small danger-outline ps-rm" title="Retirer">✕</button>` : "");
         cell.querySelector("input").addEventListener("change", async (ev) => {
           const f = ev.target.files && ev.target.files[0];
           if (!f) return;
           const fd = new FormData();
           fd.append("file", f, f.name);
-          try { fill(await api(`${base}/product-sheet/photos/${a}`, { method: "POST", body: fd })); }
-          catch (e) { toast(e.message); }
+          try {
+            fillPhotos(await api(`${base}/product-sheet/photos/${a}`, { method: "POST", body: fd }));
+            toast(`Photo « ${label} » ${cur.url ? "remplacée" : "ajoutée"} ✓`);
+          } catch (e) { toast(e.message); }
         });
-        const rm = cell.querySelector("button");
+        const fromPreset = cell.querySelector(".ps-from-preset");
+        if (fromPreset) fromPreset.addEventListener("click", async () => {
+          try {
+            fillPhotos(await api(`${base}/product-sheet/photos/${a}/from-preset`, jsonOpts("POST", {})));
+            toast(`Photo « ${label} » recopiée depuis le client ✓`);
+          } catch (e) { toast(e.message); }
+        });
+        const rm = cell.querySelector(".ps-rm");
         if (rm) rm.addEventListener("click", async () => {
-          try { fill(await api(`${base}/product-sheet/photos/${a}`, { method: "DELETE" })); }
+          try { fillPhotos(await api(`${base}/product-sheet/photos/${a}`, { method: "DELETE" })); }
           catch (e) { toast(e.message); }
         });
         ph.appendChild(cell);
       });
+    };
+    const fill = (s) => {
+      q(".ps-name").value = s.name || "";
+      q(".ps-desc").value = s.description || "";
+      q(".ps-never").value = (s.never || []).join(", ");
+      q(".ps-notext").checked = !!s.no_text;
+      fillPhotos(s);
     };
     fill(d);
 

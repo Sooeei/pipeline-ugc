@@ -1496,16 +1496,21 @@ def generate_avatar_omni_plan(
 # pub et c'est elle (jamais le texte français brut) qui part dans prompt_image et le prompt Omni.
 PERSONAS_TRANSLATE_SYSTEM_PROMPT = """\
 Tu traduis en ANGLAIS des descriptions de PERSONNAGES (jusqu'à 4) rédigées en français, pour des
-prompts de génération d'image et de vidéo. Garde TOUS les détails visuels (genre, âge, tenue,
-accessoires, coiffure, attitude ; pour un objet ou une mascotte qui parle : forme, couleurs,
-matière, yeux, bouche), n'ajoute RIEN, n'invente rien, formule courte et descriptive (30 mots
-maximum par personnage), sans guillemets. Une description vide reste vide.
+prompts de génération d'image et de vidéo. Traduction LITTÉRALE, phrase par phrase, de TOUTE la
+description, quelle que soit sa longueur (aucune limite de mots, ne résume pas, ne coupe rien) :
+genre, âge, tenue COMPLÈTE, accessoires, coiffure, maquillage, attitude ; pour un objet ou une
+mascotte qui parle : forme, couleurs, matière, yeux, bouche. N'ajoute RIEN, n'invente rien.
+Ne remplace JAMAIS un adjectif par un autre et ne l'intensifie pas (« verts lumineux » → « bright
+green », jamais « neon green » ni « vivid »). Les mots déjà en anglais restent tels quels. Sans
+guillemets. Une description vide reste vide.
 Réponds UNIQUEMENT avec le JSON : {"characters":[{"id":1,"en":"..."},{"id":2,"en":"..."}]}
 """
 
+PERSONA_MAX_CHARS = 1000
+
 
 def _clean_persona(text: str) -> str:
-    return " ".join(str(text or "").replace('"', "").split())[:300]
+    return " ".join(str(text or "").replace('"', "").split())[:PERSONA_MAX_CHARS]
 
 
 def _input_characters(
@@ -1572,7 +1577,7 @@ def translate_personas(
             _brain_backoff_sleep(attempt - 1)
         try:
             items = _call_claude_json(
-                cfg, system=PERSONAS_TRANSLATE_SYSTEM_PROMPT, user=user, max_tokens=1200,
+                cfg, system=PERSONAS_TRANSLATE_SYSTEM_PROMPT, user=user, max_tokens=3000,
                 result_key="characters", empty_msg="traduction des personnages vide",
             )
         except _BrainRetryable:
@@ -1974,6 +1979,11 @@ MISE EN SCÈNE du client (en français), tu écris UNE « BIBLE VISUELLE » EN A
 doit JAMAIS changer d'un plan à l'autre.
 
 RÈGLES :
+- PERSONNAGE DÉCRIT PAR LE CLIENT : sa description est insérée MOT POUR MOT par le CODE en tête
+  de "characterN". N'écris dans "characterN" QUE ce qui MANQUE (ex. tenue si le client n'en donne
+  pas, accessoires) ; ne reformule, ne remplace, n'intensifie JAMAIS ce que le client a écrit
+  (yeux, cheveux, tenue : ceux du client, jamais d'autres). Yeux : toujours naturels et réalistes
+  (jamais « neon », « glowing »).
 - "character1" … "character4" : un champ par PERSONNAGE N (même numéro) — genre, âge apparent,
   morphologie, coiffure, tenue COMPLÈTE (haut, bas, couleurs, matières), accessoires. Sois EXPLICITE
   sur les deux mains quand c'est pertinent (ex. « black nitrile gloves on BOTH hands »). Humains :
@@ -1984,6 +1994,9 @@ RÈGLES :
   une mascotte qui parle (décris sa forme, ses couleurs, ses yeux et sa bouche) ; jamais de nom de
   studio ni d'œuvre.
 - "set" : le décor fixe (lieu, comptoir/table, miroir, fond, lumière), cohérent avec les directions.
+  MATÉRIEL DE TOURNAGE JAMAIS À L'IMAGE : le téléphone qui filme, un trépied, une perche à selfie,
+  une ring light… ne sont JAMAIS décrits dans "set" ni "positions", même si l'ambiance du client
+  en parle (« téléphone posé sur un petit trépied » = la façon de filmer, pas le décor).
 - "character1_traits" … "character4_traits" : les 3 TRAITS VISUELS CLÉS du personnage N, les plus
   distinctifs et stables, en anglais, séparés par des virgules, 15 mots maximum (ex. « long wavy
   copper-red hair, freckles, big brown eyes » ; objet / mascotte : « round coral-red body, heavy
@@ -2249,6 +2262,11 @@ def bible_text(bible: Any, characters: list[int] | None = None, *, product: bool
     phrases qui ne citent aucun personnage, ex. « products on the counter », restent).
     `product=False` : sans la ligne PRODUCT (elle part dans le bloc produit dédié)."""
     b = normalize_bible(bible)
+    # Matériel de tournage : retiré du décor, règle « jamais à l'image » dans les positions
+    # (couvre aussi les bibles écrites avant cette règle, ex. « small phone tripod » de l'ad 87).
+    b["set"] = strip_camera_gear(b.get("set", ""))
+    if any(b[k] for k in _BIBLE_KEYS):
+        b["positions"] = with_no_camera_gear(strip_camera_gear(b.get("positions", "")))
     keys = [k for k in _BIBLE_KEYS if b[k] and (product or k != "product")]
     if characters:
         visible = {int(n) for n in characters}
@@ -2265,7 +2283,7 @@ def bible_positions(positions: str, visible: set[int]) -> str:
     """Positions par défaut limitées aux personnages À L'IMAGE : une phrase (séparée par « ; »
     ou « . ») qui cite un personnage absent du plan est retirée ; une phrase sans personnage
     (objets, produits) est gardée. Un seul personnage à l'image et aucune phrase d'objet → ""."""
-    parts = [p.strip() for p in re.split(r"[;.]\s*", str(positions or "")) if p.strip()]
+    parts = [p.strip() for p in re.split(r"[;.]\s*", strip_camera_gear(str(positions or ""))) if p.strip()]
     kept = []
     for p in parts:
         cited = {int(m) for m in _SHOT_CHAR_RE.findall(p)}
@@ -2454,11 +2472,196 @@ def enforce_photo_prefixes(bible: dict[str, str], photo_kinds: list[str]) -> dic
     return out
 
 
+# ---------------------------------------------------------------- matériel de tournage
+# Le téléphone qui filme (et son trépied, sa perche, sa ring light…) n'est JAMAIS à l'image : une
+# ambiance « téléphone posé sur un petit trépied » décrit le TOURNAGE, pas le décor.
+NO_CAMERA_GEAR = "The filming phone, tripod or any camera gear is never visible in frame."
+_CAMERA_GEAR_RE = re.compile(
+    r"\b(?:tripods?|tr[ée]pieds?|phone[- ]stands?|phone[- ]holders?|phone[- ]mounts?|selfie[- ]sticks?|"
+    r"ring[- ]?lights?|perches?|t[ée]l[ée]phone\s+pos[ée]e?s?|gimbals?)\b", re.IGNORECASE)
+_GEAR_NEGATION_RE = re.compile(
+    r"\b(?:no|never|not|without|none|jamais|sans|aucune?|pas\s+de|ni)\b|n['’]", re.IGNORECASE)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Phrases (séparateurs . ; ! ? gardés avec la phrase), hors décimales (« 9.5 »)."""
+    return [s for s in re.split(r"(?<=[.;!?])(?!\d)\s*", str(text or "")) if s.strip()]
+
+
+def strip_camera_gear(text: str) -> str:
+    """Retire les phrases NON négatives qui citent du matériel de tournage (tripod, trépied,
+    phone stand, selfie stick, ring light, perche, téléphone posé…). Une phrase négative
+    (« no tripod », NO_CAMERA_GEAR) est gardée. Idempotent."""
+    raw = str(text or "")
+    if not _CAMERA_GEAR_RE.search(raw):
+        return raw
+    kept = []
+    for s in _split_sentences(raw):
+        if _CAMERA_GEAR_RE.search(s) and not _GEAR_NEGATION_RE.search(s):
+            continue
+        kept.append(s.strip())
+    return " ".join(kept).strip()
+
+
+def with_no_camera_gear(positions: str) -> str:
+    """Positions + règle NO_CAMERA_GEAR (une seule fois)."""
+    p = " ".join(str(positions or "").split())
+    if NO_CAMERA_GEAR.lower() in p.lower():
+        return p
+    if p and p[-1] not in ".;!?":
+        p += "."
+    return f"{p} {NO_CAMERA_GEAR}".strip()
+
+
+# ---------------------------------------------------------------- personnages VERBATIM
+# La description saisie par l'utilisateur (traduite littéralement) est insérée MOT POUR MOT dans
+# la bible : Claude ne peut que COMPLÉTER ce qui manque, jamais réécrire (ex. « Bright green eyes »
+# devenu « neon green eyes », tenue inventée alors que l'utilisateur en décrivait une).
+_EYES_RE = re.compile(r"\b(?:eyes?|eyed|iris(?:es)?|yeux|œil|oeil)\b", re.IGNORECASE)
+_HAIR_RE = re.compile(
+    r"\b(?:hair|haired|hairstyle|bald|ponytail|braids?|braided|bun|curls|curly|bangs|fringe|"
+    r"cheveux|chevelure|coiffure|frange|tresses?|chignon|queue de cheval)\b", re.IGNORECASE)
+_OUTFIT_RE = re.compile(
+    r"\b(?:outfits?|wears?|wearing|dressed|clothes|clothing|tops?|tank|crop|hoodies?|pants|"
+    r"trousers|jeans|shorts|dress|dresses|shirts?|t-shirts?|tee|sweaters?|sweatshirts?|jumpers?|"
+    r"jackets?|coats?|skirts?|leggings|joggers|sweatpants|bra|blouses?|cardigans?|tracksuit|"
+    r"pyjamas?|pajamas?|robe|bathrobe|tenue|porte|v[êe]tue?s?|habill[ée]e?s?|pulls?|chemises?|"
+    r"pantalons?|jupes?|sweats?|vestes?|hauts?|brassi[èe]re|survêtement|surv[êe]tement)\b",
+    re.IGNORECASE)
+_USER_CATEGORIES = (_EYES_RE, _HAIR_RE, _OUTFIT_RE)
+_NATURAL_EYES = "natural, realistic"
+_EYE_INTENSIFIERS_RE = re.compile(
+    r"\b(?:neon|glowing|luminous|fluorescent|electric|piercing|radiant|vivid|intense|striking)\s+",
+    re.IGNORECASE)
+_OTHER_DETAILS = "Other details (never contradicting the above):"
+
+
+def _split_clauses(text: str) -> list[str]:
+    """Propositions séparées par , ; . (hors parenthèses, hors décimales), sans le séparateur."""
+    out, buf, depth = [], [], 0
+    s = str(text or "")
+    for i, ch in enumerate(s):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0 and ch in ",;." and not (ch == "." and i + 1 < len(s) and s[i + 1].isdigit()):
+            out.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    out.append("".join(buf))
+    return [" ".join(c.split()) for c in out if c.strip()]
+
+
+_EYES_LEAD_RE = re.compile(
+    r"^((?:(?:and|with|has|have|she has|he has|it has|they have|her|his|its|their|a|an|the|two|"
+    r"et|avec|des|les|ses|de)\s+)*)", re.IGNORECASE)
+
+
+def naturalize_eyes(en: str, style: str = config_app.DEFAULT_OMNI_STYLE) -> str:
+    """Style RÉALISTE : la proposition qui décrit les yeux (eyes / iris) est préfixée « natural,
+    realistic » (« Bright green eyes » → « natural, realistic Bright green eyes ») pour éviter les
+    yeux néon / irréels. Idempotent ; jamais en 3D / mascotte ; le reste du texte est intact."""
+    text = str(en or "")
+    if config_app.normalize_omni_style(style) == "3d" or not _EYES_RE.search(text):
+        return text
+    token = "\x00NATREAL\x00"
+    text = re.sub(re.escape(_NATURAL_EYES), token, text, flags=re.IGNORECASE)
+    # Découpe en conservant les séparateurs (hors parenthèses : rare dans une proposition yeux).
+    parts = re.split(r"([,;.](?!\d))", text)
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1 or not _EYES_RE.search(part) or token in part:
+            out.append(part)
+            continue
+        lead_ws = part[: len(part) - len(part.lstrip())]
+        body = part.lstrip()
+        # Début du groupe nominal des yeux : après le dernier « with / has / and » qui le précède
+        # (« a woman with big brown eyes » → « …with natural, realistic big brown eyes »).
+        eye = _EYES_RE.search(body)
+        start = 0
+        for mm in re.finditer(r"\b(?:with|has|have|and|avec|et)\s+", body[: eye.start()] if eye else "",
+                              re.IGNORECASE):
+            start = mm.end()
+        m = _EYES_LEAD_RE.match(body[start:])
+        head = body[: start + (len(m.group(1)) if m else 0)]
+        out.append(f"{lead_ws}{head}{_NATURAL_EYES} {body[len(head):]}")
+    return "".join(out).replace(token, _NATURAL_EYES)
+
+
+def _fold_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", _fold(text)) if len(w) > 2}
+
+
+def _claude_extras(claude: str, user: str, style: str) -> str:
+    """Ajout de Claude GARDÉ : ses propositions qui ne touchent AUCUNE catégorie fixée par
+    l'utilisateur (yeux, cheveux, tenue) et ne répètent pas sa description."""
+    fixed = [rx for rx in _USER_CATEGORIES if rx.search(user)]
+    user_words = _fold_words(user)
+    kept = []
+    for c in _split_clauses(claude):
+        c = re.sub(r"^(?:and|with|also)\s+", "", c, flags=re.IGNORECASE).strip()
+        if not c or _OTHER_DETAILS.lower().rstrip(":") in c.lower():
+            continue
+        if any(rx.search(c) for rx in fixed):
+            continue
+        words = _fold_words(c)
+        if words and len(words & user_words) / len(words) >= 0.7:
+            continue   # répète la description de l'utilisateur
+        if config_app.normalize_omni_style(style) != "3d" and _EYES_RE.search(c):
+            c = _EYE_INTENSIFIERS_RE.sub("", c)
+        kept.append(c)
+    return ", ".join(dict.fromkeys(kept))
+
+
+def enforce_user_characters(
+    bible: dict[str, str], personas: Any, style: str = config_app.DEFAULT_OMNI_STYLE,
+) -> dict[str, str]:
+    """Description de l'UTILISATEUR (version anglaise littérale) insérée VERBATIM dans
+    "characterN" : préfixe photo éventuel (enforce_photo_prefixes, déjà appliqué) + description
+    utilisateur (yeux naturalisés en réaliste) + « Other details (never contradicting the
+    above): » + l'ajout de Claude purgé des propositions qui touchent une catégorie fixée par
+    l'utilisateur (yeux, cheveux, tenue). "characterN_traits" = traits dérivés du texte
+    utilisateur. Personnage sans description : la bible de Claude est gardée telle quelle."""
+    out = dict(bible)
+    for c in characters_of(personas):
+        user = " ".join(str(c.get("en") or c.get("fr") or "").split())
+        n = int(c["n"])
+        if not user or not 1 <= n <= config_app.OMNI_MAX_CHARACTERS:
+            continue
+        key = f"character{n}"
+        cur = " ".join(str(out.get(key) or "").split())
+        m = _TRAIT_PREFIX_RE.match(cur)
+        prefix = m.group(0).strip().rstrip(":—–- ").strip() if m and cur.startswith("EXACTLY") else ""
+        claude = cur[m.end():] if prefix and m else cur
+        claude = claude.split(_OTHER_DETAILS, 1)[-1] if _OTHER_DETAILS in claude else claude
+        user_txt = naturalize_eyes(user, style)
+        extras = _claude_extras(claude, user, style) if claude.strip() else ""
+        head = f"{prefix} — {user_txt}" if prefix else user_txt
+        text = head
+        if extras:
+            room = 1190 - len(head) - len(_OTHER_DETAILS) - 4
+            if room > 20:
+                extras = extras if len(extras) <= room else extras[:room].rsplit(" ", 1)[0].rstrip(" ,;")
+                end = "" if head.endswith((".", "!", "?")) else "."
+                text = f"{head}{end} {_OTHER_DETAILS} {extras}."
+        out[key] = text
+        traits = derive_traits(user)
+        if traits:
+            out[f"character{n}_traits"] = naturalize_eyes(traits, style)
+    return out
+
+
 def _apply_bible_style(bible: dict[str, str], style: str) -> dict[str, str]:
     """Style 3D : la phrase de style ouvre le décor (donc chaque prompt image) ; aucun nom de
     studio dans aucun champ (scrub_brand_names). Traits clés manquants → dérivés de la
-    description du personnage (toujours stockés dans la bible)."""
+    description du personnage (toujours stockés dans la bible). Matériel de tournage : retiré
+    du décor (strip_camera_gear) et règle NO_CAMERA_GEAR ajoutée (une fois) aux positions."""
     out = {k: scrub_brand_names(v) if v else v for k, v in bible.items()}
+    if out.get("set"):
+        out["set"] = strip_camera_gear(out["set"])
+    out["positions"] = with_no_camera_gear(strip_camera_gear(out.get("positions", "")))
     for n in range(1, config_app.OMNI_MAX_CHARACTERS + 1):
         key = f"character{n}_traits"
         if not out.get(key):
@@ -2496,7 +2699,8 @@ def _canned_bible(
         "product": product.strip() or "the product bottle exactly as in the reference photos",
         "positions": positions,
     }
-    return _apply_bible_style(enforce_photo_prefixes(bible, photo_kinds or []), style)
+    bible = enforce_user_characters(enforce_photo_prefixes(bible, photo_kinds or []), personas, style)
+    return _apply_bible_style(bible, style)
 
 
 def generate_client_bible(
@@ -2552,7 +2756,8 @@ def generate_client_bible(
             raise BrainProviderError(_friendly_anthropic(exc)) from exc
         bible = normalize_bible(data.get("bible"))
         if bible["character1"] and bible["set"]:
-            return _apply_bible_style(enforce_photo_prefixes(bible, kinds), style)
+            bible = enforce_user_characters(enforce_photo_prefixes(bible, kinds), personas, style)
+            return _apply_bible_style(bible, style)
     if last_transient:
         raise BrainProviderError(_OVERLOADED_MESSAGE)
     raise BrainError("La bible visuelle n'a pas pu être écrite — réessaie.")
@@ -3376,6 +3581,9 @@ RÈGLES :
   • "video" = PROMPT VIDÉO, en anglais : UN SEUL geste en 5 mots maximum + une expression courte
     (ex. « points at the shelf, annoyed frown », « small nod, warm smile »). JAMAIS le décor, la
     lumière, l'apparence des personnages, la réplique ni la voix (le CODE ajoute le reste).
+    STYLE RÉALISTE : AUCUN geste inventé — écris un geste SEULEMENT si la direction du client en
+    demande un explicitement (pointer, tapoter, montrer, compter sur les doigts, saluer…) ; sinon
+    "video": "" (le CODE met une attitude calme et naturelle par défaut).
   • "refs_needed" : photos utiles parmi les PHOTOS FOURNIES : "plancheN" (réf principale du
     personnage N) / "visageN" des personnages À L'IMAGE, "produit" si le produit est à l'image,
     "decor", "style" ; [] si aucune.
@@ -3526,11 +3734,34 @@ def product_characters(personas: Any, bible: Any, product: str = "") -> set[int]
 
 _V2_VIDEO_MAX_WORDS = 12
 _CANNED_V2_VIDEO = {
-    "realiste": ("small nod, warm smile", "open hand gesture, confident look",
-                 "leans in slightly, raised eyebrows", "slight head tilt, sincere smile"),
+    # Réaliste : jamais de geste ajouté automatiquement (attitude calme par défaut).
+    "realiste": (config_app.OMNI_DEFAULT_VIDEO_PROMPT,),
     "3d": ("bounces slightly, cheeky grin", "waves both arms, wide eyes",
            "points forward, playful frown", "leans in, big smile"),
 }
+# Geste EXPLICITEMENT demandé par la direction du client (seul cas où le geste de Claude est
+# gardé en réaliste).
+_CLIENT_GESTURE_RE = re.compile(
+    r"\b(?:point(?:e|es|ent|er|ant)|tapot\w*|montr(?:e|es|ent|er|ant)|compt(?:e|es|ent|er|ant)|"
+    r"salu(?:e|es|ent|er|ant)|coucou|pouce|applaudi\w*|hoch\w*|clin\s+d['’][œo]e?il|"
+    r"crois\w*\s+les\s+bras|agit(?:e|ent|er|ant)\s+(?:la|le|les|sa|son|ses)|"
+    r"l[èe]v\w*\s+la\s+main|geste\w*|frapp\w*|claqu\w*\s+des\s+doigts|"
+    r"tend(?:s|ent|ant)?\s+(?:la|le|les|sa|son|ses|un|une)|brandi\w*|secou\w*|"
+    r"hauss\w*\s+les\s+[ée]paules)\b"
+    r"|signe\s+de\s+la\s+main", re.IGNORECASE)
+
+
+def client_asks_gesture(direction: str) -> bool:
+    """La direction du client (FR) demande-t-elle explicitement un geste ?"""
+    return bool(_CLIENT_GESTURE_RE.search(str(direction or "")))
+
+
+def default_video_prompt(title: str = "", *, is_last: bool = False) -> str:
+    """Prompt vidéo par défaut (réaliste) : attitude calme ; bloc CTA (titre contenant « CTA »)
+    ou dernier bloc du montage principal → petit signe de la main."""
+    if is_last or re.search(r"\bCTA\b", str(title or ""), re.IGNORECASE):
+        return config_app.OMNI_CTA_VIDEO_PROMPT
+    return config_app.OMNI_DEFAULT_VIDEO_PROMPT
 _CANNED_V2_FRAMING = ("Medium close-up", "Medium shot", "Close-up")
 
 
@@ -3817,6 +4048,10 @@ def generate_avatar_audio_plan(
             visuals.extend(got + [{}] * (len(batch) - len(got)))
 
     shots: list[dict[str, Any]] = []
+    # Dernier bloc du montage PRINCIPAL (ni exclu, ni variante) : geste CTA par défaut.
+    main_blocks = [p["block_n"] for p in plans
+                   if not p["flags"].get("excluded") and not p["flags"].get("variant")]
+    main_last = main_blocks[-1] if main_blocks else None
     for i, p in enumerate(plans):
         v = visuals[i] if i < len(visuals) else {}
         if p["mute"]:
@@ -3894,7 +4129,13 @@ def generate_avatar_audio_plan(
             elif "produit" in refs or pchars:
                 shot += " The product is a plain inanimate object: no face, no eyes, no mouth."
             video = short_video_prompt(_scrub_third_party(r["video"], tp_names), [piece, p["dialogue"]])
-            if not video:
+            if style != "3d":
+                # Réaliste : aucun geste ajouté automatiquement ; celui de Claude n'est gardé que
+                # si la direction du client en demande un explicitement.
+                if not (video and client_asks_gesture(d)):
+                    video = default_video_prompt(
+                        p["block_title"], is_last=p["block_n"] == main_last and k == len(pieces))
+            elif not video:
                 pool = _CANNED_V2_VIDEO[style]
                 video = pool[len(shots) % len(pool)]
             est = _replica_seconds(piece, wps_for(sp))

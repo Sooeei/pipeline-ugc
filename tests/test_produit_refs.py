@@ -57,7 +57,8 @@ def test_sheet_block_exact_cleolya():
     legend = product_sheet.sheet_block(s, [(3, "face"), (4, "profil"), (5, "usage")])
     assert legend.endswith("Product photos: reference image 3 = the product, front view; reference "
                            "image 4 = the product, side view; reference image 5 = the product, in use, "
-                           "held in the hand.")
+                           "held in the hand; the person in this photo is not a character: never "
+                           "reproduce them.")
     assert product_sheet.sheet_block({}) == ""
 
 
@@ -190,7 +191,8 @@ def test_objet_injects_sheet_block_with_photo_legend(monkeypatch, tmp_path):
     c = calls[-1]
     assert c["roles"] == [pp.ROLE_MAIN_REF, pp.ROLE_PRODUCT, pp.ROLE_PRODUCT]
     assert ("Product photos: reference image 2 = the product, front view; reference image 3 = the "
-            "product, in use, held in the hand.") in c["prompt"]
+            "product, in use, held in the hand; the person in this photo is not a character: "
+            "never reproduce them.") in c["prompt"]
 
 
 # ============================================================ réfs après création

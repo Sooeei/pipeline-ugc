@@ -81,6 +81,7 @@ class ProviderConfig:
     gemini_api_key: str = ""      # Google Gemini Omni (vidéo + voix « Avatar IA »)
     elevenlabs_api_key: str = ""  # ElevenLabs (voix des blocs « Avatar IA » v2)
     objet_image_model: str = config_app.DEFAULT_OBJET_IMAGE_MODEL  # modèle image Nano Banana
+    image_size: str = config_app.DEFAULT_NB_IMAGE_SIZE   # « 2K » | « 4K » (Réglages : nb_image_size)
     objet_video_model: str = config_app.DEFAULT_OBJET_VIDEO_MODEL  # modèle vidéo Grok
     mashup_video_model: str = config_app.DEFAULT_MASHUP_VIDEO_MODEL  # modèle vidéo Kling (Mashup)
     objet_voice_style: str = config_app.DEFAULT_GROK_VOICE_STYLE   # timbre de voix Grok

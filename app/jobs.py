@@ -88,10 +88,31 @@ class Job:
             }
 
 
+class ClipsBusy(RuntimeError):
+    """Un ou plusieurs plans sont déjà en cours de génération dans un autre job (verrou anti-
+    double facturation : un plan ne peut être généré que par UN job à la fois)."""
+
+    def __init__(self, clip_ids: list[int]):
+        self.clip_ids = sorted(int(c) for c in clip_ids)
+        super().__init__("Plan(s) déjà en cours de génération : " + ", ".join(map(str, self.clip_ids)))
+
+
 class JobManager:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        self._busy: dict[int, str] = {}       # clip_id → job_id (réservé tant que le job tourne)
+
+    def busy_clip_ids(self, ad_id: int | None = None) -> list[int]:
+        """Plans réservés par un job en cours (tous, ou ceux d'une pub)."""
+        with self._lock:
+            return sorted(c for c, jid in self._busy.items()
+                          if ad_id is None or (self._jobs.get(jid) and self._jobs[jid].ad_id == int(ad_id)))
+
+    def has_running(self) -> bool:
+        """Au moins un job en attente ou en cours (le serveur ne doit pas s'arrêter)."""
+        with self._lock:
+            return any(j.state in ("en_attente", "en_cours") for j in self._jobs.values())
 
     def start(
         self,
@@ -108,16 +129,26 @@ class JobManager:
         is_retry: bool = False,
         only_clip_id: int | None = None,
         runner: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any] | None] | None = None,
+        clip_ids: list[int] | None = None,
     ) -> Job:
         """`runner(on_update)` : tâche PONCTUELLE (ex. « Retoucher » un plan) exécutée en fond à la
-        place d'un mode prédéfini ; son échec n'est jamais reporté sur le statut de la pub."""
+        place d'un mode prédéfini ; son échec n'est jamais reporté sur le statut de la pub.
+        `clip_ids` : plans RÉSERVÉS par ce job (réservation atomique) ; si l'un d'eux est déjà pris
+        par un autre job en cours → ClipsBusy, rien n'est lancé. Libérés à la fin du job."""
         job = Job(ad_id, ad_name, scenes)
+        reserved = [int(c) for c in clip_ids or []]
         with self._lock:
+            taken = [c for c in reserved if c in self._busy]
+            if taken:
+                raise ClipsBusy(taken)
+            for c in reserved:
+                self._busy[c] = job.id
             self._jobs[job.id] = job
         # Trace persistante « job en cours » : si l'app s'arrête pendant la génération, les plans
         # concernés sont remis « à relancer » au prochain démarrage (db.recover_interrupted_jobs).
         try:
-            db.job_inflight_add(job.id, ad_id, output_mode, list(job.scenes), only_clip_id)
+            db.job_inflight_add(job.id, ad_id, output_mode, list(job.scenes), only_clip_id,
+                                clip_ids=reserved)
         except Exception as exc:  # noqa: BLE001 - la trace ne doit jamais bloquer une génération
             _log_detail(f"jobs_inflight (ajout) : {exc!r}")
 
@@ -128,6 +159,10 @@ class JobManager:
                 with gen_trace.context(ad_id=ad_id):
                     _run_inner()
             finally:
+                with self._lock:
+                    for c in reserved:
+                        if self._busy.get(c) == job.id:
+                            del self._busy[c]
                 try:
                     db.job_inflight_done(job.id)
                 except Exception as exc:  # noqa: BLE001

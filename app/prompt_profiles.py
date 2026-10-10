@@ -336,3 +336,18 @@ def preflight(model_key: str, prompt: str, *, images: list[SentImage] | None = N
     except ImportError:
         return []
     return prompt_checks.check(profile_for(model_key), prompt, images=images or [], dialogue=dialogue)
+
+# ---------------------------------------------------------------- socle Morphea (11/10/2026)
+def nb_output_format(size: str = "2K") -> str:
+    """Consigne de format de sortie Nano Banana pour la taille demandée (« 2K » | « 4K »)."""
+    s = str(size or "2K").upper()
+    return f"Output a vertical 9:16 ({s if s in ('2K', '4K') else '2K'}) image."
+
+
+def same_framing_correction(side: str = "auto", anchor_n: int = 1) -> str:
+    """Correction rapide « même cadrage que le plan 1 » (ANGLAIS, jamais traduite). `side` =
+    « droite » | « gauche » | « auto » : côté où le logo du produit doit apparaître."""
+    logo = {"droite": " with the product logo on the RIGHT side", "gauche": " with the product logo on the LEFT side"}
+    return (f"Use exactly the same camera position and framing as plan {int(anchor_n)} (the anchor image): "
+            f"same distance, same angle, same product orientation{logo.get(side, ', logo on the same side')}. "
+            "Do not mirror the image.")

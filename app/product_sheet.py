@@ -433,3 +433,9 @@ def ad_sheet_from_preset(ad_id: int, body: dict[str, Any] | None = None) -> dict
         raise HTTPException(400, "Ce client n'a pas de fiche produit.")
     copy_preset_sheet_to_ad(pid, ad_id, overwrite=True)
     return get_ad_sheet(ad_id)
+
+def never_line(sheet: dict[str, Any] | None) -> str:
+    """« Never: … » de la fiche produit (interdits), à injecter dans TOUS les prompts image,
+    retouche comprise, même quand le produit n'est pas à l'image ; "" si aucun interdit."""
+    s = normalize_sheet(sheet)
+    return ("Never: " + ", ".join(s["never"]) + ".") if s["never"] else ""

@@ -234,6 +234,13 @@ _MIGRATIONS["ref_images"].append(("position", "INTEGER"))
 
 # Keyframes (agent images) : historique des versions d'image d'un plan, base du prompt image
 # séparée de la DERNIÈRE correction (les corrections ne s'empilent plus), réf visage auto.
+# Socle Morphea (zone B) : refus de Google sur un plan (jamais relancé automatiquement) et
+# liste exacte des clips réservés par un job (verrou anti-double facturation).
+_MIGRATIONS["clips"].extend([
+    ("error_kind", "TEXT DEFAULT ''"),     # « omni_blocked » = refus du filtre Google (plan ignoré par « Animer tout »)
+    ("error_detail", "TEXT DEFAULT ''"),   # JSON {kind, google_reason, suggestions[]}
+])
+_MIGRATIONS.setdefault("jobs_inflight", []).append(("clip_ids", "TEXT DEFAULT ''"))   # JSON [clip_id]
 _MIGRATIONS["clips"].extend([
     # JSON [{v, path, ts, source, generation_id, note}] : génération / upload / retouche /
     # miroir / effacement / recadrage — l'image courante reste clips.image_path.
@@ -1009,6 +1016,7 @@ _ALLOWED_CLIP_COLS = {
     "speech_cut", "extra_seconds",
     "omni_chain",    # Omni : place du bloc dans sa chaîne « voix identique »
     "excluded", "variant", "variant_label", "offscreen", "target_seconds",
+    "error_kind", "error_detail",   # refus Google (zone B)
     "is_product_anchor",   # ancre PRODUIT (is_anchor = ancre perso)
     "image_versions", "prompt_base", "last_correction",   # keyframes : versions / corrections
 }
@@ -1439,7 +1447,8 @@ _VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off",
 
 
 def job_inflight_add(
-    job_id: str, ad_id: int, output_mode: str, scene_ns: list[int], clip_id: int | None = None
+    job_id: str, ad_id: int, output_mode: str, scene_ns: list[int], clip_id: int | None = None,
+    clip_ids: list[int] | None = None,
 ) -> None:
     import json
 
@@ -1447,9 +1456,10 @@ def job_inflight_add(
     try:
         con.execute(
             "INSERT OR REPLACE INTO jobs_inflight(job_id, ad_id, output_mode, scene_ns, clip_id, "
-            "started_at) VALUES(?, ?, ?, ?, ?, ?)",
+            "started_at, clip_ids) VALUES(?, ?, ?, ?, ?, ?, ?)",
             (job_id, int(ad_id), output_mode, json.dumps([int(n) for n in scene_ns]),
-             int(clip_id) if clip_id is not None else None, time.time()),
+             int(clip_id) if clip_id is not None else None, time.time(),
+             json.dumps([int(c) for c in clip_ids or []])),
         )
         con.commit()
     finally:

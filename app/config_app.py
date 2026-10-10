@@ -1045,3 +1045,39 @@ def speaker_voice_profile(profiles: Any, speaker: int = 1, legacy: Any = None) -
 def speaker_words_per_sec(profiles: Any, speaker: int = 1, legacy: Any = None) -> float:
     """Débit (mots/s) de la fiche voix du speaker — sert au chronométreur."""
     return voice_words_per_sec(speaker_voice_profile(profiles, speaker, legacy))
+
+# ---------- Socle Morphea (11/10/2026) : constantes partagées entre zones ----------
+# Résolution de SORTIE des images Nano Banana (OpenRouter image_config.image_size). 2K = même prix
+# que 1K (1120 tokens → 0,134 $) ; 4K = 2000 tokens → 0,24 $ (Nano Banana Pro seulement).
+NB_IMAGE_SIZES = ("2K", "4K")
+DEFAULT_NB_IMAGE_SIZE = "2K"
+NANO_BANANA_PRO_TOKENS_4K = 2000
+
+
+def nb_image_size_supported(model_id: str) -> bool:
+    """La 4K n'existe que pour Nano Banana Pro (google/gemini-3-pro-image*)."""
+    return str(model_id or "").startswith("google/gemini-3-pro-image")
+
+
+def normalize_nb_image_size(value: object, model_id: str = "") -> str:
+    """« 2K » | « 4K » ; inconnu/vide → 2K ; 4K demandée sur un modèle qui ne la gère pas → 2K."""
+    v = str(value or "").strip().upper()
+    v = v if v in NB_IMAGE_SIZES else DEFAULT_NB_IMAGE_SIZE
+    if v == "4K" and model_id and not nb_image_size_supported(model_id):
+        return DEFAULT_NB_IMAGE_SIZE
+    return v
+
+
+def image_usd(model_id: str, size: str = DEFAULT_NB_IMAGE_SIZE) -> float:
+    """Tarif estimé ($/image) d'un modèle Nano Banana à la taille demandée."""
+    size = normalize_nb_image_size(size, model_id)
+    if size == "4K":
+        return round(NANO_BANANA_PRO_USD_PER_OUTPUT_TOKEN * NANO_BANANA_PRO_TOKENS_4K, 3)
+    return COST_USD_PER_IMAGE.get(model_id, COST_USD_PER_IMAGE_DEFAULT)
+
+
+# Gestes par défaut d'un plan Avatar IA (jamais de geste automatique « cheveux / mains ») :
+OMNI_DEFAULT_VIDEO_PROMPT = "warm natural smile, hands resting calmly"
+OMNI_CTA_VIDEO_PROMPT = "warm smile, small friendly wave of the hand"
+# Durée d'un plan parlé Omni = mots / débit de la fiche voix + cette marge (s), arrondie au-dessus.
+OMNI_SPEECH_MARGIN_S = 0.3

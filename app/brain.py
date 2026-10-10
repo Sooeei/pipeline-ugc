@@ -4438,3 +4438,22 @@ def _slug(script: str) -> str:
     words = _normalize_ws(script).lower().split()[:4]
     base = "_".join(words) or "pub"
     return re.sub(r"[^a-z0-9_]+", "", base)[:40] or "pub"
+
+# ---------------------------------------------------------------- socle Morphea (11/10/2026)
+_SPOKEN_QUOTES_RE = re.compile(r"[«»\"“”„]")
+_SPOKEN_DASH_RE = re.compile(r"(?:(?<=\s)|^)[—–-](?=\s|$)")
+
+
+def spoken_clean(text: str) -> str:
+    """Dialogue tel qu'ENVOYÉ au modèle vidéo (jamais stocké) : « : » et « ; » → « . » (un
+    deux-points a été prononcé « de Dour »), guillemets retirés, tirets isolés → virgule. Les
+    tirets DANS les mots (vingt-quatre) et les apostrophes sont gardés. Déterministe."""
+    t = _SPOKEN_QUOTES_RE.sub("", str(text or ""))
+    t = re.sub(r"\s*[:;]\s*", ". ", t)
+    t = _SPOKEN_DASH_RE.sub(",", t)
+    t = re.sub(r"\.\s+([a-zà-öø-ÿ])", lambda m: ". " + m.group(1).upper(), t)
+    t = re.sub(r"\s+,", ",", t)
+    t = re.sub(r",\s*,", ",", t)
+    t = re.sub(r"\.\s*\.", ".", t)
+    t = re.sub(r"^\s*,\s*", "", t)
+    return " ".join(t.split())

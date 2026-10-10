@@ -482,26 +482,26 @@
             <div class="ao-char-row" id="aoCharRow1" data-n="1">
               <span class="ao-char-n">1</span>
               <input type="text" id="aoCharName1" maxlength="40" placeholder="Nom court (ex. Marc)" />
-              <input type="text" id="aoPersona1" maxlength="300" placeholder="Ex. maquilleur homme, gants noirs" />
+              <input type="text" id="aoPersona1" maxlength="1000" placeholder="Ex. maquilleur homme, gants noirs" />
               <select id="aoCharSpeaks1"><option value="1">parle</option><option value="0">muet</option></select>
             </div>
             <div class="ao-char-row" id="aoCharRow2" data-n="2">
               <span class="ao-char-n">2</span>
               <input type="text" id="aoCharName2" maxlength="40" placeholder="Nom court (optionnel)" />
-              <input type="text" id="aoPersona2" maxlength="300" placeholder="Ex. femme ~60 ans, la modèle (optionnel)" />
+              <input type="text" id="aoPersona2" maxlength="1000" placeholder="Ex. femme ~60 ans, la modèle (optionnel)" />
               <select id="aoCharSpeaks2"><option value="0">muet</option><option value="1">parle</option></select>
             </div>
             <div class="ao-char-row hidden" id="aoCharRow3" data-n="3">
               <span class="ao-char-n">3</span>
               <input type="text" id="aoCharName3" maxlength="40" placeholder="Nom court" />
-              <input type="text" id="aoPersona3" maxlength="300" placeholder="Description (ex. flacon mascotte qui parle)" />
+              <input type="text" id="aoPersona3" maxlength="1000" placeholder="Description (ex. flacon mascotte qui parle)" />
               <select id="aoCharSpeaks3"><option value="0">muet</option><option value="1">parle</option></select>
               <button type="button" class="btn small ao-char-rm" data-n="3" title="Retirer">×</button>
             </div>
             <div class="ao-char-row hidden" id="aoCharRow4" data-n="4">
               <span class="ao-char-n">4</span>
               <input type="text" id="aoCharName4" maxlength="40" placeholder="Nom court" />
-              <input type="text" id="aoPersona4" maxlength="300" placeholder="Description" />
+              <input type="text" id="aoPersona4" maxlength="1000" placeholder="Description" />
               <select id="aoCharSpeaks4"><option value="0">muet</option><option value="1">parle</option></select>
               <button type="button" class="btn small ao-char-rm" data-n="4" title="Retirer">×</button>
             </div>
@@ -733,8 +733,8 @@
             </div>
             <div class="estimate" id="aoAnimEstimate"></div>
             <div class="row">
-              <label class="ao-res">Résolution vidéo
-                <select id="aoResolution">
+              <label class="ao-res" title="1080p = agrandissement (upscale) par Google, plus cher : 720p conseillé">Résolution vidéo
+                <select id="aoResolution" title="1080p = agrandissement (upscale) par Google, plus cher : 720p conseillé">
                   <option value="720p" selected>720p (économique)</option>
                   <option value="1080p">1080p</option>
                 </select>
@@ -742,6 +742,12 @@
               <button class="btn primary" id="aoAnimateBtn" disabled>🎬 Animer les plans validés</button>
             </div>
             <div id="aoKfGate" class="ao-kf-gate hidden"></div>
+            <!-- Variantes de hook (HOOK 2, HOOK 3…) : générées à la demande, hors montage principal. -->
+            <div id="aoVariantsBox" class="card-block hidden">
+              <div class="ao-voice-head"><b>🔀 Variantes de hook</b>
+                <span class="muted small">générées une par une, à la demande — hors vidéo assemblée</span></div>
+              <div id="aoVariantsList"></div>
+            </div>
             <div id="aoAnimProgress" class="hidden">
               <div class="progressbar"><div class="progressbar-fill" id="aoAnimProgFill"></div></div>
               <div class="prog-count" id="aoAnimProgCount"></div>
@@ -1024,6 +1030,12 @@
           </label>
           <label>Modèle d'image « Objet animé » (Nano Banana / Gemini)
             <select id="objetImageModel"></select>
+          </label>
+          <label title="Taille des images Nano Banana (toutes les pubs). 2K suffit pour une vidéo 1080p ; 4K coûte presque le double.">Taille des images (Nano Banana)
+            <select id="nbImageSize">
+              <option value="2K">2K (0,134 $/image)</option>
+              <option value="4K">4K (0,24 $/image)</option>
+            </select>
           </label>
           <label>Modèle vidéo « Objet animé » (Grok Imagine)
             <select id="objetVideoModel"></select>

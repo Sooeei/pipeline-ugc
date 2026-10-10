@@ -102,7 +102,8 @@ def sheet_block(sheet: dict[str, Any] | None, photo_legend: list[tuple[int, str]
         parts.append("No text, logo or label on the product.")
     if photo_legend:
         parts.append("Product photos: " + "; ".join(
-            f"reference image {n} = the product, {ANGLE_EN.get(a, a)}" for n, a in photo_legend) + ".")
+            f"reference image {n} = the product, {ANGLE_EN.get(a, a)}"
+            + (USAGE_PERSON_NOTE if a == "usage" else "") for n, a in photo_legend) + ".")
     out = " ".join(parts)
     return "" if out == "PRODUCT (match exactly):" else out
 
@@ -110,7 +111,13 @@ def sheet_block(sheet: dict[str, Any] | None, photo_legend: list[tuple[int, str]
 def photo_role_text(angle: str) -> str:
     """Rôle d'une photo de la fiche dans la légende Avatar IA (« reference image N = … »)."""
     # Court (budget < 250 mots) : la description complète est dans le bloc PRODUCT.
-    return f"product photo ({ANGLE_EN.get(angle, angle)}), exactly as described in PRODUCT"
+    out = f"product photo ({ANGLE_EN.get(angle, angle)}), exactly as described in PRODUCT"
+    if angle == "usage":   # la main / la personne de la photo n'est pas un personnage de la pub
+        out += USAGE_PERSON_NOTE
+    return out
+
+
+USAGE_PERSON_NOTE = "; the person in this photo is not a character: never reproduce them"
 
 
 # ---------------------------------------------------------------- produit visible ?
@@ -243,7 +250,7 @@ def copy_preset_sheet_to_ad(preset_id: int, ad_id: int, *, overwrite: bool = Fal
     folder.mkdir(parents=True, exist_ok=True)
     photos = []
     for p in src["photos"]:
-        for old in folder.glob(f"{p['angle']}.*"):
+        for old in [*folder.glob(f"{p['angle']}.*"), *folder.glob(f"{p['angle']}_*.*")]:
             old.unlink(missing_ok=True)
         dest = folder / f"{p['angle']}{Path(p['path']).suffix.lower() or '.png'}"
         try:
@@ -255,7 +262,7 @@ def copy_preset_sheet_to_ad(preset_id: int, ad_id: int, *, overwrite: bool = Fal
         keep = {p["angle"] for p in photos}
         for a in ANGLES:
             if a not in keep:
-                for old in folder.glob(f"{a}.*"):
+                for old in [*folder.glob(f"{a}.*"), *folder.glob(f"{a}_*.*")]:
                     old.unlink(missing_ok=True)
     save_ad_sheet(int(ad_id), {**src, "photos": photos})
     return True
@@ -392,8 +399,16 @@ async def post_ad_photo(ad_id: int, angle: str, file: UploadFile = File(...)) ->
 
     ad = _ad_or_404(ad_id)
     a = _check_angle(angle)
-    dest = presets._save_image(await _read_image(file), _ad_sheet_dir(ad), a)
+    folder = _ad_sheet_dir(ad)
+    dest = presets._save_image(await _read_image(file), folder, a)
     cur = ad_sheet(ad)
+    for p in cur["photos"]:   # « 📷 Remplacer » : l'ancienne photo de CET angle seulement
+        old = Path(p["path"])
+        try:
+            if p["angle"] == a and old != dest and old.resolve().parent == folder.resolve():
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
     photos = [p for p in cur["photos"] if p["angle"] != a] + [{"angle": a, "path": str(dest)}]
     save_ad_sheet(ad_id, {**cur, "photos": photos})
     return get_ad_sheet(ad_id)
@@ -433,6 +448,58 @@ def ad_sheet_from_preset(ad_id: int, body: dict[str, Any] | None = None) -> dict
         raise HTTPException(400, "Ce client n'a pas de fiche produit.")
     copy_preset_sheet_to_ad(pid, ad_id, overwrite=True)
     return get_ad_sheet(ad_id)
+
+
+def copy_preset_photo_to_ad(preset_id: int, ad_id: int, angle: str) -> str:
+    """Recopie la photo d'UN angle depuis le client (preset) dans la fiche de la pub (les autres
+    angles et les textes de la pub ne bougent pas). Nouveau nom de fichier à chaque recopie
+    (l'URL change : jamais d'image en cache). Renvoie le chemin copié ("" si le client n'a pas
+    de photo pour cet angle)."""
+    import time
+
+    ad = db.get_ad(int(ad_id))
+    src = _preset_photo(int(preset_id), angle)
+    if not ad or not src or not Path(src).is_file():
+        return ""
+    folder = _ad_sheet_dir(ad)
+    folder.mkdir(parents=True, exist_ok=True)
+    cur = ad_sheet(ad)
+    old_paths = [Path(p["path"]) for p in cur["photos"] if p["angle"] == angle]
+    dest = folder / f"{angle}_{int(time.time() * 1000)}{Path(src).suffix.lower() or '.png'}"
+    shutil.copyfile(src, dest)
+    for old in [*folder.glob(f"{angle}.*"), *old_paths]:
+        try:
+            if old != dest and old.resolve().parent == folder.resolve():
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+    photos = [p for p in cur["photos"] if p["angle"] != angle] + [{"angle": angle, "path": str(dest)}]
+    save_ad_sheet(int(ad_id), {**cur, "photos": photos})
+    return str(dest)
+
+
+@router.post("/api/ads/{ad_id}/product-sheet/photos/{angle}/from-preset")
+def ad_photo_from_preset(ad_id: int, angle: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """« ↺ Depuis le client » : recopie la photo de CET angle depuis le preset lié à la pub (ou
+    `preset_id` du body). Les autres angles de la pub sont intacts."""
+    ad = _ad_or_404(ad_id)
+    a = _check_angle(angle)
+    try:
+        pid = int((body or {}).get("preset_id") or ad.get("client_preset_id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "preset_id invalide.") from exc
+    if not pid:
+        raise HTTPException(400, "Aucun client lié à cette pub.")
+    _preset_or_404(pid)
+    if not copy_preset_photo_to_ad(pid, ad_id, a):
+        raise HTTPException(400, f"Le client n'a pas de photo « {ANGLE_LABELS_FR[a]} ».")
+    return get_ad_sheet(ad_id)
+
+
+def retouch_photos(sheet: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Photos de la fiche envoyées à une RETOUCHE avec réfs produit : TOUTES (face, profil,
+    usage, packaging) — [(chemin, angle)], fichiers absents ignorés."""
+    return sheet_photos(sheet, packaging=True)
 
 def never_line(sheet: dict[str, Any] | None) -> str:
     """« Never: … » de la fiche produit (interdits), à injecter dans TOUS les prompts image,

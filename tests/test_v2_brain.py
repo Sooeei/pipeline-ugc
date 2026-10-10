@@ -163,7 +163,8 @@ def test_claude_replicas_short_video_traits_first_and_only_uploaded_photos(monke
     head = s1["prompt_image"].split("\n")[0]
     assert head.startswith("KEY TRAITS") and "long wavy copper-red hair, freckles, big brown eyes" in head
     assert s1["prompt_image"].index("KEY TRAITS") < s1["prompt_image"].index("THIS SHOT")
-    assert "Character 1 (Bouton): round coral-red body" in head
+    # traits tirés de la description de l'UTILISATEUR (verbatim), pas de la reformulation de Claude
+    assert "Character 1 (Bouton): Small anthropomorphic red pimple" in head
     # seule planche2 fournie : jamais « visage2 » (ni réf, ni texte) ; décor non fourni non cité
     assert "visage2" not in s1["prompt_image"] and "visage2" not in s1["refs_needed"]
     assert '"decor"' not in s1["shot_prompt"] and '"planche2" sheet' in s1["shot_prompt"]

@@ -223,15 +223,19 @@ def effective_prompt(clip: dict[str, Any]) -> str:
 
 
 _TRANSLATE_SYSTEM = (
-    "You translate a short French instruction about editing a picture into concise, natural "
-    "English. Keep every detail, add nothing, no commentary. Reply with strict JSON only: "
+    "You translate a short French instruction about editing a picture into English, LITERALLY: "
+    "translate every word, keep every detail, add nothing, never replace a word by a softer, "
+    "stronger or different one (\"boutons\" = \"pimples\", \"imperfections\" = \"blemishes\"), keep "
+    "words already in English as they are, no commentary. Reply with strict JSON only: "
     '{"en": "<English>"}'
 )
 
 
 def to_english(cfg: Any, text: str) -> str:
-    """Consigne courte (correction / retouche) en ANGLAIS pour le modèle image. Simulation, texte
-    déjà anglais ou échec du cerveau → texte tel quel (jamais bloquant)."""
+    """Consigne courte (correction de régénération) en ANGLAIS pour le modèle image : traduction
+    LITTÉRALE si elle est en français, jamais de substitution de mots (le filtre Google n'est
+    contourné qu'après un vrai refus). Simulation, texte déjà anglais ou échec du cerveau → texte
+    tel quel (jamais bloquant). La RETOUCHE, elle, n'est plus traduite (verbatim)."""
     t = " ".join(str(text or "").split())
     if not t or getattr(cfg, "dry_run", True):
         return t
@@ -523,12 +527,22 @@ def maybe_auto_face_ref(clip_id: int) -> dict[str, Any] | None:
 
 
 # ==================================================================== retouche ciblée (EDIT)
-EDIT_TEMPLATE = "Edit this image: change ONLY {what}. Keep everything else exactly the same."
+# Consigne de l'utilisateur transmise VERBATIM (aucune traduction : Nano Banana Pro comprend le
+# français ; aucune substitution de mots : « blemishes » reste « blemishes »).
+EDIT_TEMPLATE = 'Edit this image: change ONLY this: "{what}". Keep everything else exactly the same.'
+FILTER_RETRY_NOTE = "reformulé : filtre Google"
 
 
-def retouch_blocks(instruction_en: str, n_product: int = 0) -> dict[str, str]:
+def retouch_blocks(
+    instruction: str, n_product: int = 0, *, sheet: dict[str, Any] | None = None,
+    sheet_legend: list[tuple[int, str]] | None = None, with_product: bool | None = None,
+) -> dict[str, str]:
     """Blocs du prompt EDIT Nano Banana Pro : image 1 = image ACTUELLE du plan (à retoucher),
-    images suivantes = photos du produit (facultatives)."""
+    images 2..1+n_product = réfs « produit » de la pub, puis les photos de la fiche produit
+    (`sheet_legend` = [(n° d'image, angle)], légendées dans le bloc PRODUCT). La consigne part
+    MOT POUR MOT. Fiche produit : bloc complet (avec légende) si des réfs produit sont jointes,
+    sinon au moins sa ligne « Never: … » (interdits, K3)."""
+    from . import product_sheet
     from . import prompt_profiles as pp
 
     roles = ["reference image 1 = the image to edit"]
@@ -536,8 +550,14 @@ def retouch_blocks(instruction_en: str, n_product: int = 0) -> dict[str, str]:
         imgs = ", ".join(f"reference image {i}" for i in range(2, 2 + n_product))
         roles.append(f"{imgs} = the client's product — reproduce it exactly, a plain object: "
                      "never give it a face")
-    what = " ".join(str(instruction_en or "").split()).rstrip(".")
-    return {pp.B_IMAGE_ROLES: "; ".join(roles) + ".", pp.B_SUBJECT: EDIT_TEMPLATE.format(what=what)}
+    what = " ".join(str(instruction or "").split()).replace('"', "'").rstrip(".")
+    blocks = {pp.B_IMAGE_ROLES: "; ".join(roles) + ".", pp.B_SUBJECT: EDIT_TEMPLATE.format(what=what)}
+    product = bool(n_product or sheet_legend) if with_product is None else with_product
+    sheet_txt = (product_sheet.sheet_block(sheet, sheet_legend or None) if product
+                 else product_sheet.never_line(sheet))
+    if sheet_txt:
+        blocks[pp.B_PRODUCT_SHEET] = sheet_txt
+    return blocks
 
 
 def _product_refs(ad_id: int) -> list[str]:
@@ -545,12 +565,40 @@ def _product_refs(ad_id: int) -> list[str]:
             if config_app.normalize_omni_ref_kind(r.get("kind")) == "produit" and Path(str(r["path"])).is_file()]
 
 
-def retouch(cfg: Any, clip_id: int, instruction: str, *, with_product_refs: bool = False) -> dict[str, Any]:
-    """Retouche ciblée : image ACTUELLE du plan en image 1 (rôle anchor) + réfs produit si
-    demandé → Nano Banana Pro (toujours) avec « Edit this image: change ONLY … ». Crée une
-    nouvelle version (source « retouche ») et la rend courante. Simulation : placeholder."""
-    from . import brain, cost, gen_trace, pipeline
+def retouch_inputs(
+    clip: dict[str, Any], ad: dict[str, Any], instruction: str, *, with_product_refs: bool = False,
+) -> tuple[list[str], list[str], str]:
+    """(réfs, rôles, prompt) d'une retouche. Avec `with_product_refs` : réfs « produit » de la
+    pub + TOUTES les photos de la fiche produit (face, profil, usage, packaging), dédupliquées
+    (même fichier ou même contenu), rôle ROLE_PRODUCT ; plafond OBJET_MAX_REF_IMAGES."""
+    from . import pipeline, product_sheet
     from . import prompt_profiles as pp
+
+    cur = str(clip.get("image_path") or "")
+    sheet = product_sheet.ad_sheet(ad)
+    products = _product_refs(int(ad["id"])) if with_product_refs else []
+    sheet_photos = product_sheet.retouch_photos(sheet) if with_product_refs else []
+    angle_of = {p: a for p, a in sheet_photos}
+    candidates = [cur, *products, *[p for p, _a in sheet_photos]]
+    refs = pipeline.dedupe_images(candidates)[: config_app.OBJET_MAX_REF_IMAGES]
+    n_generic = sum(1 for p in refs[1:] if p not in angle_of)
+    # Ordre : image à retoucher, réfs produit génériques, puis photos de la fiche.
+    refs = [refs[0], *[p for p in refs[1:] if p not in angle_of], *[p for p in refs[1:] if p in angle_of]]
+    legend = [(i, angle_of[p]) for i, p in enumerate(refs, 1) if i > 1 and p in angle_of]
+    roles = [pp.ROLE_ANCHOR] + [pp.ROLE_PRODUCT] * (len(refs) - 1)
+    blocks = retouch_blocks(instruction, n_generic, sheet=sheet, sheet_legend=legend,
+                            with_product=with_product_refs)
+    return refs, roles, pp.nano_banana_prompt(blocks)
+
+
+def retouch(cfg: Any, clip_id: int, instruction: str, *, with_product_refs: bool = False) -> dict[str, Any]:
+    """Retouche ciblée : image ACTUELLE du plan en image 1 (rôle anchor) + réfs produit et photos
+    de la fiche si demandé → Nano Banana Pro (toujours) avec « Edit this image: change ONLY
+    this: "<consigne VERBATIM>" ». Refus du filtre Google → UNE relance reformulée
+    (brain.google_safe_prompt strict), notée dans la version. Crée une nouvelle version (source
+    « retouche ») et la rend courante. Simulation : placeholder."""
+    from . import brain, cost, gen_trace, pipeline
+    from .providers import ContentFilterError
 
     clip = db.get_clip(clip_id)
     if clip is None:
@@ -562,30 +610,36 @@ def retouch(cfg: Any, clip_id: int, instruction: str, *, with_product_refs: bool
     instr = " ".join(str(instruction or "").split())
     if not instr:
         raise ToolError("Écris la retouche voulue (ex. « le pull en bleu »).")
-    products = _product_refs(int(ad["id"])) if with_product_refs else []
-    refs = [cur, *[p for p in products if p != cur]][: config_app.OBJET_MAX_REF_IMAGES]
-    roles = [pp.ROLE_ANCHOR] + [pp.ROLE_REFERENCE] * (len(refs) - 1)
-    blocks = retouch_blocks(to_english(cfg, instr), len(refs) - 1)
-    prompt = pp.nano_banana_prompt(blocks)
+    refs, roles, prompt = retouch_inputs(clip, ad, instr, with_product_refs=with_product_refs)
     style = pipeline.ad_style(ad) if ad.get("kind") == "avatar_omni" else ("3d" if ad.get("kind") == "objet" else "")
     folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"]))
     dest = prepare_path(clip_id, folder, int(clip["scene_n"]))
     kcfg = pipeline.omni_keyframe_cfg(cfg)   # retouche : toujours Nano Banana Pro
+    note = instr
     with gen_trace.context(ad_id=int(ad["id"]), clip_id=clip_id, mode=gen_trace.mode_of_ad(ad),
                            step="retouche"):
-        pipeline.nano_banana_generate_image(
-            kcfg, brain.google_safe_prompt(prompt, style), refs, dest,
-            label=str(ad.get("name") or ""), subtitle=f"retouche plan {clip['scene_n']}",
-            index=int(clip["scene_n"]) - 1, image_roles=roles,
-        )
+        def _gen(p: str) -> None:
+            pipeline.nano_banana_generate_image(
+                kcfg, p, refs, dest,
+                label=str(ad.get("name") or ""), subtitle=f"retouche plan {clip['scene_n']}",
+                index=int(clip["scene_n"]) - 1, image_roles=roles,
+            )
+        try:
+            _gen(prompt)
+        except ContentFilterError:
+            # UNE seule relance, reformulée pour le filtre Google (jamais avant un vrai refus).
+            prompt = brain.google_safe_prompt(prompt, style, strict=True)
+            _gen(prompt)
+            note = f"[{FILTER_RETRY_NOTE}] {instr}"
     if not kcfg.dry_run:
         cost.record_image(int(ad["id"]), pipeline._objet_image_model_id(kcfg))
     kf_src = config_app.OMNI_KEYFRAME_IMAGE_MODEL if ad.get("kind") == "avatar_omni" else ""
     entry = record(clip_id, dest, "retouche", generation_id=db.generation_for_output(clip_id, str(dest)),
-                   keyframe_source=kf_src, note=instr)
+                   keyframe_source=kf_src, note=note)
     res = apply_image(clip_id, str(dest), keyframe_source=kf_src)
     db.log_activity(str(ad.get("kind") or "objet"), f"Plan {clip['scene_n']} : retouche « {instr[:80]} ».")
-    return {"ok": True, **res, "v": entry["v"], "image_url": _media_url(str(dest)), "prompt": prompt}
+    return {"ok": True, **res, "v": entry["v"], "image_url": _media_url(str(dest)), "prompt": prompt,
+            "filter_retry": note != instr}
 
 
 # ==================================================================== application d'un outil local

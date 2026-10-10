@@ -173,11 +173,12 @@ def test_retouch_sends_current_image_first_and_creates_version(monkeypatch):
         assert c.post(f"/api/clips/{cid}/retouch", json={"instruction": "  "}).status_code == 400
     first, second = k.calls
     assert first["refs"] == [cur] and first["roles"] == [pp.ROLE_ANCHOR]
-    assert "Edit this image: change ONLY the sweater in navy blue. Keep everything else exactly the same." in first["prompt"]
+    assert ('Edit this image: change ONLY this: "the sweater in navy blue". Keep everything else '
+            "exactly the same.") in first["prompt"]
     assert first["model"] == "nano_banana_pro"
     # 2e retouche : part de l'image RETOUCHÉE (image actuelle) + photo produit cochée
     assert second["refs"][0] == first["out"] and second["refs"][1:] == [prod]
-    assert second["roles"] == [pp.ROLE_ANCHOR, pp.ROLE_REFERENCE]
+    assert second["roles"] == [pp.ROLE_ANCHOR, pp.ROLE_PRODUCT]
     assert "reference image 2 = the client's product" in second["prompt"]
     clip = db.get_clip(cid)
     assert clip["image_path"] == second["out"] and clip["status"] == "image_pret" and clip["keyframe_ok"] == 0

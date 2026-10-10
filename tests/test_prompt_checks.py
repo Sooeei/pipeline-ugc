@@ -26,7 +26,8 @@ def _ref(role="reference", path="a.png"):
 # ============================================================ fiche Nano Banana Pro
 def test_nano_banana_profile_documents_limits_and_sources():
     assert NB.max_images == 14 and NB.limits["max_object_refs_hifi"] == 6
-    assert NB.verified_on == "2026-10-08"
+    assert NB.verified_on == "2026-10-11"
+    assert NB.limits["sizes"] == ("2K", "4K")
     assert any("ai.google.dev" in s for s in NB.sources)
     assert any("openrouter.ai/api/v1/models" in s for s in NB.sources)
     assert NB.block_order[-1] == pp.B_OUTPUT_FORMAT

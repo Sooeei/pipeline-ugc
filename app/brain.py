@@ -4690,7 +4690,8 @@ def spoken_clean(text: str) -> str:
     deux-points a été prononcé « de Dour »), guillemets retirés, tirets isolés → virgule. Les
     tirets DANS les mots (vingt-quatre) et les apostrophes sont gardés. Déterministe."""
     t = _SPOKEN_QUOTES_RE.sub("", str(text or ""))
-    t = re.sub(r"\s*[:;]\s*", ". ", t)
+    t = re.sub(r"(?<!\d):|:(?!\d)", ";", t)          # « 9:30 » (horaire) gardé tel quel
+    t = re.sub(r"\s*;\s*", ". ", t)
     t = _SPOKEN_DASH_RE.sub(",", t)
     t = re.sub(r"\.\s+([a-zà-öø-ÿ])", lambda m: ". " + m.group(1).upper(), t)
     t = re.sub(r"\s+,", ",", t)

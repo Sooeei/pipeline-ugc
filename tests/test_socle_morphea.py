@@ -54,6 +54,7 @@ def test_clip_lock_released_even_if_job_fails():
      "Le matelas, élu produit de l'année, vingt-quatre heures"),
     ('Il dit "wow" et “ok”.', "Il dit wow et ok."),
     ("Sans ponctuation spéciale.", "Sans ponctuation spéciale."),
+    ("Ouvert dès 9:30 : venez !", "Ouvert dès 9:30. Venez !"),
 ])
 def test_spoken_clean(raw, sent):
     assert brain.spoken_clean(raw) == sent

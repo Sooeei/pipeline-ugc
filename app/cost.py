@@ -170,11 +170,13 @@ def estimate_avatar_v2(
 
 
 def image_model_usd(model_key: str) -> float:
-    """Tarif estimé ($/image) d'un modèle d'image (clé OBJET_IMAGE_MODELS)."""
+    """Tarif estimé ($/image) d'un modèle d'image (clé OBJET_IMAGE_MODELS), à la taille de sortie
+    choisie dans les Réglages (2K / 4K ; 4K seulement pour Nano Banana Pro)."""
     cfg = config_app.OBJET_IMAGE_MODELS.get(model_key)
     if cfg is None:
         return config_app.NANO_BANANA_COST_PER_IMAGE_USD
-    return config_app.COST_USD_PER_IMAGE.get(cfg["model"], config_app.COST_USD_PER_IMAGE_DEFAULT)
+    size = db.get_setting("nb_image_size", config_app.DEFAULT_NB_IMAGE_SIZE)
+    return config_app.image_usd(cfg["model"], size)
 
 
 def omni_keyframe_image_usd() -> float:
@@ -200,7 +202,7 @@ def generation_usd_estimate(
     p = params or {}
     model = str(model or "")
     if kind == "image":
-        return round(config_app.COST_USD_PER_IMAGE.get(model, config_app.COST_USD_PER_IMAGE_DEFAULT), 4)
+        return round(config_app.image_usd(model, str(p.get("size") or config_app.DEFAULT_NB_IMAGE_SIZE)), 4)
     try:
         secs = max(0.0, float(p.get("seconds") or 0))
     except (TypeError, ValueError):
@@ -223,25 +225,59 @@ def generation_usd_estimate(
 
 # ============================================================ COMPTABILISATION (générations RÉELLES)
 # Chaque fonction record_* enregistre UN événement de coût réel en base (jamais en simulation).
-def record_image(ad_id: int | None, model: str) -> None:
+# Rattachement AUTOMATIQUE à la génération qui vient d'être journalisée par le même thread
+# (gen_trace.take_last) : generation_id (jamais compté deux fois), plan, étape, catégorie.
+# Aucun appelant n'a à changer.
+def _link(kind: str, ad_id: int | None = None) -> dict[str, Any]:
+    """Champs de rattachement d'un événement de coût : génération réelle en attente du même type
+    (image / video) et de la même pub, sinon plan / étape du contexte de traçabilité courant."""
+    from app import gen_trace
+
+    out: dict[str, Any] = {"generation_id": None, "clip_id": None, "step": "", "category": kind}
+    last = gen_trace.take_last(kind) if kind in ("image", "video") else None
+    if last and ad_id is not None and last.get("ad_id") is not None and int(last["ad_id"]) != int(ad_id):
+        last = None   # génération d'une autre pub : pas la bonne
+    ctx = gen_trace.current()
+    if last:
+        out.update(generation_id=last["id"], clip_id=last["clip_id"], step=last["step"])
+    else:
+        try:
+            out["clip_id"] = int(ctx["clip_id"]) if ctx.get("clip_id") not in (None, "") else None
+        except (TypeError, ValueError):
+            out["clip_id"] = None
+        out["step"] = str(ctx.get("step") or "")
+    return out
+
+
+def _ctx_ad_id(ad_id: int | None) -> int | None:
+    if ad_id is not None:
+        return ad_id
+    from app import gen_trace
+
+    try:
+        return int(gen_trace.current().get("ad_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def record_image(ad_id: int | None, model: str, size: str | None = None) -> None:
     """1 image Nano Banana RÉELLE (keyframe, régénération, retouche, cohérence…). `ad_id` absent →
     celui du contexte de traçabilité (gen_trace.context) : une image faite pour une pub est
-    TOUJOURS comptée dans son coût réel (ad_real_cost), même si l'appelant a oublié l'ad_id."""
-    if ad_id is None:
-        from app import gen_trace
-
-        try:
-            ad_id = int(gen_trace.current().get("ad_id"))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            ad_id = None
-    rate = config_app.COST_USD_PER_IMAGE.get(model, config_app.COST_USD_PER_IMAGE_DEFAULT)
-    db.add_cost_event("openrouter", "image", 1, usd=rate, ad_id=ad_id, detail=model)
+    TOUJOURS comptée dans son coût réel (ad_real_cost), même si l'appelant a oublié l'ad_id.
+    `size` (« 2K » | « 4K ») absent → réglage `nb_image_size` ; prix = config_app.image_usd."""
+    ad_id = _ctx_ad_id(ad_id)
+    if size is None:
+        size = db.get_setting("nb_image_size", config_app.DEFAULT_NB_IMAGE_SIZE)
+    size = config_app.normalize_nb_image_size(size, model)
+    rate = config_app.image_usd(model, size)
+    detail = model if size == config_app.DEFAULT_NB_IMAGE_SIZE else f"{model} {size}"
+    db.add_cost_event("openrouter", "image", 1, usd=rate, ad_id=ad_id, detail=detail, **_link("image", ad_id))
 
 
 def record_grok_clip(ad_id: int | None, seconds: float) -> None:
     secs = max(0.0, float(seconds))
     usd = secs * config_app.GROK_COST_PER_SECOND_USD + config_app.GROK_COST_USD_PER_INPUT_IMAGE
-    db.add_cost_event("grok", "second", secs, usd=usd, ad_id=ad_id, detail="video+voix")
+    db.add_cost_event("grok", "second", secs, usd=usd, ad_id=ad_id, detail="video+voix", **_link("video", ad_id))
 
 
 def record_kling_clip(
@@ -252,14 +288,15 @@ def record_kling_clip(
     (std/pro selon le modèle). JAMAIS en simulation."""
     secs = max(0.0, float(seconds))
     usd = float(usd_cost) if usd_cost and usd_cost > 0 else secs * config_app.mashup_cost_per_second(model)
-    db.add_cost_event("kling", "second", secs, usd=usd, ad_id=ad_id, detail=model)
+    db.add_cost_event("kling", "second", secs, usd=usd, ad_id=ad_id, detail=model, **_link("video", ad_id))
 
 
 def record_omni_clip(ad_id: int | None, seconds: float) -> None:
     """1 clip Google Omni (Avatar IA : vidéo + voix) facturé à la SECONDE. JAMAIS en simulation."""
     secs = max(0.0, float(seconds))
     usd = secs * config_app.OMNI_COST_PER_SECOND_USD
-    db.add_cost_event("gemini", "second", secs, usd=usd, ad_id=ad_id, detail="omni video+voix")
+    db.add_cost_event("gemini", "second", secs, usd=usd, ad_id=ad_id, detail="omni video+voix",
+                      **_link("video", ad_id))
 
 
 def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:
@@ -268,11 +305,12 @@ def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:
     m = config_app.COST_MODES.get(mode, config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
     credits = max(0.0, float(seconds)) * m["credits_per_sec"]
     usd = credits * config_app.HEYGEN_USD_PER_CREDIT
-    db.add_cost_event("heygen", "credit", credits, usd=usd, credits=credits, ad_id=ad_id, detail=mode)
+    db.add_cost_event("heygen", "credit", credits, usd=usd, credits=credits, ad_id=ad_id, detail=mode,
+                      **_link("video", ad_id))
 
 
 def record_gradium_tts(ad_id: int | None) -> None:
-    db.add_cost_event("gradium", "generation", 1, ad_id=ad_id)
+    db.add_cost_event("gradium", "generation", 1, ad_id=ad_id, **_link("voice", ad_id))
 
 
 def record_elevenlabs(ad_id: int | None, chars: int) -> None:
@@ -280,7 +318,8 @@ def record_elevenlabs(ad_id: int | None, chars: int) -> None:
     ELEVENLABS_COST_PER_1K_CHARS_USD). JAMAIS en simulation."""
     n = max(0, int(chars or 0))
     usd = n / 1000 * config_app.ELEVENLABS_COST_PER_1K_CHARS_USD
-    db.add_cost_event("elevenlabs", "char", n, usd=usd, ad_id=ad_id, detail=config_app.ELEVENLABS_MODEL_ID)
+    db.add_cost_event("elevenlabs", "char", n, usd=usd, ad_id=ad_id, detail=config_app.ELEVENLABS_MODEL_ID,
+                      **_link("voice", ad_id))
 
 
 def record_anthropic_call(
@@ -291,13 +330,15 @@ def record_anthropic_call(
         + (output_tokens / 1_000_000) * config_app.ANTHROPIC_USD_PER_MTOK_OUT
     )
     db.add_cost_event(
-        "anthropic", "call", 1, usd=usd, ad_id=ad_id, detail=f"{input_tokens}+{output_tokens} tok"
+        "anthropic", "call", 1, usd=usd, ad_id=ad_id, detail=f"{input_tokens}+{output_tokens} tok",
+        category="brain",
     )
 
 
 def record_claude_code_call(model: str = "", ad_id: int | None = None) -> None:
     """Appel du cerveau via Claude Code (abonnement) : 0 $ (quota de l'abonnement), compté à part."""
-    db.add_cost_event("claude_code", "call", 1, usd=0.0, ad_id=ad_id, detail=model or "claude -p")
+    db.add_cost_event("claude_code", "call", 1, usd=0.0, ad_id=ad_id, detail=model or "claude -p",
+                      category="brain")
 
 
 # ============================================================ RAPPORT (section « Coûts »)
@@ -553,9 +594,62 @@ def estimate_pub(
     }
 
 
+# Étapes « suite » d'une même vidéo : elles appartiennent à la tentative qui les précède.
+_CONTINUATION_STEPS = ("extension", "chaine_suite")
+BREAKDOWN_KEYS = ("images", "retouches", "videos", "relances", "autres")
+
+
+def ad_cost_breakdown(ad_id: int) -> dict[str, Any]:
+    """Coût RÉEL d'une pub ventilé (archives comprises, une génération = un seul événement) :
+    - images    : images Nano Banana (keyframes, régénérations, cohérence…) ;
+    - retouches : images de l'étape « retouche* » (retouche de l'ancre…) ;
+    - videos    : 1re génération vidéo réelle de chaque plan (une chaîne = tous ses tours) ;
+    - relances  : les générations vidéo suivantes d'un plan déjà généré ;
+    - autres    : voix, cerveau, divers.
+    → {usd, images:{n, usd}, retouches, videos, relances, autres}. usd = somme de TOUS les
+    événements de la pub (= boîte de coût, = bandeau). Simulation : rien d'enregistré → 0 $."""
+    out: dict[str, Any] = {k: {"n": 0, "usd": 0.0} for k in BREAKDOWN_KEYS}
+    seen: set[int] = set()
+    head_class: dict[int, str] = {}
+    chain_class = ""
+    total = 0.0
+    for ev in db.cost_events_for_ad(ad_id):
+        usd = float(ev.get("usd") or 0)
+        total += usd
+        cat = str(ev.get("category") or "") or db.cost_category(str(ev.get("service") or ""))
+        step = str(ev.get("step") or "")
+        if cat == "image":
+            key = "retouches" if step.startswith("retouche") else "images"
+        elif cat == "video":
+            clip = ev.get("clip_id")
+            if clip is None:
+                key = "videos"
+            else:
+                clip = int(clip)
+                if step == "extension":
+                    key = head_class.get(clip) or ("relances" if clip in seen else "videos")
+                elif step == "chaine_suite":
+                    key = "relances" if (chain_class == "relances" or clip in seen) else "videos"
+                else:
+                    key = "relances" if clip in seen else "videos"
+                    head_class[clip] = key
+                    if step == "chaine":
+                        chain_class = key
+                seen.add(clip)
+        else:
+            key = "autres"
+        out[key]["n"] += 1
+        out[key]["usd"] += usd
+    for k in BREAKDOWN_KEYS:
+        out[k]["usd"] = round(out[k]["usd"], 2)
+    out["usd"] = round(total, 2)
+    return out
+
+
 def ad_real_cost(ad_id: int) -> dict[str, Any]:
     """Coût RÉEL cumulé d'une pub (événements enregistrés après chaque génération réelle),
-    ventilé par service. La simulation n'enregistre rien → 0 $."""
+    ventilé par service ET par poste (`breakdown`, cf. ad_cost_breakdown). Archives comprises.
+    La simulation n'enregistre rien → 0 $."""
     agg: dict[str, dict[str, Any]] = {}
     for r in db.cost_by_service_for_ad(ad_id):
         s = agg.setdefault(r["service"], {"usd": 0.0, "units": {}})
@@ -567,7 +661,8 @@ def ad_real_cost(ad_id: int) -> dict[str, Any]:
          "units": _units_label(s, agg[s]["units"]), "usd": round(agg[s]["usd"], 2)}
         for s in order
     ]
-    return {"usd": round(sum(x["usd"] for x in agg.values()), 2), "services": services}
+    return {"usd": round(sum(x["usd"] for x in agg.values()), 2), "services": services,
+            "breakdown": ad_cost_breakdown(ad_id)}
 
 
 def archive_detail(archive_id: int) -> dict[str, Any] | None:

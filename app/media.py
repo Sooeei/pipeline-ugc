@@ -201,34 +201,170 @@ def detect_speech_cut(mp4: str | Path) -> bool:
     return speech_cut_from_levels(parse_rms_frames(proc.stderr or ""))
 
 
-def concat_mp4(parts: Sequence[str | Path], out_path: str | Path) -> str:
-    """Concatène des mp4 (tours successifs d'une vidéo Omni étendue) en UN fichier. D'abord sans
-    ré-encodage (demuxer concat, -c copy) ; si ça échoue (flux incompatibles), ré-encodage."""
+def _float_or_none(v: Any) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x == x and x >= 0 else None
+
+
+def _rate(v: Any) -> float | None:
+    """« 24/1 » / « 30000/1001 » → fps (None si illisible ou nul)."""
+    try:
+        num, _, den = str(v or "").partition("/")
+        x = float(num) / float(den or 1)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return x if x > 0 else None
+
+
+def probe_av(path: str | Path) -> dict[str, Any]:
+    """Description d'un fichier média via ffprobe (JSON) :
+    {duration, video: {duration, fps, r_frame_rate, width, height, time_base} | None,
+     audio: {duration, sample_rate, channels} | None}. ffprobe absent / illisible → tout à None."""
+    import json
+
+    out: dict[str, Any] = {"duration": None, "video": None, "audio": None}
+    if shutil.which("ffprobe") is None:
+        return out
+    try:
+        raw = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
+             str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=60,
+        ).stdout
+        info = json.loads(raw or "{}")
+    except Exception:  # noqa: BLE001 - diagnostic : jamais d'exception
+        return out
+    fmt_dur = _float_or_none((info.get("format") or {}).get("duration"))
+    out["duration"] = fmt_dur
+    for s in info.get("streams") or []:
+        kind = s.get("codec_type")
+        if kind == "video" and out["video"] is None:
+            if (s.get("disposition") or {}).get("attached_pic"):
+                continue   # pochette d'un mp3 : pas une vraie piste vidéo
+            out["video"] = {
+                "duration": _float_or_none(s.get("duration")) or fmt_dur,
+                "fps": _rate(s.get("r_frame_rate")) or _rate(s.get("avg_frame_rate")),
+                "r_frame_rate": str(s.get("r_frame_rate") or ""),
+                "width": int(s.get("width") or 0), "height": int(s.get("height") or 0),
+                "time_base": str(s.get("time_base") or ""),
+            }
+        elif kind == "audio" and out["audio"] is None:
+            out["audio"] = {
+                "duration": _float_or_none(s.get("duration")) or fmt_dur,
+                "sample_rate": int(s.get("sample_rate") or 0),
+                "channels": int(s.get("channels") or 0),
+            }
+    return out
+
+
+# Assemblage final : format de sortie normalisé (timescale identique aux clips Grok / Omni).
+CONCAT_DEFAULT_FPS = 24
+CONCAT_DEFAULT_SIZE = (720, 1280)
+CONCAT_TIMESCALE = 12288
+CONCAT_TOLERANCE_S = 0.5          # écart max vidéo / audio et vidéo / Σ segments
+CONCAT_TOLERANCE_PER_PART_S = 0.04  # + tolérance par segment (arrondi à l'image près)
+
+
+def concat_mp4(
+    parts: Sequence[str | Path], out_path: str | Path, *, fps: float | None = None,
+    size: tuple[int, int] | None = None,
+) -> str:
+    """Concatène des mp4 (blocs d'une pub, tours d'une vidéo Omni étendue) en UN fichier.
+
+    TOUJOURS ré-encodé et normalisé (filter_complex) : un `-c copy` sur des clips de time_base
+    différents (1/90000 vs 1/12288) donnait des DTS non monotones → vidéo étirée (490 s pour 67 s).
+    Chaque segment : vidéo coupée à SA durée, cadence F, mise au format W×H (letterbox), yuv420p ;
+    audio 48 kHz stéréo, complété de silence puis coupé à la durée VIDÉO du segment (segment muet →
+    silence). F / W×H = ceux du 1er clip (24 fps / 720x1280 par défaut). Contrôle après coup :
+    |vidéo − audio| ≤ 0,5 s et |vidéo − Σ segments| ≤ 0,5 + 0,04·N, sinon RuntimeError."""
     if not ffmpeg_available():
         raise RuntimeError(FFMPEG_MISSING_MSG)
+    if not parts:
+        raise ValueError("Aucune vidéo à assembler.")
+    if shutil.which("ffprobe") is None:
+        raise RuntimeError("ffprobe est introuvable (il est livré avec ffmpeg) — réinstalle ffmpeg.")
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    listing = out_path.with_suffix(".concat.txt")
-    lines = []
-    for p in parts:
-        safe = str(Path(p).resolve()).replace("\\", "/").replace("'", "'\\''")
-        lines.append(f"file '{safe}'")
-    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-            "-i", str(listing)]
-    try:
-        try:
-            subprocess.run(base + ["-c", "copy", str(out_path)], check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            subprocess.run(
-                base + ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out_path)],
-                check=True, capture_output=True,
+    infos = [probe_av(p) for p in parts]
+    first_v = next((i["video"] for i in infos if i["video"]), None) or {}
+    f = fps or first_v.get("fps") or CONCAT_DEFAULT_FPS
+    f = min(60, max(1, int(round(float(f)))))
+    if size:
+        w, h = int(size[0]), int(size[1])
+    else:
+        w, h = int(first_v.get("width") or 0), int(first_v.get("height") or 0)
+        if w <= 0 or h <= 0:
+            w, h = CONCAT_DEFAULT_SIZE
+    w, h = w - w % 2, h - h % 2   # libx264 / yuv420p : dimensions paires
+
+    args: list[str] = []
+    graph: list[str] = []
+    labels: list[str] = []
+    durations: list[float] = []
+    for i, (p, info) in enumerate(zip(parts, infos, strict=True)):
+        if not info["video"]:
+            raise RuntimeError(f"Assemblage impossible : « {Path(p).name} » n'a pas de piste vidéo lisible.")
+        d = info["video"]["duration"] or info["duration"]
+        if not d or d <= 0:
+            raise RuntimeError(f"Assemblage impossible : durée de « {Path(p).name} » illisible.")
+        durations.append(float(d))
+        args += ["-i", str(p)]
+        graph.append(
+            f"[{i}:v:0]setpts=PTS-STARTPTS,fps={f},trim=duration={d:.3f},setpts=PTS-STARTPTS,"
+            f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,format=yuv420p[v{i}]"
+        )
+        if info["audio"]:
+            graph.append(
+                f"[{i}:a:0]asetpts=PTS-STARTPTS,aresample=48000,"
+                "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"apad,atrim=duration={d:.3f},asetpts=PTS-STARTPTS[a{i}]"
             )
-    finally:
+        else:
+            graph.append(
+                "anullsrc=r=48000:cl=stereo,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"atrim=duration={d:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+        labels.append(f"[v{i}][a{i}]")
+    n = len(parts)
+    graph.append(f"{''.join(labels)}concat=n={n}:v=1:a=1[v][a]")
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args,
+        "-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-r", str(f), "-video_track_timescale", str(CONCAT_TIMESCALE),
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-shortest", "-movflags", "+faststart", str(out_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        tail = (exc.stderr or b"").decode("utf-8", "replace").strip()[-600:]
+        raise RuntimeError(f"Assemblage ffmpeg en échec : {tail or exc}") from exc
+
+    # Contrôle : la vidéo assemblée a la bonne durée et l'audio reste calé.
+    got = probe_av(out_path)
+    vdur = (got["video"] or {}).get("duration")
+    adur = (got["audio"] or {}).get("duration")
+    expected = sum(durations)
+    problems: list[str] = []
+    if vdur is None:
+        problems.append("durée de la vidéo assemblée illisible")
+    else:
+        if adur is None or abs(vdur - adur) > CONCAT_TOLERANCE_S:
+            a_txt = f"{adur:.2f}" if adur is not None else "?"
+            problems.append(f"audio {a_txt} s ≠ vidéo {vdur:.2f} s")
+        if abs(vdur - expected) > CONCAT_TOLERANCE_S + CONCAT_TOLERANCE_PER_PART_S * n:
+            problems.append(f"vidéo {vdur:.2f} s au lieu de {expected:.2f} s (somme des {n} clips)")
+    if problems:
         try:
-            listing.unlink()
+            out_path.unlink()
         except OSError:
             pass
+        raise RuntimeError("Assemblage incorrect (" + " ; ".join(problems) + ") — vidéo finale non écrite.")
     return str(out_path)
 
 
@@ -370,6 +506,42 @@ def replace_audio(video: str | Path, audio: str | Path, out_mp4: str | Path) -> 
         "-c:v", "copy", "-c:a", "aac", "-af", "apad", "-shortest",
         str(out),
     ])
+    return out
+
+
+def has_audio_stream(path: str | Path) -> bool:
+    """True si le fichier a une piste audio (ffprobe ; absent / illisible → False)."""
+    return probe_av(path)["audio"] is not None
+
+
+# Débruitage LÉGER (grésillements de fond) : réduction de bruit FFT, plancher -45 dB, suivi du bruit.
+DENOISE_FILTER = "afftdn=nr=10:nf=-45:tn=1"
+
+
+def denoise_copy(src: str | Path, out: str | Path) -> Path:
+    """Écrit à `out` une COPIE débruitée de `src` (jamais l'original modifié) : mp4 → vidéo copiée
+    telle quelle + audio AAC 192k débruité ; wav → PCM 16 bits ; mp3 → libmp3lame. Fichier sans
+    piste audio → simple copie. RuntimeError si ffmpeg est absent."""
+    if not ffmpeg_available():
+        raise RuntimeError(FFMPEG_MISSING_MSG)
+    src, out = Path(src), Path(out)
+    if src.resolve() == out.resolve():
+        raise ValueError("Le débruitage écrit toujours une copie, jamais l'original.")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not has_audio_stream(src):
+        shutil.copyfile(src, out)
+        return out
+    ext = src.suffix.lower()
+    if ext == ".wav":
+        codec = ["-c:a", "pcm_s16le"]
+    elif ext == ".mp3":
+        codec = ["-c:a", "libmp3lame", "-b:a", f"{int(config_app.MP3_BITRATE_KBPS)}k"]
+    elif ext in (".mp4", ".mov", ".m4v"):
+        codec = ["-map", "0:v?", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                 "-movflags", "+faststart"]
+    else:
+        codec = ["-c:a", "aac", "-b:a", "192k"]
+    _run_ffmpeg(["-i", str(src), "-af", DENOISE_FILTER, *codec, str(out)])
     return out
 
 

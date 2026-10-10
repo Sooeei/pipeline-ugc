@@ -51,10 +51,17 @@
     const est = r.estimate;
     const detail = (real.services || []).map((s) =>
       `<li>${esc(s.label)} — ${esc(s.units)} : <b>${fmt(s.usd)}</b></li>`).join("");
+    // Ventilation (images / retouches / vidéos / relances) : même total que le bandeau de la pub.
+    const b = r.cost_breakdown || real.breakdown;
+    const parts = b ? [["images", "images"], ["retouches", "retouches"], ["videos", "vidéos"],
+      ["relances", "relances"], ["autres", "autres"]]
+      .filter(([k]) => b[k] && b[k].n)
+      .map(([k, label]) => `${label} ${b[k].n} (${fmt(b[k].usd)})`) : [];
     box.innerHTML =
       `<div>💸 <b>Coût réel cumulé de la pub : ${fmt(real.usd)}</b>` +
       (est ? ` <span class="muted">(estimation pour ${est.shots} plan(s) : ${fmt(est.usd_total)})</span>` : "") +
       `</div>` +
+      (parts.length ? `<div class="small muted">${esc(parts.join(" · "))}</div>` : "") +
       (detail ? `<ul class="pub-cost-services">${detail}</ul>`
         : `<div class="muted small">Aucune dépense enregistrée${est && est.dry_run ? " (mode simulation)" : ""}.</div>`);
     box.classList.remove("hidden");
@@ -66,6 +73,22 @@
   let exTimer = null;
 
   function exShow(on) { $("exportOverlay").classList.toggle("hidden", !on); }
+
+  // Case « Débruiter l'audio » (décochée par défaut), ajoutée au formulaire d'export : les clips
+  // copiés ont un audio débruité (afftdn léger) — les originaux ne sont jamais modifiés.
+  function exDenoiseBox() {
+    let box = $("exportDenoise");
+    if (box) return box;
+    const form = $("exportForm");
+    if (!form) return null;
+    const label = document.createElement("label");
+    label.className = "small export-denoise";
+    label.title = "Réduit les grésillements de fond (copies seulement, les originaux restent intacts).";
+    label.innerHTML = `<input type="checkbox" id="exportDenoise"> Débruiter l'audio (grésillements)`;
+    form.appendChild(label);
+    box = $("exportDenoise");
+    return box;
+  }
 
   async function exLoad(params) {
     const q = new URLSearchParams();
@@ -105,6 +128,8 @@
     $("exportOpenBtn").classList.add("hidden");
     $("exportGo").classList.remove("hidden");
     $("exportClient").value = "";
+    const dn = exDenoiseBox();
+    if (dn) dn.checked = false;
     try {
       await exLoad({});
     } catch (e) {
@@ -151,6 +176,7 @@
           export_dir: dir, subdir: $("exportSubdir").value.trim(),
           preset_id: pid ? Number(pid) : null, remember_for_client: $("exportRemember").checked,
           on_conflict: choice ? choice.value : "suffix",
+          denoise: !!(exDenoiseBox() && exDenoiseBox().checked),
         }),
       });
     } catch (e) {
@@ -162,6 +188,8 @@
     $("exportGo").classList.add("hidden");
     $("exportResult").innerHTML =
       `<p>✅ <b>${res.copied.length}</b> clip(s) copié(s) dans :<br><code>${esc(res.dest)}</code></p>` +
+      (res.denoise ? `<p class="small">Audio débruité : ${res.copied.filter((c) => c.denoised).length} / ${res.copied.length} clip(s)` +
+        ` (en cas d'échec, l'original a été copié).</p>` : "") +
       (renamed ? `<p class="small">${renamed} fichier(s) existant(s) : copie suffixée (_2…), rien n'a été écrasé.</p>` : "") +
       (res.kept_existing.length ? `<p class="small">${res.kept_existing.length} fichier(s) déjà présent(s) laissé(s) tel(s) quel(s).</p>` : "") +
       (res.skipped.length ? `<p class="small muted">${res.skipped.length} plan(s) non validé(s) exclu(s).</p>` : "");

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterator
@@ -88,6 +89,38 @@ def current() -> dict[str, Any]:
     return dict(_CTX.get() or {})
 
 
+# Dernière génération RÉELLE journalisée par CE thread : les record_* de app/cost.py, appelés
+# juste après la génération (même thread), s'y rattachent (coût exact, jamais compté 2 fois).
+_LAST = threading.local()
+LAST_MAX_AGE_S = 1800.0   # au-delà, la génération « en attente » n'est plus rattachable
+
+
+def _remember(gen_id: int | None, kind: str, ad_id: Any, clip_id: Any, step: str) -> None:
+    _LAST.value = None if not gen_id else {
+        "id": int(gen_id), "kind": str(kind or ""), "ad_id": _int_or_none(ad_id),
+        "clip_id": _int_or_none(clip_id), "step": str(step or ""), "at": time.monotonic(),
+    }
+
+
+def take_last(kind: str | None = None) -> dict[str, Any] | None:
+    """Consomme la dernière génération réelle de ce thread ({id, kind, ad_id, clip_id, step}) ;
+    None s'il n'y en a pas, si elle est trop ancienne ou d'un autre type que `kind`."""
+    last = getattr(_LAST, "value", None)
+    if not last or time.monotonic() - float(last["at"]) > LAST_MAX_AGE_S:
+        _LAST.value = None
+        return None
+    if kind and last["kind"] != kind:
+        return None
+    _LAST.value = None
+    return dict(last)
+
+
+def take_last_id(kind: str | None = None) -> int | None:
+    """Id de la dernière génération réelle de ce thread (consommée) ; None sinon."""
+    last = take_last(kind)
+    return int(last["id"]) if last else None
+
+
 def _log(msg: str) -> None:
     try:
         print(f"[GEN_TRACE] {msg}", flush=True)
@@ -122,11 +155,14 @@ def record(*, kind: str, model: str, prompt: str, images: list[SentImage],
         p = dict(params or {})
         estimate = cost.generation_usd_estimate(kind, model, p, n_images=len(imgs))
         real = 0.0 if dry_run else (float(usd) if usd is not None else estimate)
-        return db.add_generation(
+        g_ad = _int_or_none(ad_id if ad_id is not None else ctx.get("ad_id"))
+        g_clip = _int_or_none(clip_id if clip_id is not None else ctx.get("clip_id"))
+        g_step = str(step or ctx.get("step") or "")
+        gid = db.add_generation(
             ts=time.time(),
-            ad_id=_int_or_none(ad_id if ad_id is not None else ctx.get("ad_id")),
-            clip_id=_int_or_none(clip_id if clip_id is not None else ctx.get("clip_id")),
-            mode=str(mode or ctx.get("mode") or ""), step=str(step or ctx.get("step") or ""),
+            ad_id=g_ad,
+            clip_id=g_clip,
+            mode=str(mode or ctx.get("mode") or ""), step=g_step,
             kind=str(kind or ""), model=str(model or ""), prompt=str(prompt or ""),
             images=json.dumps(imgs, ensure_ascii=False),
             params=json.dumps(p, ensure_ascii=False, default=str),
@@ -135,6 +171,8 @@ def record(*, kind: str, model: str, prompt: str, images: list[SentImage],
             issues=json.dumps([dict(i) for i in (issues or [])], ensure_ascii=False, default=str),
             output_path=str(output_path or ""),
         )
+        _remember(None if dry_run else gid, kind, g_ad, g_clip, g_step)
+        return gid
     except Exception as exc:  # noqa: BLE001 - jamais bloquant
         _log(f"record impossible : {exc!r}")
         return None

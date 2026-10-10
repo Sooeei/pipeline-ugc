@@ -9,6 +9,7 @@ config_app.ACTIVE_VOICE_MODES) = piste audio remplacée par l'audio validé, dur
 de coût et assemblage final (final.mp4 + voix_complete.mp3).
 
 Endpoints (`router`, inclus par main.py) :
+- POST  /api/avatar-omni/video/preview/{ad_id}   (aperçu du coût, aucune génération)
 - POST  /api/avatar-omni/video/animate/{ad_id}
 - GET   /api/avatar-omni/video/estimate/{ad_id}
 - PATCH /api/avatar-omni/options/{ad_id}
@@ -23,8 +24,10 @@ image) la dérive n'est pas mesurable (drift_score NULL).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -129,11 +132,26 @@ def clip_target(c: dict[str, Any]) -> float | None:
     return v if v > 0 else None
 
 
-def speech_need_seconds(c: dict[str, Any], wps: float | None = None) -> float:
-    """Temps dont la réplique a besoin : parole estimée au débit du perso + marge native
-    (AVATAR_NATIVE_MARGIN_S). 0 pour un plan muet."""
+def speech_need_seconds(c: dict[str, Any], wps: float | None = None, model: str = "") -> float:
+    """Temps dont la réplique a besoin : parole estimée au débit du perso + marge (Omni :
+    OMNI_SPEECH_MARGIN_S = 0,3 s ; Grok / Kling : AVATAR_NATIVE_MARGIN_S). 0 pour un plan muet."""
     speech = pipeline.omni_speech_seconds(str(c.get("script") or ""), wps)
-    return round(speech + config_app.AVATAR_NATIVE_MARGIN_S, 2) if speech > 0 else 0.0
+    margin = config_app.OMNI_SPEECH_MARGIN_S if model == "omni" else config_app.AVATAR_NATIVE_MARGIN_S
+    return round(speech + margin, 2) if speech > 0 else 0.0
+
+
+def omni_block_seconds(c: dict[str, Any], wps: float | None = None) -> int:
+    """Durée d'un bloc Omni (avant « +1 s ») : la réplique au débit de la fiche voix
+    (config_app.omni_speech_clip_seconds : mots / débit + 0,3 s, 3–10 s). La durée CIBLE du client
+    ne rallonge JAMAIS un plan parlé (elle ne sert qu'à l'alerte) ; plan muet : la cible si elle
+    existe, sinon OMNI_SILENT_CLIP_SECONDS."""
+    script = str(c.get("script") or "")
+    if config_app.spoken_word_count(brain.strip_brackets(script)):
+        return config_app.omni_speech_clip_seconds(script, wps)
+    tgt = clip_target(c)
+    if tgt is None:
+        return config_app.OMNI_SILENT_CLIP_SECONDS
+    return _snap(tgt, config_app.AVATAR_VIDEO_MODELS["omni"]["durations"])
 
 
 def _snap(target: float, durations: tuple[int, ...] | list[int]) -> int:
@@ -159,15 +177,27 @@ def target_clip_seconds(c: dict[str, Any], model: str, wps: float | None = None)
     return _snap(max(tgt, need), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
 
 
-def target_warning(c: dict[str, Any], wps: float | None = None) -> str:
-    """« Plan N : la réplique demande ~X s pour une cible de Y s » si elle ne tient pas."""
+def target_warning(c: dict[str, Any], wps: float | None = None, model: str = "") -> str:
+    """« Plan N : la réplique demande ~X s pour une cible de Y s » si elle ne tient pas. Omni :
+    la cible ne change jamais la durée → alerte aussi quand le plan sera nettement plus COURT
+    que la cible (pas de silence ajouté)."""
     tgt = clip_target(c)
     if tgt is None:
         return ""
-    need = speech_need_seconds(c, wps)
+    n = c.get("block_n") or c.get("scene_n")
+    need = speech_need_seconds(c, wps, model)
+    if model == "omni":
+        if need > tgt + 1e-6:
+            return (f"Plan {n} : la réplique demande ~{need:.1f} s pour une cible de {tgt:g} s "
+                    "— raccourcis la réplique pour tenir le timing du client.")
+        if need > 0:
+            secs = omni_block_seconds(c, wps)
+            if tgt - secs >= 1.0:
+                return (f"Plan {n} : cible de {tgt:g} s, le plan durera ~{secs} s (la réplique au "
+                        "débit de la fiche voix, sans silence ajouté) — « +1 s » si besoin.")
+        return ""
     if need <= tgt + 1e-6:
         return ""
-    n = c.get("block_n") or c.get("scene_n")
     return (f"Plan {n} : la réplique demande ~{need:.1f} s pour une cible de {tgt:g} s "
             "(durée allongée — raccourcis la réplique pour tenir le timing du client).")
 
@@ -177,6 +207,7 @@ def duration_totals(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str
     durée VISÉE (Σ target_seconds des plans non exclus du montage principal), + alertes FR par
     plan (montage principal et variantes)."""
     wps_for = pipeline.ad_wps_for(ad)
+    model = effective_video_model(ad)
     main = [c for c in clips if in_main_cut(c)]
     generated = sum(float(c.get("clip_seconds") or 0) for c in main
                     if c.get("status") == "pret" and c.get("mp4_path"))
@@ -185,7 +216,7 @@ def duration_totals(ad: dict[str, Any], clips: list[dict[str, Any]]) -> dict[str
     for c in sorted(clips, key=lambda x: int(x["scene_n"])):
         if pipeline.clip_excluded(c) and not clip_variant(c):
             continue
-        if w := target_warning(c, wps_for(_speaker(c))):
+        if w := target_warning(c, wps_for(_speaker(c)), model):
             alerts.append(w)
     return {"seconds_generated": round(generated, 1),
             "seconds_target": round(sum(targets), 1) if targets else None,
@@ -214,13 +245,18 @@ def clip_target_seconds(
     sinon avatar_clip_seconds(wav_seconds) ; sans audio : durée estimée du texte au débit de la
     fiche voix (estimation de coût avant l'étape Voix)."""
     if config_app.normalize_voice_mode(voice_mode) == "native":
-        # Durée CIBLE du découpage client (timecodes) prioritaire, allongée seulement si la
-        # réplique en a besoin ; + secondes demandées via « Régénérer (+1 s) » (réplique coupée),
-        # bornées au max du modèle.
         wps = float(wps_for(_speaker(c))) if wps_for else None
-        base = target_clip_seconds(c, model, wps)
-        if base is None:
-            base = config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model)
+        if config_app.normalize_avatar_video_model(model) == "omni":
+            # Omni : la réplique au débit de la fiche voix (+ 0,3 s, 3–10 s) ; la cible client
+            # ne rallonge plus (alerte seulement) ; seule rallonge : « +1 s » (extra_seconds).
+            base = omni_block_seconds(c, wps)
+        else:
+            # Grok / Kling : durée CIBLE du découpage client (timecodes) prioritaire, allongée
+            # seulement si la réplique en a besoin.
+            base = target_clip_seconds(c, model, wps)
+            if base is None:
+                base = config_app.avatar_native_clip_seconds(str(c.get("script") or ""), model)
+        # + secondes demandées via « Régénérer (+1 s) » (réplique coupée), bornées au max du modèle.
         return config_app.with_extra_seconds(
             base, c.get("extra_seconds"), config_app.AVATAR_VIDEO_MODELS[model]["durations"])
     durations = config_app.AVATAR_VIDEO_MODELS[model]["durations"]
@@ -312,7 +348,8 @@ def build_video_prompt(
             voice_sheet=voice_sheet, names=names, scene_desc=scene_desc, images=images,
             camera_key=camera_key, style=style, offscreen=offscreen)
     sp = max(1, int(speaker or 1))
-    text = pipeline._omni_quote_dialogue(brain.strip_brackets(str(dialogue or "").strip()))
+    # Dialogue nettoyé À L'ENVOI (pipeline.spoken_dialogue → brain.spoken_clean) ; script intact.
+    text = pipeline._omni_quote_dialogue(pipeline.spoken_dialogue(dialogue))
     sheet = str(voice_sheet or "").strip()
     off = bool(offscreen) and bool(text)
     if model == "grok":
@@ -449,7 +486,8 @@ def estimate(
     model = effective_video_model(ad, cfg)
     if clips is None:
         clips = [c for c in db.clips_for_ad(int(ad["id"]))
-                 if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
+                 if c.get("status") != "pret" and not pipeline.clip_excluded(c)
+                 and not pipeline.clip_omni_blocked(c)]
     wps_for = pipeline.ad_wps_for(ad)
     mode = voice_mode_of(ad)
     secs = [clip_target_seconds(c, model, wps_for, mode) for c in clips]
@@ -497,7 +535,18 @@ def clip_v2_fields(c: dict[str, Any]) -> dict[str, Any]:
         "variant": clip_variant(c),
         "variant_label": variant_label(c) if clip_variant(c) else "",
         "target_seconds": clip_target(c),
+        # Refus Google (« omni_blocked ») : raison + pistes FR ; plan en cours dans un job (verrou).
+        "error_kind": str(c.get("error_kind") or ""),
+        "error_detail": pipeline.clip_error_detail(c),
+        "busy": _clip_busy(c),
     }
+
+
+def _clip_busy(c: dict[str, Any]) -> bool:
+    try:
+        return int(c["id"]) in set(jobs.manager.busy_clip_ids())
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def ad_v2_fields(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> dict[str, Any]:
@@ -581,12 +630,11 @@ def _generate_raw(
         # mêmes rôles et même contrôle avant envoi qu'en réel, puis journal direct.
         if model == "omni":
             sent = providers.omni_sent_images(*omni_block_images(c, ad))
-            dialogue = str(c.get("script") or "")
+            dialogue = pipeline.spoken_dialogue(c.get("script"))
         else:
             sent = prompt_profiles.sent_images([image] if image else [], None,
                                                prompt_profiles.ROLE_FIRST_FRAME)
-            dialogue = " ".join(pipeline._omni_quote_dialogue(
-                brain.strip_brackets(str(c.get("script") or "").strip())).split()) if model == "grok" else ""
+            dialogue = " ".join(pipeline.spoken_dialogue(c.get("script")).split()) if model == "grok" else ""
         issues = prompt_profiles.preflight(model, prompt, images=sent, dialogue=dialogue) \
             if model in ("omni", "grok") else []
         gen_trace.record(
@@ -598,7 +646,7 @@ def _generate_raw(
     spec = config_app.AVATAR_VIDEO_MODELS[model]
     if model == "grok":
         # Réplique attendue, telle qu'insérée dans le prompt (crochets retirés, guillemets “ ”).
-        expected = pipeline._omni_quote_dialogue(brain.strip_brackets(str(c.get("script") or "").strip()))
+        expected = pipeline.spoken_dialogue(c.get("script"))
         providers.grok_generate_video(
             cfg, image, prompt, raw, model_value=spec["model"], seconds=seconds,
             label=label, index=n - 1, resolution=resolution, dialogue=" ".join(expected.split()),
@@ -616,7 +664,7 @@ def _generate_raw(
     res = providers.omni_generate_video(
         cfg, image, prompt, raw, seconds, anchor_path=anchor, model_value=spec["model"],
         label=label, index=n - 1, store=False, resolution=resolution,
-        dialogue=str(c.get("script") or ""),
+        dialogue=pipeline.spoken_dialogue(c.get("script")),
     )
     got = Path(str(res.get("path") or raw))
     if got != raw and got.is_file():
@@ -664,6 +712,7 @@ def animate_blocks(
     ad_name: str,
     on_update: UpdateFn | None = None,
     only_clip_id: int | None = None,
+    clip_ids: list[int] | None = None,
 ) -> dict[str, Any] | None:
     """Job « avatar_video » (jobs.start output_mode="avatar_video").
 
@@ -671,13 +720,18 @@ def animate_blocks(
     seule : keyframe et voix inchangés), applique le mode voix, mesure la dérive et assemble si
     tous les blocs sont prêts. GARDE-FOUS (défense en profondeur, cf. router) : run global →
     ads.voices_ok ET ads.keyframes_ok ; chaque bloc → voix validée + audio + keyframe validé +
-    image. Renvoie {ok, echec, assembled, ad_id}."""
+    image. VERROU anti-double facturation : `clip_ids` = plans RÉSERVÉS par ce job (jobs.start) →
+    seuls ceux-là sont animés ; jamais un plan réservé par un autre job en cours ; le run global
+    ignore aussi les plans refusés par Google (« omni_blocked »). Appels Omni : limiteur UNIQUE
+    de l'app (pipeline.omni_call_slot). Renvoie {ok, echec, assembled, ad_id}."""
     ad = db.get_ad(ad_id)
     if ad is None:
         raise RuntimeError("Pub introuvable.")
     model = effective_video_model(ad, cfg)
     voice_mode = voice_mode_of(ad)
     all_clips = db.clips_for_ad(ad_id)
+    reserved = {int(x) for x in clip_ids} if clip_ids is not None else None
+    busy_elsewhere = set(jobs.manager.busy_clip_ids()) - (reserved or set())
     if only_clip_id is not None:
         # Plan précis (« Tester ce plan », « Générer cette variante ») : même exclu / variante.
         clips = [c for c in all_clips if int(c["id"]) == int(only_clip_id)
@@ -686,12 +740,22 @@ def animate_blocks(
             voice_mode == "elevenlabs" and not int(ad.get("voices_ok") or 0)):
         clips = []
     else:
-        # Run global : les plans exclus (variantes non demandées comprises) sont ignorés.
+        # Run global : les plans exclus (variantes non demandées comprises) et les plans refusés
+        # par Google sont ignorés.
         clips = [c for c in all_clips
                  if c.get("status") != "pret" and not pipeline.clip_excluded(c)
+                 and not pipeline.clip_omni_blocked(c)
                  and not clip_block_reason(c, model, voice_mode)]
+        if reserved is not None:
+            clips = [c for c in clips if int(c["id"]) in reserved]
+    skipped_busy = [int(c["scene_n"]) for c in clips if int(c["id"]) in busy_elsewhere]
+    clips = [c for c in clips if int(c["id"]) not in busy_elsewhere]
+    if skipped_busy:
+        _log_detail(f"Pub {ad_id} : plan(s) {skipped_busy} déjà en cours dans un autre job — ignorés.")
     wps_for = pipeline.ad_wps_for(ad)
     if not clips:
+        if skipped_busy:
+            raise RuntimeError("Ces plans sont déjà en cours de génération (un autre lancement).")
         raise RuntimeError("Aucun bloc prêt à animer : valide d'abord les keyframes"
                            + (" et les voix." if voice_mode == "elevenlabs" else "."))
 
@@ -699,7 +763,6 @@ def animate_blocks(
     folder = pipeline.objet_dir(ad_id, ad_name)
     resolution = model_resolution(model, ad.get("omni_resolution"))
     threshold = config_app.normalize_drift_threshold(cfg.drift_threshold)
-    pacer = pipeline.omni_tier1_pacer(cfg) if model == "omni" else None
     spec = config_app.AVATAR_VIDEO_MODELS[model]
 
     def _one(c: dict[str, Any]) -> bool:
@@ -711,25 +774,19 @@ def animate_blocks(
             if voice_mode == "elevenlabs" and float(c.get("wav_seconds") or 0) <= 0:
                 c = {**c, "wav_seconds": media.mp4_duration(wav) or 0.0}
             seconds = clip_target_seconds(c, model, wps_for, voice_mode=voice_mode)
-            if w := target_warning(c, wps_for(_speaker(c))):
+            if w := target_warning(c, wps_for(_speaker(c)), model):
                 _log_detail(w)
                 db.log_activity("avatar_omni", w)
             prompt = _clip_prompt(c, ad, model)
             db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
                            clip_seconds=seconds, error=None)
-            if pacer is not None:
-                usd = seconds * spec["cost_per_second_usd"]
-                pacer.acquire(usd, lambda w: emit({
-                    "scene": n, "phase": "attente_tier1", "status": "en_cours",
-                    "message": pipeline.tier1_wait_message(w), "wait_s": round(w),
-                }))
-                emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
             raw = folder / f"{n}_brut.mp4"
             final = folder / f"{n}.mp4"
-            with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
-                                   step="video"):
-                info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name)
-            _record_cost(cfg, ad_id, model, seconds, info)
+            with omni_slot(cfg, model, seconds * spec["cost_per_second_usd"], n, emit):
+                with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
+                                       step="video"):
+                    info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name)
+                _record_cost(cfg, ad_id, model, seconds, info)
             if voice_mode == "elevenlabs" and wav and (media.ffmpeg_available() or not cfg.dry_run):
                 media.replace_audio(raw, wav, final)
             else:
@@ -741,7 +798,7 @@ def animate_blocks(
             db.update_clip(
                 clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
                 drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret", error=None,
-                speech_cut=1 if cut else 0,
+                speech_cut=1 if cut else 0, error_kind="", error_detail="",
             )
             emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
                   "drift_score": d["drift_score"], "drift_flag": bool(d["drift_flag"]),
@@ -752,7 +809,7 @@ def animate_blocks(
 
     if (model == "omni" and pipeline.ad_voice_chain(ad) and voice_mode == "native"
             and only_clip_id is None and len(clips) > 1):
-        ok, ko = _animate_voice_chains(cfg, ad, ad_name, clips, all_clips, emit=emit, pacer=pacer,
+        ok, ko = _animate_voice_chains(cfg, ad, ad_name, clips, all_clips, emit=emit,
                                        folder=folder, resolution=resolution, threshold=threshold)
     else:
         for c in clips:
@@ -774,14 +831,30 @@ def animate_blocks(
     if only_clip_id is None:
         db.set_ad_status(ad_id, "termine" if ok and not ko else "objet_images")
     db.log_activity("avatar_omni", f"Vidéo Avatar IA « {ad_name} » ({model}) : {ok} clips, {ko} en échec.")
-    return {"ok": ok, "echec": ko, "assembled": assembled, "ad_id": ad_id, "video_model": model}
+    return {"ok": ok, "echec": ko, "assembled": assembled, "ad_id": ad_id, "video_model": model,
+            "skipped_busy": skipped_busy}
+
+
+def omni_slot(cfg: ProviderConfig, model: str, usd: float, n: int, emit: UpdateFn) -> Any:
+    """Créneau d'appel vidéo : Omni → limiteur UNIQUE de l'app (1 appel à la fois, plafond Tier 1,
+    tous jobs confondus) avec messages de file / pause sur la carte du plan ; autres modèles →
+    aucun (parallélisme borné par MAX_PARALLEL du job)."""
+    if config_app.normalize_avatar_video_model(model) != "omni":
+        return contextlib.nullcontext()
+    return pipeline.omni_call_slot(
+        cfg, usd,
+        on_wait=lambda w: emit({"scene": n, "phase": "attente_tier1", "status": "en_cours",
+                                "message": pipeline.tier1_wait_message(w), "wait_s": round(w)}),
+        on_queue=lambda: emit({"scene": n, "phase": "animation", "status": "en_cours",
+                               "message": pipeline.OMNI_QUEUE_MESSAGE}),
+    )
 
 
 # ============================================================ Omni : chaîne « voix identique » (EXPÉRIMENTAL)
 # Doc Omni : la voix n'est garantie identique QUE dans une chaîne previous_interaction_id
 # (store=true). Option par pub `ads.omni_voice_chain` (défaut 0). Pour un même personnage, ses
 # blocs sont générés dans UNE chaîne : tour 1 = start frame + réplique 1 ; tours suivants =
-# « Show the same character in the next scene, … » + réplique N, keyframe du bloc N en image de
+# « At 0s cut to a new scene with the same character, same voice. » + réplique N, keyframe du bloc N en image de
 # RÉFÉRENCE (sans task="extend"). Max 4 tours / 40 s par chaîne (au-delà : nouvelle chaîne).
 # La vidéo renvoyée par un tour peut être le clip COMPLET ou seulement la SUITE (doc muette) :
 # mesurée (ffprobe) à chaque tour, puis un clip par bloc est découpé aux timecodes mesurés.
@@ -837,7 +910,7 @@ def _sim_turn_video(c: dict[str, Any], out: Path, seconds: int, label: str) -> N
 
 def _animate_voice_chains(
     cfg: ProviderConfig, ad: dict[str, Any], ad_name: str, clips: list[dict[str, Any]],
-    all_clips: list[dict[str, Any]], *, emit: UpdateFn, pacer: Any, folder: Path,
+    all_clips: list[dict[str, Any]], *, emit: UpdateFn, folder: Path,
     resolution: str, threshold: float,
 ) -> tuple[int, int]:
     """Anime les blocs en chaînes « voix identique ». Renvoie (ok, échecs). Un tour en échec
@@ -892,23 +965,24 @@ def _animate_voice_chains(
                         style=style, chain_turn=True, offscreen=pipeline.clip_offscreen(c))
                 db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
                                clip_seconds=seconds, error=None)
-                if pacer is not None:
-                    pacer.acquire(seconds * spec["cost_per_second_usd"], lambda w, n=n: emit({
-                        "scene": n, "phase": "attente_tier1", "status": "en_cours",
-                        "message": pipeline.tier1_wait_message(w), "wait_s": round(w)}))
-                # Journal : chaque tour est rattaché au plan qu'il produit.
-                with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
-                                       step="chaine" if k == 0 else "chaine_suite"):
-                    if k == 0:
-                        res = providers.omni_generate_video(
-                            cfg, image, prompt, part, seconds, anchor_path=anchor,
-                            model_value=spec["model"], label=ad_name, index=n - 1, store=True,
-                            resolution=resolution, dialogue=str(c.get("script") or ""))
-                    else:
-                        res = providers.omni_extend_video(
-                            cfg, prev_id, prompt, part, seconds, model_value=spec["model"],
-                            label=ad_name, index=n - 1, resolution=resolution,
-                            dialogue=str(c.get("script") or ""), reference_paths=refs)
+                # Limiteur Omni UNIQUE (1 appel à la fois dans l'app + Tier 1) ; coût enregistré
+                # avant de libérer le créneau (l'appel suivant, même d'un autre job, le voit).
+                with omni_slot(cfg, "omni", seconds * spec["cost_per_second_usd"], n, emit):
+                    # Journal : chaque tour est rattaché au plan qu'il produit.
+                    with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
+                                           step="chaine" if k == 0 else "chaine_suite"):
+                        if k == 0:
+                            res = providers.omni_generate_video(
+                                cfg, image, prompt, part, seconds, anchor_path=anchor,
+                                model_value=spec["model"], label=ad_name, index=n - 1, store=True,
+                                resolution=resolution, dialogue=pipeline.spoken_dialogue(c.get("script")))
+                        else:
+                            res = providers.omni_extend_video(
+                                cfg, prev_id, prompt, part, seconds, model_value=spec["model"],
+                                label=ad_name, index=n - 1, resolution=resolution,
+                                dialogue=pipeline.spoken_dialogue(c.get("script")), reference_paths=refs)
+                    if not cfg.dry_run:
+                        cost.record_omni_clip(ad_id, seconds)
                 got = Path(str(res.get("path") or part))
                 if cfg.dry_run:
                     _sim_turn_video(c, got, seconds, f"{ci}-{k + 1}")
@@ -927,13 +1001,11 @@ def _animate_voice_chains(
                     f"→ {'clip complet' if seg['mode'] == 'full' else 'suite seule'}, coupe "
                     f"[{seg['start']:.2f}–{seg['end']:.2f}] s, interaction {prev_id or '?'}, "
                     f"références {len(refs)}, facturation : {res.get('usage') or 'non renvoyée'}")
-                if not cfg.dry_run:
-                    cost.record_omni_clip(ad_id, seconds)
                 d = _measure_drift(c, raw, folder / f"{n}_frame0.png", threshold)
                 db.update_clip(
                     clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
                     drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret",
-                    error=None, speech_cut=0, interaction_id=prev_id,
+                    error=None, speech_cut=0, interaction_id=prev_id, error_kind="", error_detail="",
                     omni_chain=json.dumps({"chain": ci, "turn": k + 1, "turns": len(chain),
                                            "source": str(got), **seg}, ensure_ascii=False))
                 emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
@@ -980,6 +1052,14 @@ class VideoAnimateIn(BaseModel):
     confirm_over_cap: bool = False
     clip_id: int | None = None     # None = tous les blocs pas encore prêts ; sinon ce bloc seul
     resolution: str = ""           # "720p" | "1080p" ; vide = valeur de la pub
+    # Plans montrés dans l'aperçu confirmé (POST …/video/preview) : si la sélection a changé
+    # entre-temps (plan lancé ailleurs, terminé, refusé…) → 409, l'utilisateur reconfirme.
+    expected_clip_ids: list[int] | None = None
+
+
+class VideoPreviewIn(BaseModel):
+    clip_id: int | None = None
+    resolution: str = ""
 
 
 class OptionsIn(BaseModel):
@@ -1004,6 +1084,134 @@ _KEY_FOR_MODEL = {
     "kling": ("openrouter_api_key", "Clé API OpenRouter manquante (Réglages) — requise pour Kling."),
     "omni": ("gemini_api_key", "Clé API Google (Gemini) manquante (Réglages)."),
 }
+BUSY_CLIP_MSG = "Ce plan est déjà en cours de génération — attends la fin avant de le relancer."
+SELECTION_CHANGED_MSG = ("La sélection de plans a changé depuis l'aperçu (plan lancé ailleurs, terminé "
+                         "ou refusé) — reconfirme.")
+# Lancements vidéo v2 sérialisés (aperçu → remise à zéro d'une relance → réservation des plans).
+_LAUNCH_LOCK = threading.Lock()
+
+
+def animate_selection(clips: list[dict[str, Any]], clip_id: int | None = None) -> dict[str, Any]:
+    """Plans qu'un lancement animerait MAINTENANT (même calcul pour l'aperçu du coût et le
+    lancement → `expected_clip_ids` comparables). Plan seul (`clip_id`) : lui, sauf s'il est déjà
+    en cours dans un job. Run global : tous les plans du montage, SAUF exclus (variantes non
+    demandées comprises), en cours (réservés par un job), déjà prêts, refusés par Google.
+    → {candidates, single, skipped:{busy, done, blocked, excluded} (numéros de plan)}."""
+    busy = set(jobs.manager.busy_clip_ids())
+    skipped: dict[str, list[int]] = {"busy": [], "done": [], "blocked": [], "excluded": []}
+    if clip_id is not None:
+        clip = next((c for c in clips if int(c["id"]) == int(clip_id)), None)
+        if clip is None:
+            raise HTTPException(404, "Bloc introuvable.")
+        if int(clip["id"]) in busy:
+            skipped["busy"].append(int(clip["scene_n"]))
+            return {"candidates": [], "single": clip, "skipped": skipped}
+        return {"candidates": [clip], "single": clip, "skipped": skipped}
+    candidates: list[dict[str, Any]] = []
+    for c in sorted(clips, key=lambda x: int(x["scene_n"])):
+        n = int(c["scene_n"])
+        if pipeline.clip_excluded(c):
+            skipped["excluded"].append(n)
+        elif int(c["id"]) in busy:
+            skipped["busy"].append(n)
+        elif c.get("status") == "pret":
+            skipped["done"].append(n)
+        elif pipeline.clip_omni_blocked(c):
+            skipped["blocked"].append(n)
+        else:
+            candidates.append(c)
+    return {"candidates": candidates, "single": None, "skipped": skipped}
+
+
+def _launch_gate(ad: dict[str, Any], sel: dict[str, Any], model: str) -> JSONResponse | None:
+    """Garde-fous communs à l'aperçu et au lancement : 409 (HTTPException) si le plan seul ou la
+    pub n'est pas prêt ; JSONResponse 409 {detail, missing} si des plans du run global ne le sont
+    pas ; None si on peut continuer."""
+    mode = voice_mode_of(ad)
+    if sel["single"] is not None:
+        reason = clip_block_reason(sel["single"], model, mode, on_demand=True)
+        if reason:
+            raise HTTPException(409, reason)
+        return None
+    if mode == "elevenlabs" and not int(ad.get("voices_ok") or 0):
+        raise HTTPException(409, "Valide d'abord les voix (« Valider toutes les voix ») avant "
+                                 "de générer les vidéos.")
+    if not int(ad.get("keyframes_ok") or 0):
+        raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») avant "
+                                 "de générer les vidéos.")
+    blocked = [(int(c["scene_n"]), r) for c in sel["candidates"] if (r := clip_block_reason(c, model, mode))]
+    if blocked:
+        return JSONResponse(status_code=409, content={
+            "detail": blocked[0][1], "missing": [n for n, _ in blocked]})
+    return None
+
+
+def _clip_label(c: dict[str, Any]) -> str:
+    n = c.get("block_n") or c.get("scene_n")
+    label = f"Plan {n}"
+    if clip_variant(c):
+        label += f" ({variant_label(c)})"
+    return label
+
+
+def already_billed_video_usd(ad_id: int) -> float:
+    """Vidéo DÉJÀ facturée sur cette pub (événements de coût réels à la seconde : Omni, Grok,
+    Kling ; archives comprises). Simulation : rien n'est enregistré → 0."""
+    try:
+        rows = db.cost_by_service_for_ad(int(ad_id))
+    except Exception as exc:  # noqa: BLE001 - affichage : jamais d'erreur
+        _log_detail(f"already_billed_video_usd : {exc!r}")
+        return 0.0
+    return round(sum(float(r.get("usd") or 0) for r in rows if r.get("unit") == "second"), 2)
+
+
+def preview(ad: dict[str, Any], cfg: ProviderConfig, clip_id: int | None = None,
+            resolution: str = "") -> dict[str, Any] | JSONResponse:
+    """Aperçu AVANT génération payante (contrat K7) : plans qui partiraient (miniature, durée,
+    coût), total, plans ignorés (en cours / prêts / refusés par Google / exclus), vidéo déjà
+    facturée sur la pub. Aucune écriture, aucun appel réseau."""
+    model = effective_video_model(ad, cfg)
+    sel = animate_selection(db.clips_for_ad(int(ad["id"])), clip_id)
+    gate = _launch_gate(ad, sel, model)
+    if gate is not None:
+        return gate
+    spec = config_app.AVATAR_VIDEO_MODELS[model]
+    wps_for = pipeline.ad_wps_for(ad)
+    mode = voice_mode_of(ad)
+    rows = []
+    for c in sel["candidates"]:
+        secs = clip_target_seconds(c, model, wps_for, mode)
+        usd = 0.0 if cfg.dry_run else round(secs * spec["cost_per_second_usd"]
+                                            + spec["cost_per_input_image_usd"], 2)
+        image = "" if pipeline.clip_text_only(c) else c.get("image_path")
+        rows.append({"clip_id": int(c["id"]), "n": int(c["scene_n"]), "label": _clip_label(c),
+                     "image_url": media_url(image) if image else None, "seconds": secs, "usd": usd})
+    wanted = resolution.strip().lower() or ad.get("omni_resolution")
+    return {
+        "clips": rows,
+        "usd_total": round(sum(r["usd"] for r in rows), 2),
+        "seconds_total": sum(r["seconds"] for r in rows),
+        "skipped": sel["skipped"],
+        "already_billed_usd": already_billed_video_usd(int(ad["id"])),
+        "model": model,
+        "model_label": spec["label"],
+        "resolution": model_resolution(model, wanted),
+        "dry_run": bool(cfg.dry_run),
+    }
+
+
+@router.post("/api/avatar-omni/video/preview/{ad_id}")
+def video_preview(ad_id: int, body: VideoPreviewIn) -> Any:
+    """Aperçu du coût AVANT « Générer » / « Tester ce plan » (aucune génération). La liste
+    `clips[].clip_id` est à renvoyer telle quelle dans `expected_clip_ids` du lancement."""
+    from .settings_service import load_provider_config
+
+    ad = _v2_ad_or_error(ad_id)
+    if int(ad.get("pipeline_version") or 1) != 2:
+        raise HTTPException(409, "Pub de l'ancien pipeline : utilise « Générer les vidéos » (Omni).")
+    if body.resolution.strip() and body.resolution.strip().lower() not in config_app.OMNI_RESOLUTIONS:
+        raise HTTPException(400, "Résolution inconnue (720p | 1080p).")
+    return preview(ad, load_provider_config(), body.clip_id, body.resolution)
 
 
 @router.post("/api/avatar-omni/video/animate/{ad_id}")
@@ -1011,7 +1219,11 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
     """Lance la vidéo v2 (1 appel par bloc). GARDE-FOUS 409 : run global sans voix validées
     (ads.voices_ok) ou sans keyframes validés (ads.keyframes_ok) ; bloc sans voix validée, sans
     audio, sans keyframe validé ou sans image. `clip_id` d'un bloc « pret » = RELANCE VIDÉO
-    SEULE (mp4/brut/frame0/dérive remis à zéro ; keyframe et voix INCHANGÉS)."""
+    SEULE (mp4/brut/frame0/dérive remis à zéro ; keyframe et voix INCHANGÉS).
+    VERROU anti-double facturation : les plans lancés sont RÉSERVÉS par le job (jobs.start
+    clip_ids) ; un plan seul déjà en cours → 409 ; le run global ignore les plans en cours
+    (`skipped_busy`), prêts (`skipped_done`) et refusés par Google (`skipped_blocked`) ;
+    `expected_clip_ids` (aperçu confirmé) différent de la sélection actuelle → 409."""
     from .settings_service import load_provider_config
 
     cfg = load_provider_config()
@@ -1023,59 +1235,62 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
             raise HTTPException(400, "Résolution inconnue (720p | 1080p).")
         db.set_ad_omni_resolution(ad_id, body.resolution.strip().lower())
     model = effective_video_model(ad, cfg)
-    clips = db.clips_for_ad(ad_id)
-    relaunch: dict[str, Any] | None = None
-    if body.clip_id is not None:
-        clip = next((c for c in clips if int(c["id"]) == int(body.clip_id)), None)
-        if clip is None:
-            raise HTTPException(404, "Bloc introuvable.")
-        reason = clip_block_reason(clip, model, voice_mode_of(ad), on_demand=True)
-        if reason:
-            raise HTTPException(409, reason)
-        relaunch = clip if clip.get("status") == "pret" else None
-        candidates = [clip]
-    else:
-        if voice_mode_of(ad) == "elevenlabs" and not int(ad.get("voices_ok") or 0):
-            raise HTTPException(409, "Valide d'abord les voix (« Valider toutes les voix ») avant "
-                                     "de générer les vidéos.")
-        if not int(ad.get("keyframes_ok") or 0):
-            raise HTTPException(409, "Valide d'abord les keyframes (« Valider les keyframes ») avant "
-                                     "de générer les vidéos.")
-        # Plans exclus (variantes de hook non demandées comprises) : hors run global.
-        candidates = [c for c in clips if c.get("status") != "pret" and not pipeline.clip_excluded(c)]
-        blocked = [(int(c["scene_n"]), r) for c in candidates if (r := clip_block_reason(c, model, voice_mode_of(ad)))]
-        if blocked:
-            return JSONResponse(status_code=409, content={
-                "detail": blocked[0][1], "missing": [n for n, _ in blocked]})
+    with _LAUNCH_LOCK:
+        sel = animate_selection(db.clips_for_ad(ad_id), body.clip_id)
+        if body.clip_id is not None and not sel["candidates"]:
+            raise HTTPException(409, BUSY_CLIP_MSG)
+        gate = _launch_gate(ad, sel, model)
+        if gate is not None:
+            return gate
+        candidates = sel["candidates"]
         if not candidates:
+            if sel["skipped"]["busy"]:
+                raise HTTPException(409, "Les plans restants sont déjà en cours de génération "
+                                         f"(plan{'s' if len(sel['skipped']['busy']) > 1 else ''} "
+                                         + ", ".join(map(str, sel["skipped"]["busy"])) + ").")
+            if sel["skipped"]["blocked"]:
+                raise HTTPException(409, "Les plans restants ont été refusés par Google : corrige-les "
+                                         "(pistes sur leur carte) puis relance-les un par un.")
             raise HTTPException(400, "Tous les blocs sont déjà animés (relance un bloc précis).")
-    if not cfg.dry_run and not body.confirm:
-        raise HTTPException(400, "Confirmation requise avant de générer les vidéos (coût).")
-    key_attr, key_msg = _KEY_FOR_MODEL[model]
-    if not cfg.dry_run and not str(getattr(cfg, key_attr, "") or "").strip():
-        raise HTTPException(400, key_msg)
-    est = estimate(ad, [{**c, "voice_ok": 1} for c in candidates], dry_run=cfg.dry_run, cfg=cfg)
-    from . import main as _main  # import paresseux (main inclut ce router)
+        ids = [int(c["id"]) for c in candidates]
+        if body.expected_clip_ids is not None and sorted({int(x) for x in body.expected_clip_ids}) != sorted(ids):
+            raise HTTPException(409, SELECTION_CHANGED_MSG)
+        if not cfg.dry_run and not body.confirm:
+            raise HTTPException(400, "Confirmation requise avant de générer les vidéos (coût).")
+        key_attr, key_msg = _KEY_FOR_MODEL[model]
+        if not cfg.dry_run and not str(getattr(cfg, key_attr, "") or "").strip():
+            raise HTTPException(400, key_msg)
+        est = estimate(ad, [{**c, "voice_ok": 1} for c in candidates], dry_run=cfg.dry_run, cfg=cfg)
+        from . import main as _main  # import paresseux (main inclut ce router)
 
-    _main._check_spend_cap(cfg, float(est["usd_total"]), body.confirm_over_cap)
-    if relaunch is not None:
-        db.update_clip(int(relaunch["id"]), status="valide", mp4_path=None, raw_mp4_path="",
-                       frame0_path="", drift_score=None, drift_flag=0, error=None, omni_prompt="")
-        if in_main_cut(relaunch):   # une variante n'est pas dans final.mp4 : on le garde
-            db.set_ad_fields(ad_id, final_path="", final_audio_path="")
-    job = jobs.manager.start(
-        cfg, ad_id, str(ad["name"]), [{"n": int(c["scene_n"])} for c in candidates], "",
-        output_mode="avatar_video",
-        only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
-    )
+        _main._check_spend_cap(cfg, float(est["usd_total"]), body.confirm_over_cap)
+        single = sel["single"]
+        relaunch = single if single is not None and single.get("status") == "pret" else None
+        if relaunch is not None:
+            db.update_clip(int(relaunch["id"]), status="valide", mp4_path=None, raw_mp4_path="",
+                           frame0_path="", drift_score=None, drift_flag=0, error=None, omni_prompt="")
+            if in_main_cut(relaunch):   # une variante n'est pas dans final.mp4 : on le garde
+                db.set_ad_fields(ad_id, final_path="", final_audio_path="")
+        try:
+            job = jobs.manager.start(
+                cfg, ad_id, str(ad["name"]), [{"n": int(c["scene_n"])} for c in candidates], "",
+                output_mode="avatar_video",
+                only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
+                clip_ids=ids,
+            )
+        except jobs.ClipsBusy as exc:
+            raise HTTPException(409, BUSY_CLIP_MSG if body.clip_id is not None else
+                                "Des plans sont déjà en cours de génération — reconfirme.") from exc
     wanted = (db.get_ad(ad_id) or {}).get("omni_resolution")
-    single = candidates[0] if body.clip_id is not None else None
     return {
         "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
         "n_plans": len(candidates), "estimate": est, "video_model": model,
         "voice_mode": voice_mode_of(ad), "relaunch_video_only": relaunch is not None,
         "resolution": model_resolution(model, wanted),
         "resolution_warning": resolution_warning(model, wanted),
+        "clip_ids": ids,
+        "skipped_busy": sel["skipped"]["busy"], "skipped_done": sel["skipped"]["done"],
+        "skipped_blocked": sel["skipped"]["blocked"],
         # « Générer cette variante » : animée seule, hors assemblage principal.
         "variant": bool(single and clip_variant(single)),
         "variant_label": variant_label(single) if single and clip_variant(single) else "",

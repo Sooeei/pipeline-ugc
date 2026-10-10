@@ -134,7 +134,9 @@ class JobManager:
         """`runner(on_update)` : tâche PONCTUELLE (ex. « Retoucher » un plan) exécutée en fond à la
         place d'un mode prédéfini ; son échec n'est jamais reporté sur le statut de la pub.
         `clip_ids` : plans RÉSERVÉS par ce job (réservation atomique) ; si l'un d'eux est déjà pris
-        par un autre job en cours → ClipsBusy, rien n'est lancé. Libérés à la fin du job."""
+        par un autre job en cours → ClipsBusy, rien n'est lancé. Libérés à la fin du job, même s'il
+        plante. Animation Avatar IA (avatar_video / avatar_omni_animate) : seuls ces plans sont
+        animés (jamais un plan réservé par un autre job)."""
         job = Job(ad_id, ad_name, scenes)
         reserved = [int(c) for c in clip_ids or []]
         with self._lock:
@@ -204,8 +206,10 @@ class JobManager:
                     )
                 elif output_mode == "avatar_omni_animate":
                     # « Avatar IA (Omni) » — animation Google Omni (voix + lip-sync natifs) → clips.
+                    # clip_ids : plans RÉSERVÉS par ce job → seuls ceux-là sont animés.
                     summary = pipeline.animate_avatar_omni_clips(
                         cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
+                        clip_ids=reserved if clip_ids is not None else None,
                     )
                 elif output_mode == "avatar_voices":
                     # « Avatar IA » v2 — étape Voix : audio ElevenLabs par bloc. Import paresseux
@@ -221,6 +225,7 @@ class JobManager:
 
                     summary = avatar_video.animate_blocks(
                         cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id,
+                        clip_ids=reserved if clip_ids is not None else None,
                     ) or {}
                 else:
                     summary = pipeline.generate_ad(

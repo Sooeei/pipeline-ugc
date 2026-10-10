@@ -177,19 +177,26 @@ def test_target_seconds_bounds_duration_per_model():
     short = {"script": "Salut.", "target_seconds": 3.0, "speaker": 1}
     assert avatar_video.clip_target_seconds(short, "omni", voice_mode="native") == 3
     assert avatar_video.clip_target_seconds(short, "grok", voice_mode="native") == 4   # min Grok
-    # Sans cible : estimation depuis le texte (inchangé).
+    # Sans cible : Omni = réplique au débit de la fiche voix + 0,3 s ; Grok : estimation du texte.
     plain = {"script": "Salut.", "speaker": 1}
     assert avatar_video.clip_target_seconds(plain, "omni", voice_mode="native") == \
-        config_app.avatar_native_clip_seconds("Salut.", "omni")
-    # Cible longue (plan muet de 6,5 s) : la cible prime sur l'estimation du texte.
+        config_app.omni_speech_clip_seconds("Salut.") == 3
+    assert avatar_video.clip_target_seconds(plain, "grok", voice_mode="native") == \
+        config_app.avatar_native_clip_seconds("Salut.", "grok")
+    # Cible plus LONGUE que la réplique : Omni ne rallonge plus (pas de plan vide), Grok inchangé.
+    assert avatar_video.clip_target_seconds({**plain, "target_seconds": 8.0}, "omni",
+                                            voice_mode="native") == 3
+    assert avatar_video.clip_target_seconds({**plain, "target_seconds": 8.0}, "grok",
+                                            voice_mode="native") == 8
+    # Plan muet de 6,5 s : la cible donne la durée (rien à dire).
     assert avatar_video.clip_target_seconds({"script": "", "target_seconds": 6.5}, "omni",
                                             voice_mode="native") == 7
-    # Réplique trop longue pour la cible : allongée (parole au débit du perso + marge), bornée au max.
+    # Réplique trop longue pour la cible : Omni = parole au débit du perso + 0,3 s, bornée au max.
     long_line = " ".join(["mot"] * 20)
     c = {"script": long_line, "target_seconds": 3.0, "speaker": 1, "scene_n": 2}
     wps = 2.5
-    need = 20 / wps + config_app.AVATAR_NATIVE_MARGIN_S          # 9 s
-    assert avatar_video.clip_target_seconds(c, "omni", lambda n: wps, "native") == 9
+    need = 20 / wps + config_app.AVATAR_NATIVE_MARGIN_S          # 9 s (Grok / Kling)
+    assert avatar_video.clip_target_seconds(c, "omni", lambda n: wps, "native") == 9   # ceil(8 + 0,3)
     assert avatar_video.clip_target_seconds({**c, "script": " ".join(["mot"] * 40)}, "omni",
                                             lambda n: wps, "native") == 10   # max Omni
     assert avatar_video.clip_target_seconds({**c, "script": " ".join(["mot"] * 40)}, "grok",

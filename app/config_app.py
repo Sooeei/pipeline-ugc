@@ -10,7 +10,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 # Racine du projet (le dossier qui contient app/, config.py, …)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -308,6 +308,8 @@ GROK_RESOLUTION = "720p"                # résolution vidéo Grok
 class VoiceStyleCfg(TypedDict):
     label: str
     tone: str
+    # Précision ajoutée à la fiche voix quand le champ libre (extra) est vide (ex. « calme »).
+    default_extra: NotRequired[str]
 
 
 # NB : le TIMBRE (ci-dessous) et le DÉBIT (GROK_VOICE_PACES) sont séparés — le rythme n'est PLUS
@@ -333,6 +335,17 @@ GROK_VOICE_STYLES: dict[str, VoiceStyleCfg] = {
             "a friendly, upbeat, natural human French voice, warm and cheerful yet relaxed and "
             "clear, conversational and real (not robotic)"
         ),
+    },
+    # Anti-saturation (tests Morphea : voix qui crie / grésille) : timbre posé + précision par
+    # défaut (micro-cravate propre, volume naturel), ajoutée si la précision libre est vide.
+    "calme": {
+        "label": "Calme & posée (anti-saturation)",
+        "tone": (
+            "a calm, composed, natural human French voice, warm and steady, relaxed and "
+            "reassuring, conversational and real (not robotic)"
+        ),
+        "default_extra": ("soft-spoken, natural volume, never shouting, clean undistorted lav mic "
+                          "audio, neutral French accent"),
     },
 }
 DEFAULT_GROK_VOICE_STYLE = "douce"
@@ -790,31 +803,34 @@ def spoken_word_count(text: str) -> int:
     return sum(1 for tok in (text or "").split() if any(ch.isalnum() for ch in tok))
 
 
-def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
-    """Durée d'un clip Omni : temps naturel pour dire le dialogue + respiration d'intro, borné
-    [OMNI_MIN, OMNI_MAX]. Sans dialogue → OMNI_SILENT_CLIP_SECONDS."""
+def omni_speech_clip_seconds(text: str, wps: float | None = None) -> int:
+    """Durée d'un clip Omni PARLÉ = ceil(mots / débit de la fiche voix + OMNI_SPEECH_MARGIN_S),
+    bornée [OMNI_MIN (3 s, minimum officiel Google), OMNI_MAX (10 s)]. Aucune respiration muette
+    avant, aucune tenue silencieuse après (tests Morphea : plans vides). `wps` vide → débit de la
+    fiche voix par défaut (« naturel »). Crochets « [97 %] » : leur contenu est prononcé. Sans
+    mot prononcé → OMNI_MIN."""
     import math
 
-    words = spoken_word_count(dialogue)
+    words = spoken_word_count(re.sub(r"\[([^\]]*)\]", r"\1", str(text or "")))
     if not words:
-        return OMNI_SILENT_CLIP_SECONDS
-    wps = words_per_sec or GROK_WORDS_PER_SEC
-    secs = math.ceil(words / wps) + OMNI_INTRO_SECONDS
+        return OMNI_MIN_CLIP_SECONDS
+    rate = float(wps or 0) or GROK_VOICE_PACES[DEFAULT_GROK_VOICE_PACE]["words_per_sec"]
+    secs = math.ceil(round(words / rate + OMNI_SPEECH_MARGIN_S, 6))
     return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
+
+
+def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
+    """Durée d'un clip Omni (ancien pipeline, estimation du découpage) : omni_speech_clip_seconds
+    (débit de la fiche voix + 0,3 s, 3–10 s). Sans dialogue → OMNI_SILENT_CLIP_SECONDS."""
+    if not spoken_word_count(dialogue):
+        return OMNI_SILENT_CLIP_SECONDS
+    return omni_speech_clip_seconds(dialogue, words_per_sec or GROK_WORDS_PER_SEC)
 
 
 def omni_segment_seconds(text: str, words_per_sec: float | None = None, first: bool = True) -> int:
-    """Durée d'un SEGMENT de plan client (un tour Omni) : le 1er tour garde la respiration
-    d'intro (omni_clip_seconds) ; une extension n'en a pas. Bornée [OMNI_MIN, OMNI_MAX]."""
-    import math
-
-    if first:
-        return omni_clip_seconds(text, words_per_sec)
-    words = spoken_word_count(text)
-    if not words:
-        return OMNI_SILENT_CLIP_SECONDS
-    secs = math.ceil(words / (words_per_sec or GROK_WORDS_PER_SEC))
-    return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
+    """Durée d'un SEGMENT de plan client (un tour Omni) : même calcul pour le 1er tour et les
+    extensions (plus de respiration d'intro). Bornée [OMNI_MIN, OMNI_MAX]."""
+    return omni_clip_seconds(text, words_per_sec)
 
 
 def omni_max_words(words_per_sec: float | None = None) -> int:
@@ -896,8 +912,9 @@ def voice_sheet(profile: Any) -> str:
         accent = f"a {accent}"
     parts.append(f", with {accent}")
     parts.append(", speaking " + GROK_VOICE_PACES[p["pace"]]["directive"])
-    if p["extra"] and not voice_extra_is_brand(p["extra"]):
-        parts.append(", " + p["extra"])
+    extra = p["extra"] or GROK_VOICE_STYLES[p["tone"]].get("default_extra", "")
+    if extra and not voice_extra_is_brand(extra):
+        parts.append(", " + extra)
     return "".join(parts)
 
 

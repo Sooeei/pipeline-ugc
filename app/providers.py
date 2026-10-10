@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -129,7 +130,7 @@ def _log_detail(msg: str) -> None:
     Sous pythonw, stdout est redirigé vers app.log ; en dev, il part dans la console. Ne jamais
     journaliser de matériel de clé."""
     try:
-        print(f"[PROVIDER] {msg}", flush=True)
+        print(f"{time.strftime('%H:%M:%S')} [PROVIDER] {msg}", flush=True)
     except Exception:  # noqa: BLE001 - le diagnostic ne doit jamais casser une génération
         pass
 
@@ -742,11 +743,11 @@ def _enforce_preflight(cfg: ProviderConfig, issues: list[prompt_profiles.Preflig
                             + " ".join(str(e.get("message") or "") for e in errors))
 
 
-def nano_banana_final_prompt(prompt_image: str) -> str:
-    """Texte EXACT envoyé à Nano Banana : prompt du plan puis consigne de format, assemblés
-    dans l'ordre de la fiche Nano Banana Pro."""
+def nano_banana_final_prompt(prompt_image: str, size: str = config_app.DEFAULT_NB_IMAGE_SIZE) -> str:
+    """Texte EXACT envoyé à Nano Banana : prompt du plan puis consigne de format (taille de
+    sortie `size` : « 2K » | « 4K »), assemblés dans l'ordre de la fiche Nano Banana Pro."""
     return prompt_profiles.nano_banana_prompt({prompt_profiles.B_SUBJECT: prompt_image,
-                                               prompt_profiles.B_OUTPUT_FORMAT: prompt_profiles.NB_OUTPUT_FORMAT})
+                                               prompt_profiles.B_OUTPUT_FORMAT: prompt_profiles.nb_output_format(size)})
 
 
 def nano_banana_model_id(cfg: ProviderConfig) -> str:
@@ -754,6 +755,12 @@ def nano_banana_model_id(cfg: ProviderConfig) -> str:
         cfg.objet_image_model,
         config_app.OBJET_IMAGE_MODELS[config_app.DEFAULT_OBJET_IMAGE_MODEL],
     )["model"]
+
+
+def nano_banana_image_size(cfg: ProviderConfig) -> str:
+    """Taille de sortie EFFECTIVE (Réglages `nb_image_size`) : « 2K » | « 4K » ; la 4K demandée sur
+    un modèle qui ne la gère pas retombe en 2K."""
+    return config_app.normalize_nb_image_size(getattr(cfg, "image_size", ""), nano_banana_model_id(cfg))
 
 
 def nano_banana_generate_image(
@@ -771,12 +778,13 @@ def nano_banana_generate_image(
     réf envoyée, dans l'ordre (défaut : « reference »)."""
     refs = [str(r) for r in ref_paths][: config_app.OBJET_MAX_REF_IMAGES]
     sent = prompt_profiles.sent_images(refs, image_roles, prompt_profiles.ROLE_REFERENCE)
-    final = nano_banana_final_prompt(prompt_image)
+    size = nano_banana_image_size(cfg)
+    final = nano_banana_final_prompt(prompt_image, size)
     issues = prompt_profiles.preflight("nano_banana_pro", final, images=sent)
     _enforce_preflight(cfg, issues)
     path = _nano_banana_generate_image(cfg, prompt_image, refs, out_path, label, subtitle, index)
     gen_trace.record(kind="image", model=nano_banana_model_id(cfg), prompt=final, images=sent,
-                     params={"aspect": "9:16", "size": "2K"}, dry_run=cfg.dry_run,
+                     params={"aspect": "9:16", "size": size}, dry_run=cfg.dry_run,
                      issues=issues, output_path=str(path))
     return path
 
@@ -809,9 +817,10 @@ def _nano_banana_generate_image(
         raise ProviderError("Clé API OpenRouter (Nano Banana) manquante — ajoute-la dans Réglages.")
 
     model = nano_banana_model_id(cfg)
+    size = nano_banana_image_size(cfg)
 
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": nano_banana_final_prompt(prompt_image)}
+        {"type": "text", "text": nano_banana_final_prompt(prompt_image, size)}
     ]
     for ref in ref_paths[: config_app.OBJET_MAX_REF_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": _data_uri(ref)}})
@@ -820,8 +829,9 @@ def _nano_banana_generate_image(
         "model": model,
         "modalities": ["image", "text"],
         "messages": [{"role": "user", "content": content}],
-        # Résolution de SORTIE (OpenRouter image_config) : 2K = même prix que 1K (1120 tokens).
-        "image_config": {"aspect_ratio": "9:16", "image_size": "2K"},
+        # Résolution de SORTIE (OpenRouter image_config) : 2K (défaut, même prix que 1K) ou 4K
+        # (Réglages nb_image_size, Nano Banana Pro seulement).
+        "image_config": {"aspect_ratio": "9:16", "image_size": size},
     }
     headers = {
         "Authorization": f"Bearer {key}",
@@ -1401,27 +1411,107 @@ _OMNI_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 _OMNI_FAILED_STATUSES = ("failed", "incomplete", "cancelled", "canceled")
+# Refus en toutes lettres (corps réel du 10/10 : « Request blocked due to prohibited content
+# guidelines… The video was filtered out because it violated Google's [Generative AI Prohibited
+# Use policy] ») : « prohibited content » AVEC espace, « filtered out », « request blocked », « violat… ».
+_OMNI_BLOCK_TEXT_RE = re.compile(
+    r"prohibited\s+(?:content|use)|filtered\s+out|request\s+(?:was\s+)?blocked|\bviolat(?:e|ed|es|ing|ion|ions)\b",
+    re.IGNORECASE,
+)
+OMNI_BLOCK_KINDS = ("safety", "minor", "likeness", "language")
+_OMNI_BLOCK_MESSAGES = {
+    "safety": _OMNI_MSG_SAFETY,
+    "minor": _OMNI_MSG_MINOR,
+    "likeness": _OMNI_MSG_LIKENESS,
+    "language": _OMNI_MSG_LANGUAGE,
+}
+# Pistes de correction (FR) proposées sur la carte du plan refusé : elles remplissent le champ
+# « correction » de l'image ; l'utilisateur relance lui-même (jamais de relance automatique).
+OMNI_BLOCK_SUGGESTIONS: dict[str, tuple[str, ...]] = {
+    "safety": (
+        "Tenue plus couverte (pas de short, pas en sous-vêtements au lit)",
+        "Look plus âgé (30 ans et plus, traits adultes marqués)",
+        "Cadrage moins intime (assise, pas allongée)",
+    ),
+    "minor": (
+        "Look nettement adulte (30 ans et plus, traits adultes marqués)",
+        "Tenue d'adulte (pas d'uniforme scolaire ni de vêtements enfantins)",
+        "Aucun enfant dans le décor",
+    ),
+    "likeness": (
+        "Visage plus générique (traits moins typés, pas de ressemblance avec une personne connue)",
+        "Autre coiffure et autre couleur de cheveux",
+        "Retire toute référence à une personne réelle du dialogue et de la direction",
+    ),
+    "language": (
+        "Réplique plus courte et plus simple (sans sigles ni abréviations)",
+        "Retire les mots d'argot ou étrangers de la réplique",
+        "Écris les nombres et les symboles en toutes lettres",
+    ),
+}
 
 
-def _omni_block_message(code: Any, message: Any) -> str | None:
-    """Message FR d'un blocage Google Omni reconnu (code et/ou message, insensible à la casse),
-    sinon None (l'appelant choisit alors le message générique)."""
+class OmniBlockedError(ProviderError):
+    """Google Omni a REFUSÉ le plan (filtre de contenu / mineur / ressemblance / langue). Pas une
+    panne : relancer à l'identique est refusé de nouveau (et peut être facturé) → jamais de relance
+    automatique ; le plan est marqué `clips.error_kind="omni_blocked"` et ignoré par « Animer
+    tout » tant que l'image ou le dialogue n'a pas changé. `kind` ∈ OMNI_BLOCK_KINDS,
+    `google_reason` = phrase de refus de Google (anglais, nettoyée), `suggestions` = pistes FR."""
+
+    def __init__(self, kind: str = "safety", google_reason: str = "") -> None:
+        self.kind = kind if kind in OMNI_BLOCK_KINDS else "safety"
+        self.google_reason = _clean_google_reason(google_reason)
+        self.suggestions = list(OMNI_BLOCK_SUGGESTIONS[self.kind])
+        super().__init__(_OMNI_BLOCK_MESSAGES[self.kind] + " Aucune relance automatique : corrige le "
+                         "plan (pistes proposées sur sa carte) puis relance-le toi-même.")
+
+    def detail(self) -> dict[str, Any]:
+        """Contenu de `clips.error_detail` (JSON)."""
+        return {"kind": self.kind, "google_reason": self.google_reason, "suggestions": self.suggestions}
+
+
+def _clean_google_reason(text: Any, limit: int = 300) -> str:
+    """Phrase de refus de Google lisible : liens Markdown → leur texte, URL retirées, espaces
+    normalisés, ≤ `limit` caractères."""
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", str(text or ""))
+    t = re.sub(r"https?://\S+", "", t)
+    t = " ".join(t.replace("[", "").replace("]", "").split())
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+def _omni_block_kind(code: Any, message: Any) -> str | None:
+    """Type de blocage Google Omni reconnu (code et/ou message, insensible à la casse) :
+    « language » | « minor » | « likeness » | « safety », sinon None."""
     c = str(code or "").strip().lower()
     m = str(message or "")
     text = f"{c} {m}"
     lang_msg = "language" in m.lower() and "support" in m.lower()   # « unsupported language »…
     if re.search(r"(?<![a-z])language(?![a-z])", c) or lang_msg:
-        return _OMNI_MSG_LANGUAGE
+        return "language"
     # Codes Google du type CHILD_SAFETY / RECOGNIZABLE_PERSON : « _ » et « - » → espace, sinon
     # \b ne sépare pas les mots (le « _ » est un caractère de mot pour les regex).
     words = re.sub(r"[_-]+", " ", text.lower())
     if _OMNI_MINOR_RE.search(words):
-        return _OMNI_MSG_MINOR
+        return "minor"
     if _OMNI_LIKENESS_RE.search(words):
-        return _OMNI_MSG_LIKENESS
-    if c in _OMNI_BLOCK_CODES or _OMNI_BLOCK_RE.search(text):
-        return _OMNI_MSG_SAFETY
+        return "likeness"
+    if c in _OMNI_BLOCK_CODES or _OMNI_BLOCK_RE.search(text) or _OMNI_BLOCK_TEXT_RE.search(words):
+        return "safety"
     return None
+
+
+def _omni_block_message(code: Any, message: Any) -> str | None:
+    """Message FR d'un blocage Google Omni reconnu, sinon None (message générique côté appelant)."""
+    kind = _omni_block_kind(code, message)
+    return _OMNI_BLOCK_MESSAGES[kind] if kind else None
+
+
+def omni_blocked_error(code: Any, message: Any) -> OmniBlockedError | None:
+    """OmniBlockedError si (code, message) est un refus Google reconnu, sinon None."""
+    kind = _omni_block_kind(code, message)
+    if kind is None:
+        return None
+    return OmniBlockedError(kind, str(message or "").strip() or str(code or "").strip())
 
 
 def _omni_file_id(uri: str) -> str:
@@ -1527,11 +1617,43 @@ def _omni_extract_video(data: Any) -> tuple[bytes | None, str | None]:
 
 def _omni_errors_message(errors: Any) -> str | None:
     """1er message de blocage reconnu dans `errors[]` (sinon None)."""
+    exc = _omni_errors_blocked(errors)
+    return str(exc) if exc else None
+
+
+def _omni_errors_blocked(errors: Any) -> OmniBlockedError | None:
+    """1er refus reconnu dans `errors[]` (sinon None)."""
     for err in errors if isinstance(errors, list) else []:
         if isinstance(err, dict):
-            msg = _omni_block_message(err.get("code"), err.get("message"))
-            if msg:
-                return msg
+            exc = omni_blocked_error(err.get("code"), err.get("message"))
+            if exc:
+                return exc
+    return None
+
+
+def _omni_response_blocked(data: dict[str, Any]) -> OmniBlockedError | None:
+    """Refus reconnu dans une réponse 200 sans vidéo : errors[], puis message / texte renvoyés par
+    Google (« The video was filtered out because… »)."""
+    exc = _omni_errors_blocked(data.get("errors"))
+    if exc:
+        return exc
+    texts: list[str] = []
+    for k in ("error", "message", "status_message", "statusMessage"):
+        v = data.get(k)
+        if isinstance(v, dict):
+            texts.append(f"{v.get('code') or ''} {v.get('message') or ''}")
+        elif isinstance(v, str):
+            texts.append(v)
+    steps = data.get("steps") or data.get("outputs") or []
+    for step in steps if isinstance(steps, list) else []:
+        content = step.get("content") if isinstance(step, dict) else None
+        for item in content if isinstance(content, list) else [content]:
+            if isinstance(item, dict) and str(item.get("type", "")).lower() == "text":
+                texts.append(str(item.get("text") or ""))
+    for t in texts:
+        exc = omni_blocked_error("", t)
+        if exc:
+            return exc
     return None
 
 
@@ -1570,11 +1692,16 @@ def _omni_http_error(r: requests.Response, what: str) -> ProviderError:
             message = err.get("message") or ""
     except Exception:  # noqa: BLE001 - corps non JSON
         pass
-    return ProviderError(
-        _omni_daily_quota(r.status_code, code, message)
-        or _omni_block_message(code, message)
-        or _friendly_http("Google", r.status_code)
-    )
+    if not message:
+        message = str(getattr(r, "text", "") or "")[:1000]   # corps texte brut (refus non JSON)
+    quota = _omni_daily_quota(r.status_code, code, message)
+    if quota:
+        return ProviderError(quota)
+    blocked = omni_blocked_error(code, message)
+    if blocked is not None:
+        _log_detail(f"Google Omni REFUS ({blocked.kind}) — aucune relance automatique : {blocked.google_reason}")
+        return blocked
+    return ProviderError(_friendly_http("Google", r.status_code))
 
 
 def _omni_download_file(uri: str, key: str, out_mp4: str) -> None:
@@ -1773,7 +1900,7 @@ def _omni_extend_video(
     """Tour d'EXTENSION d'une vidéo Omni : `previous_interaction_id` = interaction du tour
     précédent (créée avec store=true) — Google garde la vidéo, les personnages et la voix.
     Sans `task="extend"` (il interdit les références) : le prompt dit « Extend this video » /
-    « Show the same character in the next scene ». `reference_paths` = images de RÉFÉRENCE
+    « At 0s cut to a new scene with the same character, same voice ». `reference_paths` = images de RÉFÉRENCE
     jointes (0 par défaut : texte seul). Renvoie {"path", "interaction_id", "usage"} (id stocké :
     ce tour peut être étendu). Simulation : placeholder + id « SIMU_OMNI_EXT_<n> »."""
     out_mp4 = str(out_mp4)
@@ -1837,12 +1964,18 @@ def _omni_run(key: str, body: dict[str, Any], out_mp4: str) -> tuple[str, dict[s
     status = str(data.get("status") or "").lower()
     if status in _OMNI_FAILED_STATUSES:
         _log_detail(f"Google Omni {status} ({interaction_id}) : {str(data.get('errors'))[:400]}")
-        raise ProviderError(_omni_errors_message(data.get("errors")) or _OMNI_MSG_SAFETY)
+        blocked = _omni_response_blocked(data)
+        if blocked is not None:
+            raise blocked
+        raise ProviderError(_OMNI_MSG_SAFETY)
 
     video, uri = _omni_extract_video(data)
     if video is None and not uri:
         _log_detail(f"Google Omni aucune vidéo ({interaction_id}) : {str(data)[:300]}")
-        raise ProviderError(_omni_errors_message(data.get("errors")) or _OMNI_MSG_SAFETY)
+        blocked = _omni_response_blocked(data)
+        if blocked is not None:
+            raise blocked
+        raise ProviderError(_OMNI_MSG_SAFETY)
     if video is not None:
         try:
             Path(out_mp4).parent.mkdir(parents=True, exist_ok=True)

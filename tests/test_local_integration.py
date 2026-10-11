@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from test_comfy_local import _validate
 
-from app import comfy_local, config_app, db, keyframe_versions, pipeline
+from app import comfy_local, config_app, db, keyframe_versions, local_routes, pipeline
 from app.main import app
 
 _TABLES = ("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings", "avatars",
@@ -34,6 +34,7 @@ def fresh_db(monkeypatch):
         con.close()
     # pas de ports Comfy Desktop réels dans la détection (sinon dépend de la machine)
     monkeypatch.setattr(comfy_local, "_ports_from_desktop", lambda: [])
+    monkeypatch.setattr(local_routes, "_last_kind", [None])   # pas de libération héritée d'un autre test
     yield
 
 
@@ -268,3 +269,18 @@ def test_custom_port_setting(c, monkeypatch):
     assert c.get("/api/local/status").json()["reachable"] is False  # réglage forcé
     c.post("/api/local/settings", json={"comfy_port": 8000})
     assert c.get("/api/local/status").json()["port"] == 8000
+
+
+def test_free_memory_when_switching_image_to_video(c, monkeypatch):
+    """Changement de modèle (Qwen → MiniMax) : mémoire libérée AVANT le rendu suivant ; pas entre
+    deux rendus du même type."""
+    monkeypatch.setattr(local_routes, "_last_kind", [None])
+    fake = FakeComfy().install(monkeypatch)
+    ref = _upload(c)
+    for _ in range(2):
+        r = c.post("/api/local/image", json={"source": ref, "instruction": "warmer light"}).json()
+        assert _wait(c, r["job_id"])["state"] == "termine"
+    assert fake.freed == 0
+    r = c.post("/api/local/video", json={"first_frame": ref, "seconds": 3}).json()
+    assert _wait(c, r["job_id"])["state"] == "termine"
+    assert fake.freed == 1

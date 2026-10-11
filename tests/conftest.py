@@ -5,6 +5,7 @@ rester verrouillé par SQLite/WAL sous Windows → WinError 32).
 """
 
 import os
+import sys
 import tempfile
 
 # IMPORTANT : fixer le dossier de données AVANT d'importer l'app (chemins lus à l'import).
@@ -34,4 +35,7 @@ def fresh_db():
         con.commit()
     finally:
         con.close()
+    lr = sys.modules.get("app.local_routes")   # section Local : dernier type de rendu remis à zéro
+    if lr is not None:
+        lr._last_kind[0] = None
     yield

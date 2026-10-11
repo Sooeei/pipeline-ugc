@@ -128,6 +128,10 @@ _cond = threading.Condition()
 _waiting: deque[str] = deque()        # job_ids en file (le 1er passera ensuite)
 _running: list[str | None] = [None]   # job_id en cours chez Comfy
 _states: dict[str, dict[str, Any]] = {}
+# Dernier type de rendu envoyé à Comfy (« video » | « image ») : au changement de type, la mémoire
+# est libérée AVANT l'envoi (test réel du 11/10/2026 : vidéo MiniMax juste après une retouche Qwen
+# = 9 min 48 pour 3 s, les modèles Qwen restant chargés → débordement en RAM).
+_last_kind: list[str | None] = [None]
 _launch_at = [0.0]
 
 
@@ -187,6 +191,12 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
         if not det:
             raise comfy_local.ComfyOffline(OFFLINE_MSG)
         url = str(det["url"])
+        if _last_kind[0] and _last_kind[0] != st["kind"]:
+            try:
+                comfy_local.free(url)
+            except Exception as exc:  # noqa: BLE001 - libération facultative
+                _log_detail(f"[LOCAL] free (changement de modèle) : {exc!r}")
+        _last_kind[0] = st["kind"]
         paths = params.get("paths") or {}
         if st["kind"] == "video":
             first = comfy_local.upload_image(url, paths["first"])

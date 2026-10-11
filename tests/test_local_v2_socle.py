@@ -237,5 +237,5 @@ def test_stubs_signatures():
     from pathlib import Path
     v = Path("x.mp4")
     assert avatar_minimax.change_voice_after_animation({}, {}, v) is v
-    with pytest.raises(NotImplementedError):
-        avatar_minimax.block_prompt({}, {})
+    # Zone A livrée : block_prompt implémenté (plan muet → aucune réplique, son propre).
+    assert "no music" in avatar_minimax.block_prompt({}, {})

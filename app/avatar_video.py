@@ -1,7 +1,8 @@
 """Avatar IA v2 « audio-first » — animation vidéo des blocs (propriété : agent Vidéo).
 
 UN appel image-to-video par bloc (keyframe validé = image de départ), modèle `ads.video_model`
-∈ {grok, kling, omni} (vide = réglage global `avatar_video_model`). Mode voix
+∈ {grok, kling, omni, minimax_local} (vide = réglage global `avatar_video_model` ; minimax_local =
+ComfyUI sur le PC, gratuit, toujours réel : app/avatar_minimax.py, CONTRAT_LOCAL.md K5). Mode voix
 `ads.voice_mode` : « native » (DÉFAUT et seul mode actif) = voix générée par le modèle vidéo,
 durée du clip estimée depuis le texte (config_app.avatar_native_clip_seconds), seuls les
 keyframes validés conditionnent la vidéo. « elevenlabs » (désactivé, code conservé, cf.
@@ -37,7 +38,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from . import (
+    avatar_minimax,
     brain,
+    comfy_local,
+    comfy_queue,
     config_app,
     cost,
     db,
@@ -58,7 +62,9 @@ router = APIRouter()
 UpdateFn = Callable[[dict[str, Any]], None]
 
 # Appels vidéo simultanés par modèle (Omni : 1 + espacement Tier 1 en run réel).
-MAX_PARALLEL = {"grok": config_app.GROK_MAX_PARALLEL, "kling": config_app.KLING_MAX_PARALLEL, "omni": 1}
+# MiniMax local : 1 (un seul GPU ; tous les rendus passent de toute façon par comfy_queue).
+MAX_PARALLEL = {"grok": config_app.GROK_MAX_PARALLEL, "kling": config_app.KLING_MAX_PARALLEL, "omni": 1,
+                config_app.LOCAL_VIDEO_MODEL: 1}
 KLING_COST_KEY = "kling_pro"      # clé MASHUP_VIDEO_MODELS de Kling 3.0 (coût de repli)
 GESTURE_MAX_WORDS = 12            # geste/expression conservé en tête du prompt vidéo
 
@@ -76,9 +82,42 @@ def voice_mode_of(ad: dict[str, Any] | None) -> str:
     return config_app.normalize_voice_mode((ad or {}).get("voice_mode"))
 
 
+def local_quality_of(ad: dict[str, Any] | None) -> float:
+    """Qualité MiniMax local de la pub (mégapixels : 0.4 | 0.6 | 0.9 ; défaut 0.9)."""
+    return config_app.normalize_local_video_quality((ad or {}).get("local_video_quality"))
+
+
+def local_turbo_of(ad: dict[str, Any] | None) -> bool:
+    """Turbo MiniMax local de la pub (ads.local_video_turbo, défaut activé)."""
+    raw = (ad or {}).get("local_video_turbo")
+    if raw is None or str(raw).strip() == "":
+        return bool(config_app.LOCAL_VIDEO_TURBO_DEFAULT)
+    try:
+        return bool(int(float(raw)))
+    except (TypeError, ValueError):
+        return bool(config_app.LOCAL_VIDEO_TURBO_DEFAULT)
+
+
+def local_options(ad: dict[str, Any] | None) -> dict[str, Any]:
+    """Réglages locaux + style de tournage de la pub, avec leurs choix (payload /ad, options)."""
+    return {
+        "local_video_quality": local_quality_of(ad),
+        "local_video_turbo": local_turbo_of(ad),
+        "shoot_style": config_app.normalize_shoot_style((ad or {}).get("shoot_style")),
+        "local_video_qualities": [{"value": q, "label": lbl}
+                                  for q, lbl in config_app.LOCAL_VIDEO_QUALITIES.items()],
+        "shoot_styles": [{"value": k, "label": lbl} for k, lbl in config_app.SHOOT_STYLES.items()],
+        "image_engine": config_app.normalize_image_engine((ad or {}).get("image_engine")),
+        "image_engines": [{"value": k, "label": lbl} for k, lbl in config_app.IMAGE_ENGINES.items()],
+    }
+
+
 def model_resolution(model: str, wanted: Any) -> str:
-    """Résolution envoyée au modèle : ads.omni_resolution si le modèle la supporte."""
+    """Résolution envoyée au modèle : ads.omni_resolution si le modèle la supporte. MiniMax local :
+    pas de 720p / 1080p (qualité en mégapixels, ads.local_video_quality) → ""."""
     want = str(wanted or "").strip().lower()
+    if config_app.is_local_video(model):
+        return ""
     if model == "grok":
         return want if want in providers.GROK_RESOLUTIONS else config_app.GROK_RESOLUTION
     if model == "kling":
@@ -90,8 +129,8 @@ def resolution_warning(model: str, wanted: Any) -> str:
     """Avertissement FR quand la résolution demandée pour la pub (ex. 1080p exigé par le client)
     n'est pas disponible avec le modèle vidéo : la vidéo sort dans la résolution bornée."""
     want = str(wanted or "").strip().lower()
-    if not want:
-        return ""
+    if not want or config_app.is_local_video(model):
+        return ""   # MiniMax local : qualité choisie en mégapixels (options de la pub)
     got = model_resolution(model, want)
     if got == want:
         return ""
@@ -136,22 +175,34 @@ def speech_need_seconds(c: dict[str, Any], wps: float | None = None, model: str 
     """Temps dont la réplique a besoin : parole estimée au débit du perso + marge (Omni :
     OMNI_SPEECH_MARGIN_S = 0,3 s ; Grok / Kling : AVATAR_NATIVE_MARGIN_S). 0 pour un plan muet."""
     speech = pipeline.omni_speech_seconds(str(c.get("script") or ""), wps)
-    margin = config_app.OMNI_SPEECH_MARGIN_S if model == "omni" else config_app.AVATAR_NATIVE_MARGIN_S
+    margin = (config_app.OMNI_SPEECH_MARGIN_S if speech_timed(model)
+              else config_app.AVATAR_NATIVE_MARGIN_S)
     return round(speech + margin, 2) if speech > 0 else 0.0
 
 
-def omni_block_seconds(c: dict[str, Any], wps: float | None = None) -> int:
-    """Durée d'un bloc Omni (avant « +1 s ») : la réplique au débit de la fiche voix
-    (config_app.omni_speech_clip_seconds : mots / débit + 0,3 s, 3–10 s). La durée CIBLE du client
-    ne rallonge JAMAIS un plan parlé (elle ne sert qu'à l'alerte) ; plan muet : la cible si elle
-    existe, sinon OMNI_SILENT_CLIP_SECONDS."""
+def speech_timed(model: str) -> bool:
+    """Modèles dont la durée d'un plan parlé = la réplique au débit de la fiche voix + 0,3 s (la
+    cible client ne rallonge pas) : Omni et MiniMax local."""
+    m = str(model or "").strip().lower()
+    return m == "omni" or config_app.is_local_video(m)
+
+
+def omni_block_seconds(c: dict[str, Any], wps: float | None = None, model: str = "omni") -> int:
+    """Durée d'un bloc Omni / MiniMax local (avant « +1 s ») : la réplique au débit de la fiche voix
+    (config_app.omni_speech_clip_seconds : mots / débit + 0,3 s, bornée aux durées du modèle :
+    Omni 3–10 s, MiniMax 3–15 s). La durée CIBLE du client ne rallonge JAMAIS un plan parlé (elle
+    ne sert qu'à l'alerte) ; plan muet : la cible si elle existe, sinon OMNI_SILENT_CLIP_SECONDS."""
+    key = config_app.LOCAL_VIDEO_MODEL if config_app.is_local_video(model) else "omni"
+    durations = config_app.AVATAR_VIDEO_MODELS[key]["durations"]
     script = str(c.get("script") or "")
     if config_app.spoken_word_count(brain.strip_brackets(script)):
-        return config_app.omni_speech_clip_seconds(script, wps)
+        if key == "omni":
+            return config_app.omni_speech_clip_seconds(script, wps)
+        return config_app.omni_speech_clip_seconds(script, wps, lo=min(durations), hi=max(durations))
     tgt = clip_target(c)
     if tgt is None:
         return config_app.OMNI_SILENT_CLIP_SECONDS
-    return _snap(tgt, config_app.AVATAR_VIDEO_MODELS["omni"]["durations"])
+    return _snap(tgt, durations)
 
 
 def _snap(target: float, durations: tuple[int, ...] | list[int]) -> int:
@@ -186,12 +237,12 @@ def target_warning(c: dict[str, Any], wps: float | None = None, model: str = "")
         return ""
     n = c.get("block_n") or c.get("scene_n")
     need = speech_need_seconds(c, wps, model)
-    if model == "omni":
+    if speech_timed(model):
         if need > tgt + 1e-6:
             return (f"Plan {n} : la réplique demande ~{need:.1f} s pour une cible de {tgt:g} s "
                     "— raccourcis la réplique pour tenir le timing du client.")
         if need > 0:
-            secs = omni_block_seconds(c, wps)
+            secs = omni_block_seconds(c, wps, model)
             if tgt - secs >= 1.0:
                 return (f"Plan {n} : cible de {tgt:g} s, le plan durera ~{secs} s (la réplique au "
                         "débit de la fiche voix, sans silence ajouté) — « +1 s » si besoin.")
@@ -246,10 +297,11 @@ def clip_target_seconds(
     fiche voix (estimation de coût avant l'étape Voix)."""
     if config_app.normalize_voice_mode(voice_mode) == "native":
         wps = float(wps_for(_speaker(c))) if wps_for else None
-        if config_app.normalize_avatar_video_model(model) == "omni":
-            # Omni : la réplique au débit de la fiche voix (+ 0,3 s, 3–10 s) ; la cible client
-            # ne rallonge plus (alerte seulement) ; seule rallonge : « +1 s » (extra_seconds).
-            base = omni_block_seconds(c, wps)
+        if speech_timed(config_app.normalize_avatar_video_model(model)):
+            # Omni / MiniMax local : la réplique au débit de la fiche voix (+ 0,3 s, 3–10 s /
+            # 3–15 s) ; la cible client ne rallonge plus (alerte seulement) ; seule rallonge :
+            # « +1 s » (extra_seconds).
+            base = omni_block_seconds(c, wps, config_app.normalize_avatar_video_model(model))
         else:
             # Grok / Kling : durée CIBLE du découpage client (timecodes) prioritaire, allongée
             # seulement si la réplique en a besoin.
@@ -327,8 +379,12 @@ def build_video_prompt(
     camera_key: str = "",
     style: str = config_app.DEFAULT_OMNI_STYLE,
     offscreen: bool = False,
+    shoot_style: str = "",
 ) -> str:
-    """Prompt image→vidéo d'UN bloc. `offscreen` = voix HORS CHAMP de `speaker` : les personnes
+    """Prompt image→vidéo d'UN bloc. `shoot_style` (K9) : « selfie » ajoute la phrase de cadrage
+    vidéo (pipeline.video_selfie_line) ; « pose » / vide → prompt historique INCHANGÉ.
+    MiniMax local : prompt dédié (avatar_minimax.block_prompt, via _clip_prompt).
+    `offscreen` = voix HORS CHAMP de `speaker` : les personnes
     visibles (`others_in_frame`) se taisent bouche fermée, aucune règle de lip-sync, la voix et sa
     fiche sont celles de `speaker` (lipsync_rules.offscreen_voice_line), dialogue VERBATIM.
     Ordre : geste/expression (video_prompt nettoyé des marques,
@@ -346,7 +402,7 @@ def build_video_prompt(
         return pipeline.build_omni_block_prompt(
             video_prompt, speaker=speaker, others_in_frame=others_in_frame, dialogue=dialogue,
             voice_sheet=voice_sheet, names=names, scene_desc=scene_desc, images=images,
-            camera_key=camera_key, style=style, offscreen=offscreen)
+            camera_key=camera_key, style=style, offscreen=offscreen, shoot_style=shoot_style)
     sp = max(1, int(speaker or 1))
     # Dialogue nettoyé À L'ENVOI (pipeline.spoken_dialogue → brain.spoken_clean) ; script intact.
     text = pipeline._omni_quote_dialogue(pipeline.spoken_dialogue(dialogue))
@@ -354,12 +410,14 @@ def build_video_prompt(
     off = bool(offscreen) and bool(text)
     if model == "grok":
         return _grok_block_prompt(video_prompt, sp, others_in_frame, text, sheet, names, accent,
-                                  offscreen=off)[0]
+                                  offscreen=off, shoot_style=shoot_style)[0]
     parts: list[str] = []
     if scene_desc.strip():
         parts.append(f"The scene: {brain.scrub_brand_names(' '.join(scene_desc.split()))}")
     if g := _gesture(video_prompt):
         parts.append(g)
+    if selfie := pipeline.video_selfie_line(shoot_style):
+        parts.append(selfie)
     visible = list(dict.fromkeys(int(m) for m in others_in_frame or [] if int(m) != sp))
     if off:
         parts.append(lipsync_rules.offscreen_voice_line(_who(sp, names), len(visible)))
@@ -382,29 +440,33 @@ def build_video_prompt(
 
 def _grok_block_prompt(
     video_prompt: str, sp: int, others_in_frame: list[int], text: str, sheet: str,
-    names: dict[int, str], accent: str = "", *, offscreen: bool = False,
+    names: dict[int, str], accent: str = "", *, offscreen: bool = False, shoot_style: str = "",
 ) -> tuple[str, list[str]]:
     """Prompt Grok d'un bloc v2 + gestes de tête retirés. Bloc PARLÉ : gestes retirés AVANT la
     coupe à 12 mots, « Only Character N speaks… », AUDIO = fiche voix VERBATIM + langue/accent +
     réplique VERBATIM (la fiche porte déjà le débit). Bloc muet : mouvement d'origine.
     `offscreen` (voix hors champ de `sp`) : visibles bouche fermée, aucune règle de lip-sync,
-    AUDIO « off-screen voice » avec la fiche voix de `sp`."""
+    AUDIO « off-screen voice » avec la fiche voix de `sp`. `shoot_style` « selfie » : phrase de
+    cadrage ajoutée au jeu (performance) ; « pose » / vide → prompt inchangé."""
     motion = brain.scrub_brand_names(" ".join(str(video_prompt or "").split()))
     removed: list[str] = []
     others: list[int] = []
     for m in others_in_frame or []:
         if int(m) != sp and int(m) not in others:
             others.append(int(m))
+    selfie = pipeline.video_selfie_line(shoot_style)
     if text and offscreen:
+        off_perf = lipsync_rules.offscreen_voice_line(_who(sp, names), len(others))
         prompt, _ = providers.build_grok_prompt(
             _gesture(motion), text, tone=voice_i18n.clean_sheet(sheet), accent=accent,
-            performance=lipsync_rules.offscreen_voice_line(_who(sp, names), len(others)),
+            performance=f"{off_perf} {selfie}" if selfie else off_perf,
             offscreen=True)
         return prompt, []
     if text:
         motion, removed = lipsync_rules.strip_lipsync_gestures(motion)
     perf = " ".join([f"{_who(sp, names)} talking, expressive mouth, subtle body motion."]
-                    + [f"{_who(m, names)} keeps their mouth closed, does not speak." for m in others])
+                    + [f"{_who(m, names)} keeps their mouth closed, does not speak." for m in others]
+                    + ([selfie] if selfie else []))
     prompt, _ = providers.build_grok_prompt(
         _gesture(motion), text, tone=voice_i18n.clean_sheet(sheet), performance=perf, accent=accent,
         speaker_line=lipsync_rules.single_speaker_line(_who(sp, names), [_who(m, names) for m in others]),
@@ -448,6 +510,8 @@ def omni_block_images(
 
 def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str,
                  omni_images: tuple[str, str] | None = None) -> str:
+    if config_app.is_local_video(model):
+        return avatar_minimax.block_prompt(ad, c)
     sp = _speaker(c)
     in_frame = pipeline.clip_characters_in_frame(c, ad)
     sent = None
@@ -466,6 +530,7 @@ def _clip_prompt(c: dict[str, Any], ad: dict[str, Any], model: str,
         accent=speaker_accent(ad, sp),
         images=sent, camera_key=pipeline.ad_omni_camera(ad), style=pipeline.ad_style(ad),
         offscreen=pipeline.clip_offscreen(c),
+        shoot_style=str(ad.get("shoot_style") or ""),
     )
 
 
@@ -496,8 +561,16 @@ def estimate(
         len(brain.strip_brackets(str(c.get("script") or "").strip())) for c in clips
         if not (int(c.get("voice_ok") or 0) and c.get("wav_path"))
     )
-    est = cost.estimate_avatar_v2(secs, model, chars, dry_run=bool(dry_run))
+    local = config_app.is_local_video(model)
+    # MiniMax local : gratuit et TOUJOURS réel (ignore la simulation) → 0 $, dry_run false.
+    est = cost.estimate_avatar_v2(secs, model, chars, dry_run=bool(dry_run) and not local)
     est["voice_mode"] = voice_mode_of(ad)
+    est["local"] = local
+    if local:
+        # Durée de RENDU estimée (UI : « ~X min pour Y plans » à la place du coût).
+        est["estimate_minutes"] = avatar_minimax.minutes_for_seconds(ad, secs)
+        est["local_video_quality"] = local_quality_of(ad)
+        est["local_video_turbo"] = local_turbo_of(ad)
     return est
 
 
@@ -578,6 +651,9 @@ def ad_v2_fields(ad: dict[str, Any], cfg: ProviderConfig | None = None) -> dict[
         "ref_images": _ref_images(ad),
         **pipeline.omni_options(ad),
         "omni_alerts": omni_alerts(ad, cfg),
+        # Local v2 (K5/K9) : moteur local ? + qualité / turbo / style de tournage et leurs choix.
+        "video_local": config_app.is_local_video(model),
+        **local_options(ad),
     }
 
 
@@ -615,11 +691,20 @@ def _ref_images(ad: dict[str, Any]) -> list[dict[str, Any]]:
 # ============================================================ génération
 def _generate_raw(
     cfg: ProviderConfig, ad: dict[str, Any], c: dict[str, Any], model: str, prompt: str,
-    raw: Path, seconds: int, resolution: str, label: str,
+    raw: Path, seconds: int, resolution: str, label: str, *,
+    emit: UpdateFn | None = None, priority: int = comfy_queue.PRIO_INTERACTIVE,
+    should_cancel: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None, source: str = "pub",
 ) -> dict[str, Any]:
     """UN appel vidéo pour le bloc → raw. Simulation : clip fixe du keyframe (aucun réseau).
-    Renvoie {usage_cost?} pour la comptabilité."""
+    MiniMax local : TOUJOURS un rendu Comfy réel (la simulation est ignorée), via
+    avatar_minimax.render_clip (comfy_queue, seed, prompt_id) — `emit` / `priority` /
+    `should_cancel` / `on_progress` ne servent qu'à lui. Renvoie {usage_cost?} pour la comptabilité."""
     n = int(c["scene_n"])
+    if config_app.is_local_video(model):
+        return avatar_minimax.render_clip(
+            ad, c, raw, seconds=seconds, prompt=prompt, emit=emit, priority=priority,
+            should_cancel=should_cancel, on_progress=on_progress, source=source)
     image = "" if pipeline.clip_text_only(c) else str(c.get("image_path") or "")
     if cfg.dry_run:
         if image and media.ffmpeg_available():
@@ -673,8 +758,8 @@ def _generate_raw(
 
 
 def _record_cost(cfg: ProviderConfig, ad_id: int, model: str, seconds: int, info: dict[str, Any]) -> None:
-    if cfg.dry_run:
-        return
+    if cfg.dry_run or config_app.is_local_video(model):
+        return   # simulation, ou MiniMax local (gratuit : aucune ligne cost_events)
     if model == "grok":
         cost.record_grok_clip(ad_id, seconds)
     elif model == "kling":
@@ -704,6 +789,69 @@ def _measure_drift(c: dict[str, Any], video: Path, frame0: Path, threshold: floa
         note = f"Dérive : la 1re image ressemble peu au keyframe ({m['score']:.2f}) — relance ce bloc."
     return {"drift_score": float(m["score"]), "drift_flag": 1 if flag else 0,
             "frame0_path": str(frame0), "mirrored": bool(m["mirrored"]), "note": note}
+
+
+def animate_clip(
+    cfg: ProviderConfig, ad: dict[str, Any], ad_name: str, c: dict[str, Any], *, model: str,
+    voice_mode: str, wps_for: Callable[[int], float], folder: Path, resolution: str,
+    threshold: float, emit: UpdateFn, priority: int = comfy_queue.PRIO_INTERACTIVE,
+    should_cancel: Callable[[], bool] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None, source: str = "pub",
+) -> dict[str, Any]:
+    """Anime UN bloc (corps d'un worker du job « avatar_video », réutilisé par la file locale) :
+    durée, prompt, appel vidéo, coût, copie {n}.mp4, dérive frame 0, « réplique coupée » (Grok et
+    MiniMax local, voix native), accroche voix MiniMax (avatar_minimax.change_voice_after_animation),
+    plan « pret ». LÈVE en cas d'échec (l'appelant marque le plan). → {mp4, seconds}."""
+    ad_id = int(ad["id"])
+    n = int(c["scene_n"])
+    clip_id = int(c["id"])
+    spec = config_app.AVATAR_VIDEO_MODELS[model]
+    local = config_app.is_local_video(model)
+    emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
+    wav = _wav_file(c)
+    if voice_mode == "elevenlabs" and float(c.get("wav_seconds") or 0) <= 0:
+        c = {**c, "wav_seconds": media.mp4_duration(wav) or 0.0}
+    seconds = clip_target_seconds(c, model, wps_for, voice_mode=voice_mode)
+    if w := target_warning(c, wps_for(_speaker(c)), model):
+        _log_detail(w)
+        db.log_activity("avatar_omni", w)
+    prompt = _clip_prompt(c, ad, model)
+    db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
+                   clip_seconds=seconds, error=None)
+    raw = folder / f"{n}_brut.mp4"
+    final = folder / f"{n}.mp4"
+    with omni_slot(cfg, model, seconds * spec["cost_per_second_usd"], n, emit):
+        with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
+                               step="video"):
+            # Options de rendu local passées SEULEMENT à MiniMax (appel historique inchangé sinon).
+            local_kw: dict[str, Any] = dict(
+                emit=emit, priority=priority, should_cancel=should_cancel,
+                on_progress=on_progress, source=source) if local else {}
+            info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name,
+                                 **local_kw)
+        _record_cost(cfg, ad_id, model, seconds, info)
+    if voice_mode == "elevenlabs" and wav and (media.ffmpeg_available() or not cfg.dry_run):
+        media.replace_audio(raw, wav, final)
+    else:
+        shutil.copyfile(raw, final)
+    if local:
+        # Accroche FUTURE (inactive) : voix du perso via ElevenLabs Voice Changer.
+        changed = Path(avatar_minimax.change_voice_after_animation(ad, c, final))
+        if changed != final and changed.is_file():
+            shutil.copyfile(changed, final)
+    d = _measure_drift(c, raw, folder / f"{n}_frame0.png", threshold)
+    # Voix native (Grok, MiniMax local) : la réplique va-t-elle jusqu'au bout du clip (coupée) ?
+    cut = ((model == "grok" or local) and voice_mode == "native"
+           and bool(str(c.get("script") or "").strip()) and pipeline._speech_cut_safe(final, n))
+    db.update_clip(
+        clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
+        drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret", error=None,
+        speech_cut=1 if cut else 0, error_kind="", error_detail="",
+    )
+    emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
+          "drift_score": d["drift_score"], "drift_flag": bool(d["drift_flag"]),
+          "mirrored": d["mirrored"], "message": d["note"]})
+    return {"mp4": str(final), "seconds": seconds}
 
 
 def animate_blocks(
@@ -763,49 +911,14 @@ def animate_blocks(
     folder = pipeline.objet_dir(ad_id, ad_name)
     resolution = model_resolution(model, ad.get("omni_resolution"))
     threshold = config_app.normalize_drift_threshold(cfg.drift_threshold)
-    spec = config_app.AVATAR_VIDEO_MODELS[model]
 
     def _one(c: dict[str, Any]) -> bool:
-        n = int(c["scene_n"])
-        clip_id = int(c["id"])
         try:
-            emit({"scene": n, "phase": "animation", "status": "en_cours", "message": ""})
-            wav = _wav_file(c)
-            if voice_mode == "elevenlabs" and float(c.get("wav_seconds") or 0) <= 0:
-                c = {**c, "wav_seconds": media.mp4_duration(wav) or 0.0}
-            seconds = clip_target_seconds(c, model, wps_for, voice_mode=voice_mode)
-            if w := target_warning(c, wps_for(_speaker(c)), model):
-                _log_detail(w)
-                db.log_activity("avatar_omni", w)
-            prompt = _clip_prompt(c, ad, model)
-            db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
-                           clip_seconds=seconds, error=None)
-            raw = folder / f"{n}_brut.mp4"
-            final = folder / f"{n}.mp4"
-            with omni_slot(cfg, model, seconds * spec["cost_per_second_usd"], n, emit):
-                with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR_IA_V2,
-                                       step="video"):
-                    info = _generate_raw(cfg, ad, c, model, prompt, raw, seconds, resolution, ad_name)
-                _record_cost(cfg, ad_id, model, seconds, info)
-            if voice_mode == "elevenlabs" and wav and (media.ffmpeg_available() or not cfg.dry_run):
-                media.replace_audio(raw, wav, final)
-            else:
-                shutil.copyfile(raw, final)
-            d = _measure_drift(c, raw, folder / f"{n}_frame0.png", threshold)
-            # Voix native Grok : la réplique va-t-elle jusqu'au bout du clip (coupée) ?
-            cut = (model == "grok" and voice_mode == "native" and bool(str(c.get("script") or "").strip())
-                   and pipeline._speech_cut_safe(final, n))
-            db.update_clip(
-                clip_id, raw_mp4_path=str(raw), mp4_path=str(final), frame0_path=d["frame0_path"],
-                drift_score=d["drift_score"], drift_flag=d["drift_flag"], status="pret", error=None,
-                speech_cut=1 if cut else 0, error_kind="", error_detail="",
-            )
-            emit({"scene": n, "phase": "clip", "status": "ok", "mp4": str(final),
-                  "drift_score": d["drift_score"], "drift_flag": bool(d["drift_flag"]),
-                  "mirrored": d["mirrored"], "message": d["note"]})
+            animate_clip(cfg, ad, ad_name, c, model=model, voice_mode=voice_mode, wps_for=wps_for,
+                         folder=folder, resolution=resolution, threshold=threshold, emit=emit)
             return True
         except Exception as exc:  # noqa: BLE001 - un bloc en échec ne bloque pas les autres
-            return pipeline._emit_clip_failure(emit, clip_id, n, exc)
+            return pipeline._emit_clip_failure(emit, int(c["id"]), int(c["scene_n"]), exc)
 
     if (model == "omni" and pipeline.ad_voice_chain(ad) and voice_mode == "native"
             and only_clip_id is None and len(clips) > 1):
@@ -962,7 +1075,8 @@ def _animate_voice_chains(
                         dialogue=str(c.get("script") or ""), voice_sheet=sheet_for(sp), names=names,
                         scene_desc="" if refs else pipeline.clip_scene_desc(c),
                         images=providers.omni_sent_references(refs), camera_key=camera_key,
-                        style=style, chain_turn=True, offscreen=pipeline.clip_offscreen(c))
+                        style=style, chain_turn=True, offscreen=pipeline.clip_offscreen(c),
+                        shoot_style=str(ad.get("shoot_style") or ""))
                 db.update_clip(clip_id, omni_prompt=json.dumps([prompt], ensure_ascii=False),
                                clip_seconds=seconds, error=None)
                 # Limiteur Omni UNIQUE (1 appel à la fois dans l'app + Tier 1) ; coût enregistré
@@ -1066,7 +1180,12 @@ class VideoPreviewIn(BaseModel):
 
 
 class OptionsIn(BaseModel):
-    video_model: str | None = None   # grok | kling | omni ; "" = réglage global
+    video_model: str | None = None   # grok | kling | omni | minimax_local ; "" = réglage global
+    # Local v2 (None = inchangé) : qualité MiniMax (MP 0.4 | 0.6 | 0.9), turbo, style de tournage.
+    local_video_quality: float | None = None
+    local_video_turbo: bool | None = None
+    shoot_style: str | None = None   # pose | selfie
+    image_engine: str | None = None  # nano | qwen_local (normalisé, inconnu → nano)
     voice_mode: str | None = None    # elevenlabs | native
     # Réglages Omni de la pub (None = inchangé)
     omni_start_frame_only: bool | None = None   # n'envoyer que la keyframe (pas l'ancre)
@@ -1086,7 +1205,16 @@ _KEY_FOR_MODEL = {
     "grok": ("xai_api_key", "Clé API xAI (Grok) manquante (Réglages)."),
     "kling": ("openrouter_api_key", "Clé API OpenRouter manquante (Réglages) — requise pour Kling."),
     "omni": ("gemini_api_key", "Clé API Google (Gemini) manquante (Réglages)."),
+    # MiniMax local : aucune clé (Comfy sur le PC) — contrôle « Comfy joignable » à la place.
 }
+
+
+def _local_launch_check() -> None:
+    """MiniMax local : Comfy injoignable AU LANCEMENT (aperçu / lancement) → 409 FR, rien réservé.
+    « occupé » (rendu en cours) = joignable : le plan attendra son tour dans comfy_queue."""
+    st = comfy_queue.comfy_state()
+    if st.get("state") == "injoignable":
+        raise HTTPException(409, comfy_local.OFFLINE_MSG)
 BUSY_CLIP_MSG = "Ce plan est déjà en cours de génération — attends la fin avant de le relancer."
 SELECTION_CHANGED_MSG = ("La sélection de plans a changé depuis l'aperçu (plan lancé ailleurs, terminé "
                          "ou refusé) — reconfirme.")
@@ -1184,18 +1312,24 @@ def preview(ad: dict[str, Any], cfg: ProviderConfig, clip_id: int | None = None,
     if gate is not None:
         return gate
     spec = config_app.AVATAR_VIDEO_MODELS[model]
+    local = config_app.is_local_video(model)
+    if local and sel["candidates"]:
+        _local_launch_check()
     wps_for = pipeline.ad_wps_for(ad)
     mode = voice_mode_of(ad)
     rows = []
     for c in sel["candidates"]:
         secs = clip_target_seconds(c, model, wps_for, mode)
-        usd = 0.0 if cfg.dry_run else round(secs * spec["cost_per_second_usd"]
-                                            + spec["cost_per_input_image_usd"], 2)
+        usd = 0.0 if cfg.dry_run or local else round(secs * spec["cost_per_second_usd"]
+                                                     + spec["cost_per_input_image_usd"], 2)
         image = "" if pipeline.clip_text_only(c) else c.get("image_path")
-        rows.append({"clip_id": int(c["id"]), "n": int(c["scene_n"]), "label": _clip_label(c),
-                     "image_url": media_url(image) if image else None, "seconds": secs, "usd": usd})
+        row = {"clip_id": int(c["id"]), "n": int(c["scene_n"]), "label": _clip_label(c),
+               "image_url": media_url(image) if image else None, "seconds": secs, "usd": usd}
+        if local:
+            row["estimate_minutes"] = avatar_minimax.minutes_for_seconds(ad, [secs])
+        rows.append(row)
     wanted = resolution.strip().lower() or ad.get("omni_resolution")
-    return {
+    out = {
         "clips": rows,
         "usd_total": round(sum(r["usd"] for r in rows), 2),
         "seconds_total": sum(r["seconds"] for r in rows),
@@ -1204,8 +1338,15 @@ def preview(ad: dict[str, Any], cfg: ProviderConfig, clip_id: int | None = None,
         "model": model,
         "model_label": spec["label"],
         "resolution": model_resolution(model, wanted),
-        "dry_run": bool(cfg.dry_run),
+        "dry_run": bool(cfg.dry_run) and not local,
+        "local": local,
     }
+    if local:
+        # UI : « ~X min pour Y plans » à la place du coût (gratuit, aucune confirmation payante).
+        out["estimate_minutes"] = avatar_minimax.minutes_for_seconds(ad, [r["seconds"] for r in rows])
+        out["local_video_quality"] = local_quality_of(ad)
+        out["local_video_turbo"] = local_turbo_of(ad)
+    return out
 
 
 @router.post("/api/avatar-omni/video/preview/{ad_id}")
@@ -1263,11 +1404,16 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
         ids = [int(c["id"]) for c in candidates]
         if body.expected_clip_ids is not None and sorted({int(x) for x in body.expected_clip_ids}) != sorted(ids):
             raise HTTPException(409, SELECTION_CHANGED_MSG)
-        if not cfg.dry_run and not body.confirm:
-            raise HTTPException(400, "Confirmation requise avant de générer les vidéos (coût).")
-        key_attr, key_msg = _KEY_FOR_MODEL[model]
-        if not cfg.dry_run and not str(getattr(cfg, key_attr, "") or "").strip():
-            raise HTTPException(400, key_msg)
+        if config_app.is_local_video(model):
+            # MiniMax local : gratuit (pas de confirmation de coût, pas de clé), simulation
+            # ignorée ; Comfy injoignable → 409 FR AVANT toute réservation.
+            _local_launch_check()
+        else:
+            if not cfg.dry_run and not body.confirm:
+                raise HTTPException(400, "Confirmation requise avant de générer les vidéos (coût).")
+            key_attr, key_msg = _KEY_FOR_MODEL[model]
+            if not cfg.dry_run and not str(getattr(cfg, key_attr, "") or "").strip():
+                raise HTTPException(400, key_msg)
         est = estimate(ad, [{**c, "voice_ok": 1} for c in candidates], dry_run=cfg.dry_run, cfg=cfg)
         from . import main as _main  # import paresseux (main inclut ce router)
 
@@ -1291,7 +1437,9 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
                                 "Des plans sont déjà en cours de génération — reconfirme.") from exc
     wanted = (db.get_ad(ad_id) or {}).get("omni_resolution")
     return {
-        "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
+        "ok": True, "job_id": job.id, "ad_id": ad_id,
+        "dry_run": bool(cfg.dry_run) and not config_app.is_local_video(model),
+        "local": config_app.is_local_video(model),
         "n_plans": len(candidates), "estimate": est, "video_model": model,
         "voice_mode": voice_mode_of(ad), "relaunch_video_only": relaunch is not None,
         "resolution": model_resolution(model, wanted),
@@ -1319,7 +1467,8 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
     if body.video_model is not None:
         vm = body.video_model.strip().lower()
         if vm and vm not in config_app.AVATAR_VIDEO_MODELS:
-            raise HTTPException(400, "Modèle vidéo inconnu (grok | kling | omni).")
+            raise HTTPException(400, "Modèle vidéo inconnu ("
+                                + " | ".join(config_app.AVATAR_VIDEO_MODELS) + ").")
         # "" = réglage global AU MOMENT DU CHOIX, figé sur la pub : un changement ultérieur du
         # réglage global ne doit jamais changer le modèle d'une pub existante.
         fields["video_model"] = vm or effective_video_model({})
@@ -1341,6 +1490,23 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
         val = getattr(body, key)
         if val is not None:
             omni_fields[key] = 1 if val else 0
+    # Local v2 : qualité / turbo MiniMax et style de tournage (ne changent pas les durées).
+    if body.local_video_quality is not None:
+        q = float(body.local_video_quality)
+        if not any(abs(q - k) < 1e-6 for k in config_app.LOCAL_VIDEO_QUALITIES):
+            raise HTTPException(400, "Qualité vidéo locale inconnue ("
+                                + " | ".join(f"{k:g}" for k in config_app.LOCAL_VIDEO_QUALITIES) + ").")
+        omni_fields["local_video_quality"] = config_app.normalize_local_video_quality(q)
+    if body.local_video_turbo is not None:
+        omni_fields["local_video_turbo"] = 1 if body.local_video_turbo else 0
+    if body.shoot_style is not None:
+        style = body.shoot_style.strip().lower()
+        if style not in config_app.SHOOT_STYLES:
+            raise HTTPException(400, "Style de tournage inconnu ("
+                                + " | ".join(config_app.SHOOT_STYLES) + ").")
+        omni_fields["shoot_style"] = style
+    if body.image_engine is not None:
+        omni_fields["image_engine"] = config_app.normalize_image_engine(body.image_engine)
     if fields or omni_fields:
         db.set_ad_fields(ad_id, **fields, **omni_fields)
     fresh = db.get_ad(ad_id) or ad
@@ -1357,7 +1523,9 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
                     str(c.get("script") or ""), wav, model, mode))
     return {"ok": True, "video_model": effective_video_model(fresh),
             "voice_mode": voice_mode_of(fresh), "estimate": estimate(fresh),
-            **pipeline.omni_options(fresh)}
+            **pipeline.omni_options(fresh),
+            "video_local": config_app.is_local_video(effective_video_model(fresh)),
+            **local_options(fresh)}
 
 
 @router.post("/api/avatar-omni/video/assemble/{ad_id}")

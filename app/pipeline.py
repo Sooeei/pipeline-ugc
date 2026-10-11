@@ -2307,10 +2307,13 @@ def build_omni_block_prompt(
     voice_sheet: str, names: dict[int, str], scene_desc: str = "",
     images: list[prompt_profiles.SentImage] | None = None, camera_key: str = "",
     style: str = config_app.DEFAULT_OMNI_STYLE, chain_turn: bool = False,
-    offscreen: bool = False,
+    offscreen: bool = False, shoot_style: str = "",
 ) -> str:
     """Prompt Omni d'UN bloc Avatar IA v2 (UN appel, une réplique d'UN personnage), assemblé par
-    prompt_profiles (ordre fixe). Rôles des images déclarés en tête = `images` (images réellement
+    prompt_profiles (ordre fixe). `shoot_style` (ads.shoot_style, K9) : « pose » / vide → prompt
+    INCHANGÉ (cadrage fixe = comportement historique) ; « selfie » → phrase vidéo
+    prompt_profiles.shoot_style_line : elle REMPLACE la caméra auto (""), sinon s'ajoute au sujet.
+    Rôles des images déclarés en tête = `images` (images réellement
     envoyées ; défaut : start frame seule, ou aucune en texte seul) + phrases de rôle à la fin.
     Start frame : AUCUNE description de décor ni de personnage (le keyframe porte le visuel).
     `chain_turn` = tour suivant d'une chaîne « voix identique » (previous_interaction_id) :
@@ -2374,9 +2377,22 @@ def build_omni_block_prompt(
         performance.extend(f"{o} keeps their mouth closed, does not speak" for o in [who, *others])
         audio.append("No dialogue. The audio is a quiet natural room tone")
     cam = omni_camera_sentence(camera_key, spoken=spoken, style=style, first_frame=first_frame)
+    if selfie := video_selfie_line(shoot_style):
+        if normalize_omni_camera(camera_key):
+            subject.append(selfie)
+        else:
+            cam = selfie
     return assemble_omni(images, lead=lead, camera=cam, subject=subject,
                          performance=performance, audio=audio, spoken=spoken,
                          single_shot=OMNI_CHAIN_SINGLE_SHOT if chain_turn else "")
+
+
+def video_selfie_line(shoot_style: Any) -> str:
+    """Phrase de cadrage VIDÉO à AJOUTER aux prompts Omni / Grok / Kling (K9) : seulement en
+    style « selfie » ; « pose » (défaut) = comportement historique, rien n'est ajouté."""
+    if config_app.normalize_shoot_style(shoot_style) != "selfie":
+        return ""
+    return prompt_profiles.shoot_style_line("selfie", "video")
 
 
 def clip_excluded(c: dict[str, Any]) -> bool:

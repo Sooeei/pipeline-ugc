@@ -27,6 +27,7 @@ from . import (
     gen_trace,
     keyframe_versions,
     lipsync_rules,
+    local_images,
     media,
     omni_timing,
     product_sheet,
@@ -927,6 +928,9 @@ def generate_objet_images(
     omni_typed = sorted(typed_refs, key=lambda t: 0 if int(t.get("is_main") or 0) else 1)
     # Deux ancres : perso (`character_ref`, choisie par l'appelant) et produit (clips.is_product_anchor).
     prod_anchor_clip = product_anchor(db.clips_for_ad(ad_id)) if ad_row else None
+    # Moteur des images (ads.image_engine) et style de tournage (K9 : rien en « pose »).
+    qwen = local_images.is_local(ad_row)
+    style_line = brain.shoot_style_image_line(ad_row.get("shoot_style"))
     ok = 0
     for s in shots:  # objet : séquentiel (Plan 1 puis suivants, cohérence personnage)
         needed = _norm_refs_needed(s.get("refs_needed"))
@@ -947,20 +951,27 @@ def generate_objet_images(
         shot_prefix = prefix if char_ref else ""
         if kind == "avatar_omni":
             first = clip_first_speaker(clip_row)
-            picked = select_omni_refs(needed, omni_typed, char_ref, first_speaker=first)
-            warn = omni_refs_overflow_warning(needed, omni_typed, char_ref, first_speaker=first,
-                                              label=str(s.get("n") or ""))
-            if warn:   # > 4 réfs utiles : on garde visages > produit > ancre, et on le signale
-                emit({"scene": int(s["n"]), "phase": "image", "status": "en_cours", "message": warn})
-                db.log_activity("avatar_omni", warn)
-            if prod_anchor_path:
-                picked.append({"kind": "ancre_produit", "path": prod_anchor_path})
-            picked += [{"kind": f"{PRODUCT_PHOTO_KIND}{angle}", "path": path}
-                       for path, angle in prod["photos"]]
-            picked = _dedupe_picked(picked)[: pp.NANO_BANANA_PRO.max_images or 14]
+            product_role = _OMNI_PRODUCT_ROLE_SHEET if prod["active"] else ""
+            if qwen:
+                # Qwen local : ancre en <image1>, puis réfs du plan (≤ 9, pas de plafond à 4).
+                picked = qwen_omni_refs(needed, omni_typed, char_ref, first_speaker=first,
+                                        product_anchor=prod_anchor_path, photos=prod["photos"])
+                s = {**s, "qwen_roles": [_omni_ref_role(r["kind"], names, product_role)
+                                         for r in picked]}
+            else:
+                picked = select_omni_refs(needed, omni_typed, char_ref, first_speaker=first)
+                warn = omni_refs_overflow_warning(needed, omni_typed, char_ref, first_speaker=first,
+                                                  label=str(s.get("n") or ""))
+                if warn:   # > 4 réfs utiles : on garde visages > produit > ancre, et on le signale
+                    emit({"scene": int(s["n"]), "phase": "image", "status": "en_cours", "message": warn})
+                    db.log_activity("avatar_omni", warn)
+                if prod_anchor_path:
+                    picked.append({"kind": "ancre_produit", "path": prod_anchor_path})
+                picked += [{"kind": f"{PRODUCT_PHOTO_KIND}{angle}", "path": path}
+                           for path, angle in prod["photos"]]
+                picked = _dedupe_picked(picked)[: pp.NANO_BANANA_PRO.max_images or 14]
             refs = [r["path"] for r in picked]
-            shot_prefix = omni_refs_legend(
-                picked, names, product_role=_OMNI_PRODUCT_ROLE_SHEET if prod["active"] else "")
+            shot_prefix = omni_refs_legend(picked, names, product_role=product_role)
             roles = [_omni_image_role(r["kind"]) for r in picked]
             grounded = any(_omni_ref_character(r["kind"]) in product_chars for r in picked)
             db.update_clip(int(s["clip_id"]), refs_sent=json.dumps(
@@ -1020,7 +1031,8 @@ def generate_objet_images(
                                mode=gen_trace.mode_of_ad(ad_row), step=step):
             if _generate_one_image(cfg, ad_id, ad_name, folder, model_id, refs, s, emit, shot_prefix,
                                    extra=img_extra, keep_kinds=[k for k in sent_kinds if k],
-                                   safe_style=safe_style, roles=roles, start_frame=start):
+                                   safe_style=safe_style, roles=roles, start_frame=start,
+                                   style_line=style_line):
                 ok += 1
     ko = len(shots) - ok
     db.set_ad_status(ad_id, "objet_images")
@@ -1101,6 +1113,30 @@ def _omni_ref_candidates(
         if r["path"] not in {x["path"] for x in out}:
             out.append(r)
     return out, len({x["path"] for x in first})
+
+
+def qwen_omni_refs(
+    needed: list[str] | None, typed_refs: list[dict[str, Any]], anchor: str = "", *,
+    first_speaker: int = 1, product_anchor: str = "",
+    photos: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Images d'un plan Avatar IA pour Qwen local, dans l'ordre d'envoi (≤ 10, dédoublonnées) :
+    <image1> = ancre (plan 1 validé) ; puis les réfs essentielles des personnages à l'image
+    (planche puis visage, celui qui parle d'abord — réf visage auto comprise) et la photo
+    produit ; l'ancre produit ; les photos de la fiche produit (face → profil → usage →
+    packaging) ; enfin les autres photos (décor, style…). Plan neutre (`needed == []`) : rien."""
+    if needed == []:
+        return []
+    cands, essential = _omni_ref_candidates(needed, typed_refs, "", first_speaker)
+    picked: list[dict[str, str]] = [{"kind": "ancre", "path": anchor}] if anchor else []
+    picked += cands[:essential]
+    if product_anchor:
+        picked.append({"kind": "ancre_produit", "path": product_anchor})
+    picked += [{"kind": f"{PRODUCT_PHOTO_KIND}{angle}", "path": path} for path, angle in photos or []]
+    picked += cands[essential:]
+    from .comfy_local import MAX_IMAGE_REFS
+
+    return _dedupe_picked(picked)[: 1 + MAX_IMAGE_REFS]
 
 
 def select_omni_refs(
@@ -1284,10 +1320,11 @@ def _omni_ref_character(kind: str) -> int:
     return config_app.omni_sheet_index(kind) or config_app.omni_face_index(kind)
 
 
-def nano_image_prompt(prefix: str, s: dict[str, Any], start_frame: dict[str, str] | None = None) -> str:
-    """Prompt image d'un plan assemblé dans l'ordre fixe de la fiche Nano Banana Pro : rôles des
-    images (`prefix` : légende, réf principale, cohérence, ou en-tête EDIT) → cadrage → sujet
-    (+ objet posé) → interdits."""
+def nano_image_blocks(prefix: str, s: dict[str, Any], start_frame: dict[str, str] | None = None,
+                      style_line: str = "") -> dict[str, str]:
+    """Blocs du prompt image d'un plan (fiche Nano Banana Pro) : rôles des images (`prefix` :
+    légende, réf principale, cohérence, ou en-tête EDIT) → cadrage (+ phrase du style de
+    tournage `style_line`, vide en « pose ») → sujet (+ objet posé) → interdits."""
     blocks = dict(s.get("image_blocks") or {pp.B_IMAGE_ROLES: prefix,
                                             pp.B_SUBJECT: str(s.get("prompt_image", ""))})
     sf = dict(start_frame or {})
@@ -1300,7 +1337,17 @@ def nano_image_prompt(prefix: str, s: dict[str, Any], start_frame: dict[str, str
     for k, v in sf.items():
         if v:
             blocks[k] = v
-    return pp.nano_banana_prompt(blocks)
+    if style_line:
+        cam = str(blocks.get(pp.B_CAMERA) or "").strip()
+        blocks[pp.B_CAMERA] = f"{cam} {style_line}".strip()
+    return blocks
+
+
+def nano_image_prompt(prefix: str, s: dict[str, Any], start_frame: dict[str, str] | None = None,
+                      style_line: str = "") -> str:
+    """Prompt image d'un plan assemblé dans l'ordre fixe de la fiche Nano Banana Pro
+    (voir `nano_image_blocks`)."""
+    return pp.nano_banana_prompt(nano_image_blocks(prefix, s, start_frame, style_line))
 
 
 def _generate_one_image(
@@ -1308,7 +1355,7 @@ def _generate_one_image(
     refs: list[str], s: dict[str, Any], emit: UpdateFn, prefix: str = "",
     extra: dict[str, Any] | None = None, *, keep_kinds: list[str] | None = None,
     safe_style: str = "", roles: list[str] | None = None,
-    start_frame: dict[str, str] | None = None,
+    start_frame: dict[str, str] | None = None, style_line: str = "",
 ) -> bool:
     """Génère UNE image Nano Banana pour un plan (avec réfs). Renvoie True si prête. Ne lève pas.
     `prefix` = éventuelle consigne (ex. cohérence personnage pour l'objet vivant) ; `extra` =
@@ -1316,10 +1363,20 @@ def _generate_one_image(
     Dernières étapes avant l'appel : renvois aux photos NON envoyées retirés (`keep_kinds` =
     types réellement envoyés ; None = on ne touche à rien) puis filtre de mots Google
     (brain.google_safe_prompt). Image bloquée par le filtre → 1 relance automatique avec une
-    reformulation stricte, puis échec propre (message lisible dans clips.error)."""
+    reformulation stricte, puis échec propre (message lisible dans clips.error).
+    Pub en « Qwen (local) » (ads.image_engine) : `_generate_one_image_local` (Comfy, coût 0) ;
+    plan SANS image alors que le texte→image est absent de Comfy → Nano Banana (mention)."""
     n = int(s["n"])
     clip_id = int(s["clip_id"])
-    prompt_image = nano_image_prompt(prefix, s, start_frame)
+    ad_row = db.get_ad(ad_id) or {}
+    if local_images.is_local(ad_row):
+        if refs or local_images.check_t2i() is not False:
+            return _generate_one_image_local(
+                ad_row, folder, refs, s, emit, prefix, extra, keep_kinds=keep_kinds, roles=roles,
+                start_frame=start_frame, style_line=style_line)
+        emit({"scene": n, "phase": "image", "status": "en_cours",
+              "message": local_images.T2I_FALLBACK_EMIT.format(n=n)})
+    prompt_image = nano_image_prompt(prefix, s, start_frame, style_line)
     if keep_kinds is not None:
         prompt_image = strip_photo_refs(prompt_image, keep_kinds=keep_kinds)
     # Jamais d'écrasement : 1re image = N.png, puis N_v2.png, N_v3.png… (historique des versions).
@@ -1353,6 +1410,51 @@ def _generate_one_image(
             note=str(s.get("correction") or ""),
         )
         emit({"scene": n, "phase": "pret", "status": "ok", "image": str(img)})
+        return True
+    except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
+        return _emit_clip_failure(emit, clip_id, n, exc)
+
+
+def _generate_one_image_local(
+    ad: dict[str, Any], folder: Path, refs: list[str], s: dict[str, Any], emit: UpdateFn,
+    prefix: str = "", extra: dict[str, Any] | None = None, *, keep_kinds: list[str] | None = None,
+    roles: list[str] | None = None, start_frame: dict[str, str] | None = None,
+    style_line: str = "",
+) -> bool:
+    """Image d'UN plan avec Qwen local (Comfy, ordonnanceur unique) : mêmes blocs que Nano Banana
+    (sans légende des rôles ni filtre Google ni relance), image 1 = 1re image de `refs` (ancre),
+    rôles = `s["qwen_roles"]` sinon `roles`. AUCUN coût ; version « local ». Comfy injoignable /
+    erreur → plan « echec » avec le message FR (pas de relance). Ne lève pas."""
+    n = int(s["n"])
+    clip_id = int(s["clip_id"])
+    blocks = nano_image_blocks(prefix, s, start_frame, style_line)
+    if keep_kinds is not None:
+        blocks = {k: strip_photo_refs(v, keep_kinds=keep_kinds) for k, v in blocks.items()}
+    img = keyframe_versions.prepare_path(clip_id, folder, n)
+    labels = list(s.get("qwen_roles") or roles or [])
+
+    def _progress(p: dict[str, Any]) -> None:
+        if p.get("phase") == "waiting" and int(p.get("position") or 0) > 0:
+            msg = f"Plan {n} : en attente de Comfy (rendu en cours)…"
+        elif p.get("phase") == "running":
+            msg = f"Plan {n} : image Qwen locale — {int(p.get('percent') or 0)} %"
+        else:
+            return
+        emit({"scene": n, "phase": "image", "status": "en_cours", "message": msg})
+
+    try:
+        emit({"scene": n, "phase": "image", "status": "en_cours",
+              "message": f"Plan {n} : image Qwen locale…"})
+        clip_row = db.get_clip(clip_id) or {"id": clip_id, "scene_n": n}
+        out = local_images.generate_plan_image(
+            ad, clip_row, list(refs[1:]), labels, blocks, img,
+            anchor=refs[0] if refs else None, on_progress=_progress)
+        # Version AVANT de changer l'image courante (sinon elle serait notée « génération »).
+        keyframe_versions.record(clip_id, out, "local", keyframe_source="qwen_local",
+                                 note=str(s.get("correction") or ""))
+        fields = {**(extra or {}), "keyframe_source": "qwen_local"}
+        db.update_clip(clip_id, image_path=str(out), status="image_pret", error=None, **fields)
+        emit({"scene": n, "phase": "pret", "status": "ok", "image": str(out)})
         return True
     except Exception as exc:  # noqa: BLE001 - un plan en échec ne bloque pas les autres
         return _emit_clip_failure(emit, clip_id, n, exc)

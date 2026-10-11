@@ -394,7 +394,12 @@ def test_creation_pub_qwen_sans_confirmation(monkeypatch, nano):
             break
         time.sleep(0.02)
     assert db.clips_for_ad(body["ad_id"])[1]["status"] == "image_pret"
-    # Régénération d'un plan : idem.
+    # Régénération d'un plan : idem (après la libération du verrou du job précédent).
+    from app import jobs as _jobs
+    for _ in range(500):
+        if not _jobs.manager.busy_clip_ids():
+            break
+        time.sleep(0.02)
     r = c.post(f"/api/avatar-omni/regenerate-image/{db.clips_for_ad(body['ad_id'])[1]['id']}", json={})
     assert r.status_code == 200, r.text
     for _ in range(300):

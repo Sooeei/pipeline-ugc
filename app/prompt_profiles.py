@@ -355,3 +355,29 @@ def same_framing_correction(side: str = "auto", anchor_n: int = 1) -> str:
     return (f"Use exactly the same camera position and framing as plan {int(anchor_n)} (the anchor image): "
             f"same distance, same angle, same product orientation{logo.get(side, ', logo on the same side')}. "
             "Do not mirror the image.")
+
+
+# ---------------------------------------------------------------- Local v2 : style de tournage (K9)
+# Phrase ANGLAISE de cadrage selon ads.shoot_style (« pose » | « selfie »), ajoutée par la zone B
+# aux prompts IMAGE et par la zone A aux prompts VIDÉO (Omni / Grok / MiniMax). Jamais de
+# dégradation audio : le son reste « clean ». La règle brain.NO_CAMERA_GEAR reste vraie (le pied
+# ou le téléphone ne sont jamais à l'image).
+SHOOT_STYLE_LINES: dict[str, dict[str, str]] = {
+    "pose": {
+        "image": "Shot on a smartphone fixed on a small tripod, steady eye-level framing.",
+        "video": "Static framing, phone on a tripod.",
+    },
+    "selfie": {
+        "image": "Handheld selfie shot at arm's length, slightly tilted natural framing, lively composition.",
+        "video": "Handheld selfie framing at arm's length, subtle natural camera shake, lively framing.",
+    },
+}
+
+
+def shoot_style_line(style: str | None, target: str = "image") -> str:
+    """Phrase de cadrage du style de tournage. `style` inconnu/vide → « pose » ; `target` :
+    « image » | « video » (inconnu → « image »)."""
+    from . import config_app
+
+    lines = SHOOT_STYLE_LINES[config_app.normalize_shoot_style(style)]
+    return lines["video" if str(target or "").strip().lower() == "video" else "image"]

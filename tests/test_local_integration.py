@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from test_comfy_local import _validate
 
-from app import comfy_local, config_app, db, keyframe_versions, local_routes, pipeline
+from app import comfy_local, comfy_queue, config_app, db, keyframe_versions, local_routes, pipeline
 from app.main import app
 
 _TABLES = ("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings", "avatars",
@@ -34,7 +34,8 @@ def fresh_db(monkeypatch):
         con.close()
     # pas de ports Comfy Desktop réels dans la détection (sinon dépend de la machine)
     monkeypatch.setattr(comfy_local, "_ports_from_desktop", lambda: [])
-    monkeypatch.setattr(local_routes, "_last_kind", [None])   # pas de libération héritée d'un autre test
+    comfy_queue.reset_for_tests()   # pas de libération héritée d'un autre test
+    monkeypatch.setattr(local_routes, "_launch_at", [0.0])
     yield
 
 
@@ -235,7 +236,8 @@ def test_comfy_off(c, monkeypatch):
     st = c.get("/api/local/status").json()
     assert st["reachable"] is False and st["url"] is None
     assert c.post("/api/local/free").status_code == 503
-    assert c.post("/api/local/launch").json() == {"ok": True, "launched": False}  # UGC_NO_OPEN=1
+    la = c.post("/api/local/launch").json()   # UGC_NO_OPEN=1 (ou exe absent) : rien lancé
+    assert la["ok"] is True and la["launched"] is False and la["reason"] in ("echec", "exe_introuvable")
     first = _upload(c)
     r = c.post("/api/local/video", json={"first_frame": first}).json()
     v = _wait(c, r["job_id"])
@@ -274,7 +276,7 @@ def test_custom_port_setting(c, monkeypatch):
 def test_free_memory_when_switching_image_to_video(c, monkeypatch):
     """Changement de modèle (Qwen → MiniMax) : mémoire libérée AVANT le rendu suivant ; pas entre
     deux rendus du même type."""
-    monkeypatch.setattr(local_routes, "_last_kind", [None])
+    comfy_queue.reset_for_tests()
     fake = FakeComfy().install(monkeypatch)
     ref = _upload(c)
     for _ in range(2):

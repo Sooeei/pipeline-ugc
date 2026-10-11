@@ -399,14 +399,41 @@ def test_status_launch_free(c, fake):
     assert st["exe_found"] and not st["launching"]
     assert st["queue"] == {"running": None, "waiting": []}
     assert st["settings"]["auto_free"] is False
-    assert c.post("/api/local/launch").json() == {"ok": True, "launched": False}   # déjà lancé
+    assert st["state"] == "pret" and st["busy"] is False and st["busy_label"] == ""
+    la = c.post("/api/local/launch").json()
+    assert la["ok"] is True and la["launched"] is False and la["reason"] == "deja_lance"
     assert c.post("/api/local/free").json() == {"ok": True}
     fake.online = False
     assert c.post("/api/local/free").status_code == 503
     assert c.post("/api/local/launch").json() == {"ok": True, "launched": True}
     assert fake.launched == 1
-    assert c.get("/api/local/status").json()["launching"] is True
+    st = c.get("/api/local/status").json()
+    assert st["launching"] is True and st["state"] == "demarrage"
+    # 2e clic pendant le démarrage : refusé, rien relancé
+    la = c.post("/api/local/launch").json()
+    assert la["launched"] is False and la["reason"] == "demarrage" and fake.launched == 1
     local_routes._launch_at[0] = 0.0
+
+
+def test_status_busy_without_network_and_launch_refused(c, fake):
+    """Rendu en cours : statut « occupe » (reachable) SANS appel detect ; lancement refusé."""
+    fake.block = threading.Event()
+    src = _upload(c)
+    a = c.post("/api/local/video", json={"first_frame": src["ref"]}).json()
+    assert fake.started.wait(5)
+    n_detect = len(fake.names("detect"))
+    st = c.get("/api/local/status").json()
+    assert st["reachable"] is True and st["state"] == "occupe" and st["busy"] is True
+    assert st["busy_label"] == "Comfy occupé — rendu en cours" and st["url"] == URL
+    assert st["comfy_queue"]["running"]["source"] == "local"
+    assert len(fake.names("detect")) == n_detect          # aucun appel réseau pendant le rendu
+    fake.online = False                                   # même si Comfy semble muet
+    la = c.post("/api/local/launch").json()
+    assert la["launched"] is False and la["reason"] == "occupe" and fake.launched == 0
+    assert c.post("/api/local/free").status_code == 409
+    fake.online = True
+    fake.block.set()
+    assert _wait(c, a["job_id"])["state"] == "termine"
 
 
 # ============================================================ sources

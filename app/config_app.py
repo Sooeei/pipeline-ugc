@@ -606,6 +606,8 @@ class AvatarVideoModelCfg(TypedDict):
     durations: tuple[int, ...]     # durées entières acceptées (s), croissantes
     cost_per_second_usd: float     # tarif vidéo estimé ($/s)
     cost_per_input_image_usd: float  # coût de l'image de départ (0 si inclus)
+    local: NotRequired[bool]         # True = moteur local (ComfyUI, gratuit, ignore la simulation)
+    speech_margin: NotRequired[float]  # marge après la réplique (s) pour la durée d'un plan parlé
 
 
 AVATAR_VIDEO_MODELS: dict[str, AvatarVideoModelCfg] = {
@@ -647,7 +649,8 @@ AVATAR_NATIVE_MARGIN_S = 1.0           # marge après la réplique (s)
 
 
 def normalize_avatar_video_model(value: object) -> str:
-    """Modèle vidéo Avatar IA v2 : « grok » | « kling » | « omni » ; inconnu/vide → grok."""
+    """Modèle vidéo Avatar IA v2 : « grok » | « kling » | « omni » | « minimax_local » (moteur
+    local, bloc « Local v2 » en fin de fichier) ; inconnu/vide → grok."""
     v = str(value or "").strip().lower()
     return v if v in AVATAR_VIDEO_MODELS else DEFAULT_AVATAR_VIDEO_MODEL
 
@@ -809,20 +812,22 @@ def spoken_word_count(text: str) -> int:
     return sum(1 for tok in (text or "").split() if any(ch.isalnum() for ch in tok))
 
 
-def omni_speech_clip_seconds(text: str, wps: float | None = None) -> int:
+def omni_speech_clip_seconds(text: str, wps: float | None = None, lo: int = OMNI_MIN_CLIP_SECONDS,
+                             hi: int = OMNI_MAX_CLIP_SECONDS) -> int:
     """Durée d'un clip Omni PARLÉ = ceil(mots / débit de la fiche voix + OMNI_SPEECH_MARGIN_S),
-    bornée [OMNI_MIN (3 s, minimum officiel Google), OMNI_MAX (10 s)]. Aucune respiration muette
+    bornée [lo, hi] — par défaut [OMNI_MIN (3 s, minimum officiel Google), OMNI_MAX (10 s)] ;
+    MiniMax local passe ses propres bornes (3..15 s). Aucune respiration muette
     avant, aucune tenue silencieuse après (tests Morphea : plans vides). `wps` vide → débit de la
     fiche voix par défaut (« naturel »). Crochets « [97 %] » : leur contenu est prononcé. Sans
-    mot prononcé → OMNI_MIN."""
+    mot prononcé → lo."""
     import math
 
     words = spoken_word_count(re.sub(r"\[([^\]]*)\]", r"\1", str(text or "")))
     if not words:
-        return OMNI_MIN_CLIP_SECONDS
+        return lo
     rate = float(wps or 0) or GROK_VOICE_PACES[DEFAULT_GROK_VOICE_PACE]["words_per_sec"]
     secs = math.ceil(round(words / rate + OMNI_SPEECH_MARGIN_S, 6))
-    return max(OMNI_MIN_CLIP_SECONDS, min(OMNI_MAX_CLIP_SECONDS, secs))
+    return max(lo, min(hi, secs))
 
 
 def omni_clip_seconds(dialogue: str, words_per_sec: float | None = None) -> int:
@@ -1104,3 +1109,101 @@ OMNI_DEFAULT_VIDEO_PROMPT = "warm natural smile, hands resting calmly"
 OMNI_CTA_VIDEO_PROMPT = "warm smile, small friendly wave of the hand"
 # Durée d'un plan parlé Omni = mots / débit de la fiche voix + cette marge (s), arrondie au-dessus.
 OMNI_SPEECH_MARGIN_S = 0.3
+
+
+# ============================================================================ Local v2
+# Moteurs LOCAUX (ComfyUI sur le PC, gratuits) branchés dans les pubs : vidéo MiniMax H3
+# (modèle Avatar IA v2 « minimax_local », zone A) et images Qwen (zone B). Contrat :
+# CONTRAT_LOCAL.md §K4-K9. Coût toujours 0 ; le réglage global « simulation » est IGNORÉ par
+# les moteurs locaux (rendu réel via comfy_queue ; tests : tests/comfy_fake.py).
+LOCAL_VIDEO_MODEL = "minimax_local"
+AVATAR_VIDEO_MODELS[LOCAL_VIDEO_MODEL] = {
+    "label": "MiniMax H3 (local)", "model": "minimax-h3-local",
+    "durations": tuple(range(LOCAL_VIDEO_SECONDS[0], LOCAL_VIDEO_SECONDS[1] + 1)),   # 3..15 s
+    "cost_per_second_usd": 0.0,
+    "cost_per_input_image_usd": 0.0,
+    "local": True,
+    "speech_margin": OMNI_SPEECH_MARGIN_S,
+}
+
+# Qualité vidéo locale = mégapixels MiniMax (ads.local_video_quality).
+LOCAL_VIDEO_QUALITIES: dict[float, str] = {
+    0.4: "Rapide 0,4 MP (~480p)",
+    0.6: "Équilibrée 0,6 MP",
+    0.9: "HD 0,9 MP (~720p, 736×1280)",
+}
+DEFAULT_LOCAL_VIDEO_QUALITY = 0.9
+LOCAL_VIDEO_TURBO_DEFAULT = True
+# Durée de RENDU mesurée (minutes par seconde de vidéo, mode turbo, RTX du PC de Théo) aux deux
+# extrémités ; les valeurs intermédiaires suivent une loi puissance (0,6 MP ≈ 2,4 min/s).
+LOCAL_MINUTES_PER_VIDEO_SECOND = {0.4: 1.2, 0.9: 4.8}
+LOCAL_NO_TURBO_FACTOR = 2.5            # sans turbo (8 → ~20 étapes) : estimation, non mesurée
+
+
+def is_local_video(model: object) -> bool:
+    """Vrai si la clé de modèle vidéo Avatar IA désigne un moteur LOCAL (Comfy, gratuit)."""
+    spec = AVATAR_VIDEO_MODELS.get(str(model or "").strip().lower())
+    return bool(spec and spec.get("local"))
+
+
+def normalize_local_video_quality(value: object) -> float:
+    """Qualité vidéo locale (MP) : 0.4 | 0.6 | 0.9 ; invalide / inconnue → 0.9 (HD)."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return DEFAULT_LOCAL_VIDEO_QUALITY
+    for q in LOCAL_VIDEO_QUALITIES:
+        if abs(v - q) < 1e-6:
+            return q
+    return DEFAULT_LOCAL_VIDEO_QUALITY
+
+
+def local_video_minutes(seconds: float, megapixels: float, turbo: bool = True) -> float:
+    """Durée de rendu ESTIMÉE (minutes) d'une vidéo locale MiniMax de `seconds` s.
+    min/s (turbo) = 1,2 × (mp / 0,4) ^ k avec k tel que 0,9 MP → 4,8 min/s ; sans turbo × 2,5."""
+    import math
+
+    lo_mp, hi_mp = 0.4, 0.9
+    lo, hi = LOCAL_MINUTES_PER_VIDEO_SECOND[lo_mp], LOCAL_MINUTES_PER_VIDEO_SECOND[hi_mp]
+    try:
+        mp = float(megapixels)
+    except (TypeError, ValueError):
+        mp = DEFAULT_LOCAL_VIDEO_QUALITY
+    if not mp > 0:
+        mp = DEFAULT_LOCAL_VIDEO_QUALITY
+    k = math.log(hi / lo) / math.log(hi_mp / lo_mp)
+    per_second = lo * (mp / lo_mp) ** k
+    if not turbo:
+        per_second *= LOCAL_NO_TURBO_FACTOR
+    try:
+        secs = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        secs = 0.0
+    return round(secs * per_second, 2)
+
+
+# Style de tournage (ads.shoot_style) : appliqué aux prompts image (zone B) et vidéo (zone A)
+# via prompt_profiles.shoot_style_line.
+SHOOT_STYLES: dict[str, str] = {
+    "pose": "Posé (téléphone sur pied)",
+    "selfie": "Selfie à la main",
+}
+DEFAULT_SHOOT_STYLE = "pose"
+
+
+def normalize_shoot_style(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in SHOOT_STYLES else DEFAULT_SHOOT_STYLE
+
+
+# Moteur des images de plan (ads.image_engine) : Nano Banana Pro (payant) ou Qwen local (zone B).
+IMAGE_ENGINES: dict[str, str] = {
+    "nano": "Nano Banana Pro",
+    "qwen_local": "Qwen (local)",
+}
+DEFAULT_IMAGE_ENGINE = "nano"
+
+
+def normalize_image_engine(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in IMAGE_ENGINES else DEFAULT_IMAGE_ENGINE

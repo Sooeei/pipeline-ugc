@@ -7,7 +7,8 @@ Aucun coût (jamais `cost.*` ni `gen_trace.record`) ; le réglage global « simu
 (Comfy est gratuit : toujours de vrais appels `comfy_local`). Les images sont désignées par des
 RÉFÉRENCES (« upload:… », « clip:… », « adsheet:… », « preset:… », « gen:… »), jamais par un chemin.
 
-File d'attente : UN seul job Comfy à la fois (FIFO, Condition + deque). Chaque génération est un
+File d'attente : celle de l'ordonnanceur unique `comfy_queue` (UN rendu Comfy à la fois, toutes
+sources confondues : section Local, pubs, Qwen, file multi-pubs). Chaque génération est un
 job `jobs.manager` (ad_id 0, mode local_video | local_image) → visible dans /api/jobs, tracé dans
 jobs_inflight (le serveur ne s'arrête pas pendant un rendu ; reprise au démarrage = « echec »).
 Annulation par Event : en file → retiré sans appel Comfy ; en cours → `comfy_local.run` voit
@@ -25,7 +26,6 @@ import re
 import shutil
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,16 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import comfy_local, config_app, db, jobs, keyframe_versions, media, product_sheet
+from . import (
+    comfy_local,
+    comfy_queue,
+    config_app,
+    db,
+    jobs,
+    keyframe_versions,
+    media,
+    product_sheet,
+)
 from .providers import ProviderError, _log_detail
 from .settings_service import load_local_settings, load_provider_config, save_local_settings
 
@@ -124,23 +133,28 @@ def _image_size(path: Path) -> tuple[int, int]:
 
 
 # ==================================================================== file d'attente
+# La file est celle de l'ordonnanceur UNIQUE `comfy_queue` (section Local, pubs, Qwen, file
+# multi-pubs) : un seul rendu Comfy à la fois, mémoire libérée au changement vidéo ↔ image.
+# Ici : état d'affichage des jobs Local (`_states`, ticket comfy_queue de chaque job).
+# Ordre des verrous : `_cond` (ici) PUIS `comfy_queue._cond`, jamais l'inverse.
 _cond = threading.Condition()
-_waiting: deque[str] = deque()        # job_ids en file (le 1er passera ensuite)
-_running: list[str | None] = [None]   # job_id en cours chez Comfy
 _states: dict[str, dict[str, Any]] = {}
-# Dernier type de rendu envoyé à Comfy (« video » | « image ») : au changement de type, la mémoire
-# est libérée AVANT l'envoi (test réel du 11/10/2026 : vidéo MiniMax juste après une retouche Qwen
-# = 9 min 48 pour 3 s, les modèles Qwen restant chargés → débordement en RAM).
-_last_kind: list[str | None] = [None]
 _launch_at = [0.0]
+_launch_lock = threading.Lock()
+BUSY_LABEL = comfy_queue.BUSY_LABEL
+LAUNCH_REFUSED = {
+    "occupe": "Comfy est occupé (rendu en cours) : pas de second lancement.",
+    "demarrage": "Comfy démarre déjà — patiente quelques instants.",
+    "deja_lance": "Comfy est déjà lancé.",
+    "exe_introuvable": "Comfy Desktop introuvable — indique son chemin dans les réglages Local.",
+    "echec": "Lancement de Comfy impossible.",
+}
 
 
 def _queue_pos(job_id: str) -> int:
-    """Nombre de générations AVANT celle-ci (en cours + en file devant elle) ; appel sous _cond."""
-    try:
-        return _waiting.index(job_id) + (1 if _running[0] is not None else 0)
-    except ValueError:
-        return 0
+    """Nombre de rendus AVANT celui-ci (en cours + en file devant lui, toutes sources)."""
+    st = _states.get(job_id)
+    return comfy_queue.position(st["ticket"]) if st else 0
 
 
 def _fail_message(exc: BaseException) -> str:
@@ -159,7 +173,8 @@ def _finish(st: dict[str, Any], gen_id: int, state: str, error: str = "", **gen_
     db.local_gen_update(gen_id, status=state, error=error, finished_at=now, **gen_fields)
 
 
-def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any]], None]) -> None:
+def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any]], None],
+             ticket: comfy_queue.Ticket) -> None:
     gen_id = int(st["gen_id"])
     gen = db.local_gen_get(gen_id) or {}
     params = json.loads(gen.get("params") or "{}")
@@ -179,6 +194,8 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
                     st[k] = ev[k]
             if "queue_pos" in ev:
                 st["comfy_queue_pos"] = ev.get("queue_pos")
+        comfy_queue.update(ticket, **{k: ev[k] for k in ("percent", "node_label", "prompt_id")
+                                      if k in ev})
         on_update({"scene": 1, "phase": "local", "status": "en_cours",
                    "percent": st.get("percent", 0), "node_label": st.get("node_label", "")})
 
@@ -187,16 +204,8 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
         if cancel_ev.is_set():
             raise comfy_local.ComfyCancelled(CANCELLED_MSG)
         settings = load_local_settings()
-        det = comfy_local.detect(int(settings["comfy_port"] or 0))
-        if not det:
-            raise comfy_local.ComfyOffline(OFFLINE_MSG)
-        url = str(det["url"])
-        if _last_kind[0] and _last_kind[0] != st["kind"]:
-            try:
-                comfy_local.free(url)
-            except Exception as exc:  # noqa: BLE001 - libération facultative
-                _log_detail(f"[LOCAL] free (changement de modèle) : {exc!r}")
-        _last_kind[0] = st["kind"]
+        # détection (10 s) + libération mémoire au changement vidéo ↔ image : comfy_queue
+        url = comfy_queue.prepare(ticket, int(settings["comfy_port"] or 0))
         paths = params.get("paths") or {}
         if st["kind"] == "video":
             first = comfy_local.upload_image(url, paths["first"])
@@ -240,30 +249,20 @@ def _enqueue(gen_id: int, kind: str) -> dict[str, Any]:
     holder: dict[str, str] = {}
 
     def _runner(on_update: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-        with _cond:   # attend son tour (et l'enregistrement par _enqueue, qui tient le verrou)
+        with _cond:   # attend l'enregistrement par _enqueue (qui tient le verrou)
             jid = holder["job_id"]
             st = _states[jid]
-            while True:
-                if st["cancel"].is_set():
-                    if jid in _waiting:
-                        _waiting.remove(jid)
-                    _cond.notify_all()
-                    break
-                if _running[0] is None and _waiting and _waiting[0] == jid:
-                    _waiting.popleft()
-                    _running[0] = jid
-                    break
-                _cond.wait(timeout=0.5)
-        if _running[0] != jid:   # annulé pendant l'attente : aucun appel Comfy
+        ticket: comfy_queue.Ticket = st["ticket"]
+        try:
+            comfy_queue.wait_turn(ticket)   # annulé en file : aucun appel Comfy
+        except comfy_local.ComfyCancelled:
             if st.get("state") != "annule":
                 _finish(st, gen_id, "annule", CANCELLED_MSG)
-            raise comfy_local.ComfyCancelled(CANCELLED_MSG)
+            raise
         try:
-            _execute(jid, st, on_update)
+            _execute(jid, st, on_update, ticket)
         finally:
-            with _cond:
-                _running[0] = None
-                _cond.notify_all()
+            comfy_queue.release(ticket)
         return {"ok": 1, "echec": 0, "gen_id": gen_id}
 
     cfg = load_provider_config()
@@ -271,13 +270,15 @@ def _enqueue(gen_id: int, kind: str) -> dict[str, Any]:
         job = jobs.manager.start(cfg, 0, "Local", [{"n": 1}], "",
                                  output_mode=f"local_{kind}", runner=_runner)
         holder["job_id"] = job.id
+        cancel_ev = threading.Event()
+        ticket = comfy_queue.submit(kind, source="local",
+                                    label="Local — vidéo" if kind == "video" else "Local — image",
+                                    cancel=cancel_ev, meta={"job_id": job.id, "gen_id": gen_id})
         _states[job.id] = {"job_id": job.id, "gen_id": gen_id, "kind": kind, "state": "en_attente",
                            "percent": 0, "node": "", "node_label": "", "prompt_id": "",
                            "comfy_queue_pos": 0, "created_at": time.time(), "started_at": None,
-                           "finished_at": None, "error": "", "cancel": threading.Event()}
-        _waiting.append(job.id)
-        pos = _queue_pos(job.id)   # 0 = démarre tout de suite (file vide)
-        _cond.notify_all()
+                           "finished_at": None, "error": "", "cancel": cancel_ev, "ticket": ticket}
+        pos = comfy_queue.position(ticket)   # 0 = démarre tout de suite (file vide)
     db.local_gen_update(gen_id, job_id=job.id)
     return {"ok": True, "job_id": job.id, "gen_id": gen_id, "queue_pos": pos}
 
@@ -310,13 +311,11 @@ def cancel_job(job_id: str) -> str:
         if st is None or st["state"] not in ("en_attente", "en_cours"):
             raise LookupError("Génération introuvable ou déjà terminée.")
         st["cancel"].set()
-        if job_id in _waiting:
-            _waiting.remove(job_id)
+        if comfy_queue.cancel(st["ticket"]) == "file":
             st.update(state="annule", error=CANCELLED_MSG, finished_at=time.time())
             where = "file"
         else:
             where = "en_cours"
-        _cond.notify_all()
     if where == "file":
         db.local_gen_update(int(st["gen_id"]), status="annule", error=CANCELLED_MSG,
                             finished_at=time.time())
@@ -324,12 +323,21 @@ def cancel_job(job_id: str) -> str:
 
 
 def queue_view() -> dict[str, Any]:
+    """Jobs de la section Local dans la file Comfy : {running: {job_id, gen_id, kind, started_at,
+    percent} | None (None aussi quand le rendu en cours vient d'une pub / de la file multi-pubs :
+    cf. `comfy_queue` du statut), waiting: [job_id Local, ordre de passage]}."""
+    snap = comfy_queue.snapshot()
+    run = snap["running"]
     with _cond:
-        run_id = _running[0]
-        st = _states.get(run_id) if run_id else None
-        running = ({"job_id": run_id, "gen_id": st["gen_id"], "kind": st["kind"],
-                    "started_at": st.get("started_at")} if st else None)
-        return {"running": running, "waiting": list(_waiting)}
+        running = None
+        if run is not None and run["source"] == "local":
+            st = _states.get(str(run["meta"].get("job_id") or ""))
+            if st is not None:
+                running = {"job_id": st["job_id"], "gen_id": st["gen_id"], "kind": st["kind"],
+                           "started_at": st.get("started_at"), "percent": st.get("percent", 0)}
+        waiting = [str(t["meta"].get("job_id")) for t in snap["waiting"]
+                   if t["source"] == "local" and str(t["meta"].get("job_id") or "") in _states]
+    return {"running": running, "waiting": waiting}
 
 
 # ==================================================================== vues
@@ -467,40 +475,77 @@ class UsePlanIn(BaseModel):
     clip_id: int
 
 
+def _launching() -> bool:
+    return time.time() - _launch_at[0] < LAUNCH_GRACE_S
+
+
+def comfy_jobs_running() -> bool:
+    """Rendu Comfy en cours (ordonnanceur) ou job Local / file multi-pubs inscrit en base."""
+    if comfy_queue.busy():
+        return True
+    try:
+        return any(str(j.get("output_mode") or "").startswith("local_") for j in db.jobs_inflight())
+    except Exception:  # noqa: BLE001 - base illisible : dans le doute, occupé
+        return True
+
+
 @router.get("/api/local/status")
 def local_status() -> dict[str, Any]:
+    """État de Comfy SANS faux « ne répond pas » pendant un rendu : rendu en cours → state
+    « occupe », reachable=true, aucun appel réseau ; sinon détection (timeout 10 s).
+    state : pret | occupe | demarrage (lancé il y a < 90 s, pas encore joignable) | injoignable."""
     s = load_local_settings()
-    det = comfy_local.detect(int(s["comfy_port"] or 0))
-    launching = (not det) and (time.time() - _launch_at[0] < LAUNCH_GRACE_S)
-    return {"reachable": bool(det), "url": (det or {}).get("url"), "port": (det or {}).get("port"),
-            "version": (det or {}).get("version"),
+    cs = comfy_queue.comfy_state(int(s["comfy_port"] or 0))
+    reachable = cs["state"] in ("pret", "occupe")
+    launching = (not reachable) and _launching()
+    busy = cs["state"] == "occupe"
+    snap = comfy_queue.snapshot()
+    return {"reachable": reachable, "url": cs.get("url"), "port": cs.get("port"),
+            "version": cs.get("version"),
             "exe_found": comfy_local.exe_path(str(s["comfy_exe"] or "")) is not None,
-            "launching": launching, "queue": queue_view(), "settings": s}
+            "launching": launching, "state": "demarrage" if launching else cs["state"],
+            "busy": busy, "busy_label": BUSY_LABEL if busy else "",
+            "busy_detail": (snap["running"] or {}).get("label", "") if busy else "",
+            "queue": queue_view(), "comfy_queue": snap, "settings": s}
 
 
 @router.post("/api/local/launch")
 def local_launch() -> dict[str, Any]:
-    s = load_local_settings()
-    if comfy_local.detect(int(s["comfy_port"] or 0)):
-        return {"ok": True, "launched": False}
-    launched = bool(comfy_local.launch(str(s["comfy_exe"] or "")))
-    if launched:
-        _launch_at[0] = time.time()
-    return {"ok": True, "launched": launched}
+    """Lance Comfy Desktop, JAMAIS en double : refus (launched=false + reason) si un rendu / job
+    Comfy tourne (« occupe »), si un lancement date de moins de 90 s (« demarrage ») ou si Comfy
+    répond déjà (« deja_lance »). Sérialisé par un verrou (double clic)."""
+    with _launch_lock:
+        s = load_local_settings()
+
+        def _refused(reason: str) -> dict[str, Any]:
+            return {"ok": True, "launched": False, "reason": reason, "message": LAUNCH_REFUSED[reason]}
+
+        if comfy_jobs_running():
+            return _refused("occupe")
+        if _launching():
+            return _refused("demarrage")
+        if comfy_local.detect(int(s["comfy_port"] or 0), timeout=comfy_queue.DETECT_TIMEOUT_S):
+            return _refused("deja_lance")
+        if comfy_local.exe_path(str(s["comfy_exe"] or "")) is None:
+            return _refused("exe_introuvable")
+        previous = _launch_at[0]
+        _launch_at[0] = time.time()   # posé AVANT le lancement (anti double clic)
+        launched = bool(comfy_local.launch(str(s["comfy_exe"] or "")))
+        if not launched:
+            _launch_at[0] = previous
+            return _refused("echec")
+        return {"ok": True, "launched": True}
 
 
 @router.post("/api/local/free")
 def local_free() -> dict[str, Any]:
+    if comfy_queue.busy():
+        raise HTTPException(409, "Comfy est occupé (rendu en cours) : libère la mémoire après.")
     s = load_local_settings()
-    det = comfy_local.detect(int(s["comfy_port"] or 0))
+    det = comfy_local.detect(int(s["comfy_port"] or 0), timeout=comfy_queue.DETECT_TIMEOUT_S)
     if not det:
         raise HTTPException(503, OFFLINE_MSG)
-    try:
-        ok = bool(comfy_local.free(str(det["url"])))
-    except Exception as exc:  # noqa: BLE001
-        _log_detail(f"[LOCAL] free : {exc!r}")
-        ok = False
-    return {"ok": ok}
+    return {"ok": comfy_queue.free_now("bouton Libérer la mémoire", url=str(det["url"]))}
 
 
 @router.get("/api/local/settings")

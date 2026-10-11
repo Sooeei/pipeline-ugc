@@ -123,7 +123,7 @@ def test_avatar_clip_seconds(wav, model, expected):
 
 def test_avatar_video_models_and_normalizers():
     m = config_app.AVATAR_VIDEO_MODELS
-    assert set(m) == {"grok", "kling", "omni"} and config_app.DEFAULT_AVATAR_VIDEO_MODEL == "grok"
+    assert set(m) == {"grok", "kling", "omni", "minimax_local"} and config_app.DEFAULT_AVATAR_VIDEO_MODEL == "grok"
     assert m["kling"]["model"] == config_app.MASHUP_VIDEO_MODELS["kling_pro"]["model"]
     assert m["grok"]["cost_per_second_usd"] == config_app.GROK_COST_PER_SECOND_USD
     assert m["omni"]["cost_per_second_usd"] == config_app.OMNI_COST_PER_SECOND_USD
@@ -169,7 +169,7 @@ def test_settings_roundtrip_v2():
         assert s["elevenlabs_api_key_set"] is False
         assert s["avatar_video_model"] == "grok"
         assert s["drift_threshold"] == pytest.approx(0.80)
-        assert {m["key"] for m in s["avatar_video_models"]} == {"grok", "kling", "omni"}
+        assert {m["key"] for m in s["avatar_video_models"]} == {"grok", "kling", "omni", "minimax_local"}
         r = c.post("/api/settings", json={"elevenlabs_api_key": " sk_test ", "dry_run": True,
                                           "avatar_video_model": "kling", "drift_threshold": 0.65})
         assert r.status_code == 200

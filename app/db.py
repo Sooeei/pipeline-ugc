@@ -1614,6 +1614,117 @@ _LOCAL_GEN_COLS = ("kind", "status", "prompt", "seed", "params", "inputs", "outp
 # id du prompt dans la file Comfy : après un redémarrage de l'app, le rendu orphelin est annulé.
 _MIGRATIONS.setdefault("local_gens", []).append(("comfy_prompt_id", "TEXT DEFAULT ''"))
 
+# ---------------------------------------------------------------- Local v2 (CONTRAT_LOCAL.md K4-K9)
+# Réglages par pub des moteurs locaux + seed / prompt Comfy du plan (additif, idempotent).
+_MIGRATIONS["ads"].extend([
+    ("local_video_quality", "REAL DEFAULT 0.9"),   # MiniMax local : 0.4 | 0.6 | 0.9 MP
+    ("local_video_turbo", "INTEGER DEFAULT 1"),    # MiniMax local : 1 = turbo (8 étapes)
+    ("shoot_style", "TEXT DEFAULT 'pose'"),        # pose | selfie (prompt_profiles.shoot_style_line)
+    ("image_engine", "TEXT DEFAULT 'nano'"),       # nano | qwen_local
+])
+_MIGRATIONS["clips"].extend([
+    ("local_seed", "INTEGER"),                # seed MiniMax de la dernière animation (« +1 s » la réutilise)
+    ("comfy_prompt_id", "TEXT DEFAULT ''"),   # rendu Comfy en cours (annulé au redémarrage)
+])
+_ALLOWED_AD_COLS |= {"local_video_quality", "local_video_turbo", "shoot_style", "image_engine"}
+_ALLOWED_CLIP_COLS |= {"local_seed", "comfy_prompt_id"}
+
+# File multi-pubs locale (zone C, app/local_queue.py) : une ligne par pub ajoutée, une ligne
+# par plan figé à l'ajout. État global de la file : réglage `local_queue_state` (JSON).
+_SCHEMA += """
+CREATE TABLE IF NOT EXISTS local_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT DEFAULT '',
+    ad_id         INTEGER NOT NULL,
+    position      INTEGER DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'en_attente',
+    added_at      REAL,
+    started_at    REAL,
+    finished_at   REAL,
+    error         TEXT DEFAULT '',
+    export_status TEXT DEFAULT '',
+    export_dest   TEXT DEFAULT '',
+    export_error  TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS local_queue_plans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_id        INTEGER NOT NULL,
+    ad_id           INTEGER NOT NULL,
+    clip_id         INTEGER NOT NULL,
+    scene_n         INTEGER DEFAULT 0,
+    position        INTEGER DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'en_attente',
+    attempts        INTEGER DEFAULT 0,
+    comfy_prompt_id TEXT DEFAULT '',
+    job_id          TEXT DEFAULT '',
+    est_s           REAL,
+    started_at      REAL,
+    finished_at     REAL,
+    error           TEXT DEFAULT ''
+);
+"""
+_LOCAL_QUEUE_COLS = ("run_id", "ad_id", "position", "status", "added_at", "started_at",
+                     "finished_at", "error", "export_status", "export_dest", "export_error")
+_LOCAL_QUEUE_PLAN_COLS = ("queue_id", "ad_id", "clip_id", "scene_n", "position", "status",
+                          "attempts", "comfy_prompt_id", "job_id", "est_s", "started_at",
+                          "finished_at", "error")
+_LQ_TABLES = {"local_queue": _LOCAL_QUEUE_COLS, "local_queue_plans": _LOCAL_QUEUE_PLAN_COLS}
+
+
+def _lq_cols(table: str, fields: dict[str, Any]) -> dict[str, Any]:
+    if table not in _LQ_TABLES:
+        raise ValueError(f"table inconnue : {table}")
+    return {k: v for k, v in fields.items() if k in _LQ_TABLES[table]}
+
+
+def lq_insert(table: str, **fields: Any) -> int:
+    """Insère une ligne dans `local_queue` | `local_queue_plans` (colonnes en liste blanche)."""
+    cols = _lq_cols(table, fields)
+    con = connect()
+    try:
+        cur = con.execute(f"INSERT INTO {table}({', '.join(cols)}) VALUES({', '.join('?' * len(cols))})",
+                          tuple(cols.values()))
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def lq_update(table: str, row_id: int, **fields: Any) -> None:
+    cols = _lq_cols(table, fields)
+    if not cols:
+        return
+    con = connect()
+    try:
+        con.execute(f"UPDATE {table} SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+                    (*cols.values(), int(row_id)))
+        con.commit()
+    finally:
+        con.close()
+
+
+def lq_rows(table: str, where: str = "", params: tuple[Any, ...] = (),
+            order: str = "position, id") -> list[dict[str, Any]]:
+    """Lignes de `local_queue` | `local_queue_plans`. `where` / `order` : SQL écrit par le CODE
+    (jamais une entrée utilisateur) ; valeurs passées par `params`."""
+    _lq_cols(table, {})
+    sql = f"SELECT * FROM {table}" + (f" WHERE {where}" if where else "") + (f" ORDER BY {order}" if order else "")
+    con = connect()
+    try:
+        return [dict(r) for r in con.execute(sql, params).fetchall()]
+    finally:
+        con.close()
+
+
+def lq_delete(table: str, where: str, params: tuple[Any, ...] = ()) -> None:
+    _lq_cols(table, {})
+    con = connect()
+    try:
+        con.execute(f"DELETE FROM {table} WHERE {where}", params)
+        con.commit()
+    finally:
+        con.close()
+
 
 def local_gen_add(**fields: Any) -> int:
     """Insère une génération locale (Comfy) ; `params` / `inputs` peuvent être des dict/list."""
@@ -1698,6 +1809,20 @@ def job_inflight_done(job_id: str) -> None:
         con.close()
 
 
+def _inflight_clip_ids(job: dict[str, Any]) -> list[int]:
+    """Plans réservés par un job interrompu (jobs_inflight.clip_ids JSON, sinon clip_id)."""
+    import json
+
+    ids: list[int] = []
+    try:
+        ids = [int(x) for x in json.loads(job.get("clip_ids") or "[]")]
+    except (TypeError, ValueError):
+        ids = []
+    if job.get("clip_id") and int(job["clip_id"]) not in ids:
+        ids.append(int(job["clip_id"]))
+    return ids
+
+
 def recover_interrupted_jobs() -> list[dict[str, Any]]:
     """Au DÉMARRAGE : remet en état cohérent les plans des jobs restés « en cours » (process
     arrêté pendant une génération). Plans non terminés → status « echec » + INTERRUPTED_MSG ;
@@ -1711,7 +1836,7 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
         for job in rows:
             mode = str(job.get("output_mode") or "")
             ad_id = int(job["ad_id"])
-            if mode.startswith("local_"):
+            if mode.startswith("local_") and mode != "local_queue":
                 # Section « Local » (ComfyUI) : aucune pub ni plan concerné → seule la génération
                 # locale passe en échec (pas d'activité « Pub #0 »). Les prompts encore dans la
                 # file Comfy sont renvoyés (`comfy_prompt_ids`) pour être annulés côté Comfy.
@@ -1730,11 +1855,26 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
                 scene_ns = [int(n) for n in json.loads(job.get("scene_ns") or "[]")]
             except (TypeError, ValueError):
                 scene_ns = []
+            if mode == "local_queue":
+                # File multi-pubs locale (zone C) : ni plan ni pub touchés, pas d'activité — c'est
+                # local_queue.recover() qui remet le plan « en_attente ». Les prompts Comfy du job
+                # (plan de la file + plan réservé) sont renvoyés pour être annulés.
+                pids = [str(r[0]) for r in con.execute(
+                    "SELECT comfy_prompt_id FROM local_queue_plans WHERE job_id=? AND "
+                    "comfy_prompt_id != ''", (str(job["job_id"]),))]
+                for cid in _inflight_clip_ids(job):
+                    r = con.execute("SELECT comfy_prompt_id FROM clips WHERE id=?", (cid,)).fetchone()
+                    if r and r[0] and str(r[0]) not in pids:
+                        pids.append(str(r[0]))
+                out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": [],
+                            "comfy_prompt_ids": pids})
+                continue
             reset: list[int] = []
+            pids = []
             if mode not in _VOICE_MODES:
                 done = _DONE_STATUSES_IMAGES if mode in _IMAGE_MODES else _DONE_STATUSES_VIDEO
                 clips = con.execute(
-                    "SELECT id, scene_n, status FROM clips WHERE ad_id=?", (ad_id,)
+                    "SELECT id, scene_n, status, comfy_prompt_id FROM clips WHERE ad_id=?", (ad_id,)
                 ).fetchall()
                 for c in clips:
                     if job.get("clip_id"):
@@ -1745,6 +1885,10 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
                         con.execute("UPDATE clips SET status='echec', error=? WHERE id=?",
                                     (INTERRUPTED_MSG, int(c["id"])))
                         reset.append(int(c["scene_n"]))
+                    if targeted and mode == "avatar_video" and c["comfy_prompt_id"]:
+                        # MiniMax local (zone A) : rendu Comfy orphelin → annulé au démarrage.
+                        pids.append(str(c["comfy_prompt_id"]))
+                        con.execute("UPDATE clips SET comfy_prompt_id='' WHERE id=?", (int(c["id"]),))
             con.execute("UPDATE ads SET status='echec' WHERE id=? AND status='en_cours'", (ad_id,))
             detail = (f"plan(s) {', '.join(str(n) for n in sorted(reset))} à relancer."
                       if reset else "rien à relancer.")
@@ -1753,7 +1897,11 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
                 (time.time(), "reprise",
                  f"Pub #{ad_id} : génération interrompue ({mode or 'job'}) — {detail}"),
             )
-            out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": sorted(reset)})
+            rec: dict[str, Any] = {"job_id": job["job_id"], "ad_id": ad_id, "mode": mode,
+                                   "reset": sorted(reset)}
+            if mode == "avatar_video":
+                rec["comfy_prompt_ids"] = pids
+            out.append(rec)
         con.execute("DELETE FROM jobs_inflight")
         con.commit()
     finally:

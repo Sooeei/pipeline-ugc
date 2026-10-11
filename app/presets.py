@@ -36,7 +36,10 @@ _EXPORT_DIR_MAX = 500
 # réécrits par le réglage global). video_model (grok|kling|omni), accent_region (clé
 # config_app.OMNI_ACCENTS, ex. « quebec »), resolution (720p|1080p ; Grok borné à 720p avec
 # avertissement), omni_camera (auto|locked|push_in|handheld ; « auto » = choix automatique).
-PRESET_AD_SETTINGS = ("video_model", "accent_region", "resolution", "omni_camera")
+# Local v2 (CONTRAT_LOCAL.md K5-K9) : local_video_quality (0.4|0.6|0.9 MP, MiniMax local),
+# shoot_style (pose|selfie), image_engine (nano|qwen_local) — normalisés (valeur inconnue → défaut).
+PRESET_AD_SETTINGS = ("video_model", "accent_region", "resolution", "omni_camera",
+                      "local_video_quality", "shoot_style", "image_engine")
 CAMERA_AUTO = "auto"
 # Clés conservées lors d'une mise à jour qui ne les envoie pas (formulaires partiels).
 _PRESET_KEPT_KEYS = ("export_dir", "persona", "voice_mode", "product_sheet", *PRESET_AD_SETTINGS)
@@ -297,12 +300,20 @@ def _parse_data(raw: str) -> dict[str, Any]:
     return data
 
 
-def clean_preset_settings(data: dict[str, Any]) -> dict[str, str]:
+def clean_preset_settings(data: dict[str, Any]) -> dict[str, Any]:
     """Réglages par client (accent, résolution, caméra) validés ; valeur vide/inconnue = non
-    défini (la clé est omise). Le modèle vidéo est validé par _clean_preset_data."""
+    défini (la clé est omise). Le modèle vidéo est validé par _clean_preset_data. Réglages
+    Local v2 (qualité vidéo locale, style de tournage, moteur d'image) : NORMALISÉS (inconnu →
+    valeur par défaut), omis s'ils sont vides."""
     from app import pipeline
 
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
+    if data.get("local_video_quality") not in (None, ""):
+        out["local_video_quality"] = config_app.normalize_local_video_quality(data["local_video_quality"])
+    if str(data.get("shoot_style") or "").strip():
+        out["shoot_style"] = config_app.normalize_shoot_style(data["shoot_style"])
+    if str(data.get("image_engine") or "").strip():
+        out["image_engine"] = config_app.normalize_image_engine(data["image_engine"])
     region = str(data.get("accent_region") or "").strip().lower()
     if region:
         if region not in config_app.OMNI_ACCENTS:
@@ -554,13 +565,13 @@ def library_persos(character_ids: list[int]) -> list[dict[str, str]]:
     return out
 
 
-def preset_ad_settings(preset_id: int | None) -> dict[str, str]:
+def preset_ad_settings(preset_id: int | None) -> dict[str, Any]:
     """Réglages par client du preset (modèle vidéo, accent, résolution, caméra) ; {} sinon."""
     row = db.get_preset(int(preset_id)) if preset_id else None
     if not row:
         return {}
     data = _preset_data(row)
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     if data.get("video_model"):
         out["video_model"] = config_app.normalize_avatar_video_model(data["video_model"])
     try:
@@ -588,6 +599,9 @@ def apply_preset_settings(ad_id: int, preset_id: int | None) -> list[str]:
         fields["omni_resolution"] = settings["resolution"]
     if settings.get("omni_camera"):
         fields["omni_camera"] = "" if settings["omni_camera"] == CAMERA_AUTO else settings["omni_camera"]
+    for key in ("local_video_quality", "shoot_style", "image_engine"):   # Local v2
+        if settings.get(key) not in (None, ""):
+            fields[key] = settings[key]
     if fields:
         db.set_ad_fields(int(ad_id), **fields)
     if settings.get("accent_region"):

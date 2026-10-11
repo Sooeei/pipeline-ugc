@@ -76,6 +76,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                              daemon=True).start()
     except Exception as exc:  # noqa: BLE001 - la reprise ne doit jamais empêcher le démarrage
         prov._log_detail(f"[REPRISE] impossible : {exc!r}")
+    # File multi-pubs locale (Comfy) : plans interrompus remis en attente, worker relancé.
+    try:
+        from . import local_queue
+
+        local_queue.recover()
+    except Exception as exc:  # noqa: BLE001 - la reprise ne doit jamais empêcher le démarrage
+        prov._log_detail(f"[REPRISE] file locale : {exc!r}")
     _quiet_connection_resets()
     yield
 
@@ -185,6 +192,9 @@ def create_app() -> FastAPI:
     # Section « Local » : ComfyUI sur le PC (gratuit), file d'attente d'un rendu à la fois.
     from . import local_routes
     app.include_router(local_routes.router)
+    # File multi-pubs locale (MiniMax sur Comfy, plan par plan) — CONTRAT_LOCAL.md K7.
+    from . import local_queue
+    app.include_router(local_queue.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -243,6 +253,7 @@ def create_app() -> FastAPI:
         html = html.replace("/static/outils_c.js", f"/static/outils_c.js?v={_ver('outils_c.js')}")
         html = html.replace("/static/keyframes.js", f"/static/keyframes.js?v={_ver('keyframes.js')}")
         html = html.replace("/static/local.js", f"/static/local.js?v={_ver('local.js')}")
+        html = html.replace("/static/local_queue.js", f"/static/local_queue.js?v={_ver('local_queue.js')}")
         return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
     # -------------------------------------------------- RÉGLAGES
@@ -1035,7 +1046,8 @@ def create_app() -> FastAPI:
     def clip_regenerate_longer(clip_id: int, body: AnimateIn) -> dict[str, Any]:
         """« Régénérer (+1 s) » : relance la vidéo Grok d'UN plan dont la réplique semble coupée,
         avec 1 s de plus (clips.extra_seconds += 1), bornée au max Grok. Image/keyframe inchangés.
-        Objet animé et Avatar IA v2 (modèle Grok). Coût réel → confirmation requise."""
+        Objet animé et Avatar IA v2 (Grok, Omni, MiniMax local). Coût réel → confirmation requise
+        (MiniMax local : gratuit, la confirmation relève de video_animate)."""
         clip = db.get_clip(clip_id)
         if clip is None:
             raise HTTPException(404, "Plan introuvable.")
@@ -1047,8 +1059,11 @@ def create_app() -> FastAPI:
         if kind != "objet" and not is_v2:
             raise HTTPException(400, "« Régénérer (+1 s) » n'existe que pour Objet animé et Avatar IA.")
         model = avatar_video.effective_video_model(ad) if is_v2 else "grok"
-        if model not in ("grok", "omni"):
-            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok et Omni.")
+        # MiniMax local (Avatar IA v2) : même chemin qu'Omni (avatar_video.video_animate), durées
+        # du modèle ; la seed du plan (clips.local_seed) est réutilisée par la zone A.
+        if model not in ("grok", "omni", config_app.LOCAL_VIDEO_MODEL):
+            raise HTTPException(400, "« Régénérer (+1 s) » est réservé aux clips Grok, Omni et "
+                                     "MiniMax (local).")
         durations = config_app.AVATAR_VIDEO_MODELS[model]["durations"]
         if is_v2:   # durée réellement envoyée (Omni : débit de la fiche voix + 0,3 s + extra)
             current = avatar_video.clip_target_seconds(
@@ -3806,6 +3821,16 @@ def _server_busy() -> str:
             return "job en cours"
     except Exception:  # noqa: BLE001
         return "état des jobs inconnu"
+    try:   # file multi-pubs locale (entre deux plans, aucun job inscrit) puis rendu Comfy
+        from . import comfy_queue, local_queue
+
+        reason = local_queue.busy_reason()
+        if reason:
+            return reason
+        if comfy_queue.busy():
+            return "rendu Comfy en cours"
+    except Exception:  # noqa: BLE001 - dans le doute : occupé
+        return "file locale illisible"
     if _INFLIGHT_REQUESTS[0] > 0:
         return f"{_INFLIGHT_REQUESTS[0]} requête(s) en cours"
     return ""

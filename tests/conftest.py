@@ -21,7 +21,7 @@ from app import db  # noqa: E402
 _TABLES = (
     "cost_events", "cost_archives", "clips", "ref_images", "ads",
     "settings", "avatars", "voices", "activity", "characters", "presets", "jobs_inflight",
-    "generations", "plan_feedback", "local_gens",
+    "generations", "plan_feedback", "local_gens", "local_queue_plans", "local_queue",
 )
 
 
@@ -35,7 +35,10 @@ def fresh_db():
         con.commit()
     finally:
         con.close()
-    lr = sys.modules.get("app.local_routes")   # section Local : dernier type de rendu remis à zéro
+    cq = sys.modules.get("app.comfy_queue")   # ordonnanceur Comfy : dernier type de rendu remis à zéro
+    if cq is not None:
+        cq.reset_for_tests()
+    lr = sys.modules.get("app.local_routes")   # section Local : pas de « Comfy démarre… » hérité
     if lr is not None:
-        lr._last_kind[0] = None
+        lr._launch_at[0] = 0.0
     yield

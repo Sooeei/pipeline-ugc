@@ -41,7 +41,7 @@ def _row(mode: str, etape: str, fournisseur: str, modele: str, libelle: str, pri
             "libelle": libelle, "prix": prix, "actif": actif, "note": note}
 
 
-_AVATAR_VIDEO_PROVIDER = {"grok": "xAI", "kling": "OpenRouter", "omni": "Google"}
+_AVATAR_VIDEO_PROVIDER = {"grok": "xAI", "kling": "OpenRouter", "omni": "Google", "minimax_local": "ComfyUI (PC)"}
 
 
 def models_table(settings: dict[str, str] | None = None) -> list[dict[str, Any]]:

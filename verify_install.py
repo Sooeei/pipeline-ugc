@@ -1,11 +1,12 @@
-"""Test d'installation propre (J2.8) : lance le .exe buildé dans un environnement ISOLÉ
-(dossier de données neuf, aucune clé) et vérifie boot + E2E en MODE SIMULATION.
+"""Test d'installation propre (J2.8) : lance l'app dans un environnement ISOLÉ (dossier de
+données neuf, aucune clé) et vérifie boot + E2E en MODE SIMULATION. Cible : le .exe buildé s'il
+existe (dist/), sinon l'app depuis les sources (`-m app.main`, comme LANCER.bat).
 
 Déroulé : boot → /api/health (vierge : dry_run) → ajoute une voix factice → génère une
 « Voix off » (voix simulée, script découpé en segments) → confirme que les fichiers audio
 sont réellement produits. N'utilise NI tes clés NI ta base réelle.
 
-Usage : py -3.14 verify_install.py   (après le build PyInstaller)
+Usage : py -3.14 verify_install.py   (après le build PyInstaller, ou tel quel sur les sources)
 Sort en erreur (code 1) si quoi que ce soit échoue.
 """
 
@@ -40,9 +41,10 @@ def _free_port() -> int:
 
 
 def main() -> int:
-    if not EXE.exists():
-        print(f"FAIL : {EXE} introuvable — lance d'abord PyInstaller.")
-        return 1
+    root = Path(__file__).resolve().parent
+    exe = root / EXE
+    cmd = [str(exe)] if exe.exists() else [sys.executable, "-m", "app.main"]
+    print("cible :", "exe buildé" if exe.exists() else "sources (-m app.main)")
 
     port = _free_port()
     data_dir = tempfile.mkdtemp(prefix="ugc_install_")   # environnement ISOLÉ (base neuve)
@@ -60,7 +62,7 @@ def main() -> int:
         )
         return json.loads(urllib.request.urlopen(req, timeout=20).read())
 
-    proc = subprocess.Popen([str(EXE)], env=env)  # noqa: S603
+    proc = subprocess.Popen(cmd, env=env, cwd=root)  # noqa: S603
     try:
         health = None
         for _ in range(120):   # 1er boot frozen peut être lent

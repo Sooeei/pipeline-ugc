@@ -183,7 +183,7 @@ def test_no_global_settings_route():
 
 def test_local_storage_always_in_try():
     lines = JS.splitlines()
-    uses = [i for i, l in enumerate(lines) if "localStorage" in l]
+    uses = [i for i, line in enumerate(lines) if "localStorage" in line]
     assert uses, "reprise après F5 attendue"
     for i in uses:
         before = "\n".join(lines[max(0, i - 3):i + 1])

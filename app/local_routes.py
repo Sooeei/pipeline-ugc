@@ -691,7 +691,7 @@ def local_gen_use_as_plan(gen_id: int, body: UsePlanIn) -> dict[str, Any]:
             media.crop_to_plan_png(src.read_bytes(), dest)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-    entry = keyframe_versions.record(clip_id, dest, "local", keyframe_source="local",
+    entry = keyframe_versions.record(clip_id, dest, "local", keyframe_source="upload",
                                      note=f"Local #{gen_id} : {g.get('prompt') or ''}")
-    keyframe_versions.apply_image(clip_id, str(dest), keyframe_source="local")
+    keyframe_versions.apply_image(clip_id, str(dest), keyframe_source="upload")
     return {"ok": True, "clip_id": clip_id, "v": int(entry["v"])}

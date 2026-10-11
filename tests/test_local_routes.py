@@ -530,7 +530,7 @@ def test_use_as_plan_image_avatar_omni_copies(c, fake):
     clip = db.get_clip(cid)
     with Image.open(clip["image_path"]) as im:
         assert im.size == (768, 1376)                       # copie telle quelle
-    assert r["v"] == 2 and clip["keyframe_source"] == "local" and clip["keyframe_ok"] == 0
+    assert r["v"] == 2 and clip["keyframe_source"] == "upload" and clip["keyframe_ok"] == 0
 
 
 def test_use_as_plan_image_errors(c, fake, monkeypatch):

@@ -21,6 +21,7 @@
         <button class="nav-item active" data-section="dashboard">📊 Tableau de bord</button>
         <button class="nav-item" data-section="new">✨ Nouvelle pub</button>
         <button class="nav-item" data-section="library">🎬 Bibliothèque</button>
+        <button class="nav-item" data-section="local">🖥️ Local</button>
         <button class="nav-item" data-section="clients">👥 Clients &amp; persos</button>
         <button class="nav-item" data-section="costs">💰 Coûts</button>
         <button class="nav-item" data-section="stats">📈 Stats</button>
@@ -787,6 +788,134 @@
         <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
       </section>
 
+      <!-- ---- LOCAL (ComfyUI sur le PC, gratuit) ---- -->
+      <section id="local" class="panel">
+        <header class="panel-head local-head">
+          <h1>🖥️ Local</h1>
+          <div class="head-actions">
+            <span id="localStatusPill" class="local-pill wait" role="status" aria-live="polite">● Statut inconnu</span>
+            <button class="btn" id="localLaunchBtn" type="button">▶ Lancer Comfy</button>
+            <button class="btn" id="localFreeBtn" type="button" title="Décharge les modèles de la carte graphique">🧹 Libérer la mémoire</button>
+          </div>
+        </header>
+        <p id="localStatusMsg" class="muted local-msg" aria-live="polite"></p>
+        <p class="muted">Génère sur ton PC avec ComfyUI (Comfy Desktop) : vidéos à partir d'une image
+          (MiniMax H3) et retouches d'image (Qwen Image). Les images viennent de tes pubs, de tes photos produit,
+          de tes générations Local ou d'un fichier importé.</p>
+
+        <details id="localSettings" class="card-block local-settings">
+          <summary>⚙️ Réglages Local</summary>
+          <div class="grid2 local-grid">
+            <label>Port de Comfy (0 = détection automatique)
+              <input type="number" id="localPort" min="0" max="65535" step="1" value="0" inputmode="numeric" /></label>
+            <label>Chemin de Comfy Desktop (.exe)
+              <input type="text" id="localExe" placeholder="Vide = emplacement habituel de Comfy Desktop" /></label>
+          </div>
+          <label class="check"><input type="checkbox" id="localAutoFree" /> Libérer la mémoire après chaque génération</label>
+          <button class="btn" id="localSettingsSave" type="button">Enregistrer</button>
+        </details>
+
+        <div class="subtabs" role="tablist">
+          <button class="subtab active" type="button" role="tab" aria-selected="true" data-localtab="video">🎬 Vidéo</button>
+          <button class="subtab" type="button" role="tab" aria-selected="false" data-localtab="image">🖼️ Image</button>
+        </div>
+
+        <!-- Vidéo : image → vidéo -->
+        <div class="card-block local-form" data-localpanel="video">
+          <div class="grid2 local-grid">
+            <div>
+              <div class="local-label">Image de départ <span class="muted small">(obligatoire)</span></div>
+              <div class="local-slot" id="localFirstSlot" data-slot="first">
+                <div class="local-slot-view"></div>
+                <div class="local-slot-actions">
+                  <button type="button" class="btn small" data-slot-act="pick">🎬 Choisir une image</button>
+                  <button type="button" class="btn small" data-slot-act="upload">⬆ Importer</button>
+                  <button type="button" class="btn small hidden" data-slot-act="clear" aria-label="Retirer l'image de départ">✕</button>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="local-label">Image de fin <span class="muted small">(facultatif)</span></div>
+              <div class="local-slot" id="localLastSlot" data-slot="last">
+                <div class="local-slot-view"></div>
+                <div class="local-slot-actions">
+                  <button type="button" class="btn small" data-slot-act="pick">🎬 Choisir une image</button>
+                  <button type="button" class="btn small" data-slot-act="upload">⬆ Importer</button>
+                  <button type="button" class="btn small hidden" data-slot-act="clear" aria-label="Retirer l'image de fin">✕</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <label>Réplique (ce que dit la personne, en français)
+            <textarea id="localDialogue" rows="3" maxlength="1200" placeholder="Laisse vide pour une vidéo sans parole."></textarea></label>
+          <label>Direction (geste, attitude, mouvement de caméra)
+            <textarea id="localDirection" rows="2" maxlength="800" placeholder="Ex. : tient le produit près de son visage et sourit. Vide = attitude calme par défaut."></textarea></label>
+          <div class="grid2 local-grid">
+            <label>Durée : <output id="localSecondsVal" for="localSeconds">5 s</output>
+              <input type="range" id="localSeconds" min="3" max="15" step="1" value="5" /></label>
+            <label>Qualité
+              <select id="localMegapixels">
+                <option value="0.4" selected>Rapide — 0,4 MP</option>
+                <option value="0.6">Équilibrée — 0,6 MP</option>
+                <option value="0.9">Fine — 0,9 MP</option>
+              </select></label>
+          </div>
+          <div class="grid2 local-grid">
+            <label class="check"><input type="checkbox" id="localTurbo" checked /> Turbo (beaucoup plus rapide)</label>
+            <label>Seed <span class="muted small">(vide = aléatoire)</span>
+              <input type="number" id="localVideoSeed" min="0" step="1" inputmode="numeric" placeholder="aléatoire" /></label>
+          </div>
+          <button class="btn primary" id="localVideoBtn" type="button">🎬 Générer la vidéo</button>
+        </div>
+
+        <!-- Image : retouche / édition -->
+        <div class="card-block local-form hidden" data-localpanel="image">
+          <div class="local-label">Image source <span class="muted small">(obligatoire)</span></div>
+          <div class="local-slot" id="localSrcSlot" data-slot="src">
+            <div class="local-slot-view"></div>
+            <div class="local-slot-actions">
+              <button type="button" class="btn small" data-slot-act="pick">🎬 Choisir une image</button>
+              <button type="button" class="btn small" data-slot-act="upload">⬆ Importer</button>
+              <button type="button" class="btn small hidden" data-slot-act="clear" aria-label="Retirer l'image source">✕</button>
+            </div>
+          </div>
+          <div class="local-label">Références <span class="muted small" id="localRefCount">0/9</span></div>
+          <div id="localRefsList" class="local-refs"></div>
+          <div class="row">
+            <button type="button" class="btn small" id="localRefAdd">＋ Ajouter une référence</button>
+            <button type="button" class="btn small" id="localRefUpload">⬆ Importer une référence</button>
+          </div>
+          <label>Consigne
+            <textarea id="localInstruction" rows="3" maxlength="1500" placeholder="Ex. : remplace la bouteille par le produit de la référence 1, garde le même cadrage."></textarea></label>
+          <div class="grid2 local-grid">
+            <label>Taille
+              <select id="localSize">
+                <option value="source" selected>Taille de l'image source</option>
+                <option value="1K">1K (~1 MP, plus rapide)</option>
+              </select></label>
+            <label>Seed <span class="muted small">(vide = aléatoire)</span>
+              <input type="number" id="localImageSeed" min="0" step="1" inputmode="numeric" placeholder="aléatoire" /></label>
+          </div>
+          <button class="btn primary" id="localImageBtn" type="button">🖼️ Générer l'image</button>
+        </div>
+        <input type="file" id="localFile" accept="image/png,image/jpeg,image/webp" class="hidden" />
+
+        <div id="localJobs" class="local-jobs hidden" aria-live="polite"></div>
+
+        <div class="local-gal-head">
+          <h2>Galerie</h2>
+          <div class="head-actions">
+            <select id="localKindFilter" aria-label="Filtrer la galerie">
+              <option value="" selected>Tout</option>
+              <option value="video">Vidéos</option>
+              <option value="image">Images</option>
+            </select>
+            <button class="btn small" id="localRefreshGal" type="button">↻ Rafraîchir</button>
+          </div>
+        </div>
+        <div id="localGallery" class="local-gallery"></div>
+      </section>
+
       <!-- ---- CLIENTS (presets) & BIBLIOTHÈQUE DE PERSONNAGES (tous modes) ---- -->
       <section id="clients" class="panel">
         <header class="panel-head">
@@ -1175,6 +1304,23 @@
     </div>
   </div>
 
+  <!-- Section Local : choix d'une image (pubs → plans, photos produit, sorties Local) -->
+  <div id="localPickerOverlay" class="modal-overlay hidden">
+    <div class="modal wide local-picker" role="dialog" aria-modal="true" aria-labelledby="localPickerTitle">
+      <h3 class="modal-title" id="localPickerTitle">Choisir une image</h3>
+      <div class="subtabs" id="localPickerTabs">
+        <button class="subtab active" type="button" data-ltab="plans">🎬 Plans des pubs</button>
+        <button class="subtab" type="button" data-ltab="photos">📦 Photos produit</button>
+        <button class="subtab" type="button" data-ltab="local">🖥️ Images Local</button>
+      </div>
+      <div id="localPickerBody" class="local-picker-body"></div>
+      <div class="modal-actions">
+        <button class="btn hidden" id="localPickerBack" type="button">← Toutes les pubs</button>
+        <button class="btn" id="localPickerCancel" type="button">Annuler</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modale intégrée (remplace les alert/confirm natifs du navigateur) -->
   <div id="modalOverlay" class="modal-overlay hidden">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -1193,5 +1339,6 @@
   <script src="/static/tracabilite.js"></script>
   <script src="/static/produit_refs.js"></script>
   <script src="/static/keyframes.js"></script>
+  <script src="/static/local.js"></script>
 </body>
 </html>

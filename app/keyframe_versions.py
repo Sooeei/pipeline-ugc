@@ -36,6 +36,7 @@ SOURCES: dict[str, str] = {
     "miroir": "Miroir",
     "effacement": "Effacement",
     "recadrage": "Recadrage",
+    "local": "Local",
 }
 IMAGE_KINDS = ("objet", "mashup", "avatar_omni")
 CV2_MISSING_MSG = ("OpenCV n'est pas installé : « Effacer une zone » est indisponible. "

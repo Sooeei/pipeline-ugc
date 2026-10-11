@@ -116,6 +116,22 @@ CREATE TABLE IF NOT EXISTS voice_meta (
     sample_path TEXT DEFAULT '',
     updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS local_gens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'en_attente',
+    prompt      TEXT DEFAULT '',
+    seed        INTEGER,
+    params      TEXT DEFAULT '{}',
+    inputs      TEXT DEFAULT '[]',
+    output_path TEXT DEFAULT '',
+    error       TEXT DEFAULT '',
+    job_id      TEXT DEFAULT '',
+    parent_id   INTEGER,
+    created_at  REAL NOT NULL,
+    started_at  REAL,
+    finished_at REAL
+);
 """
 
 # Colonnes ajoutées après coup : on les crée sur les bases existantes (ALTER si absentes).
@@ -1588,6 +1604,88 @@ def delete_clip(clip_id: int) -> None:
         con.close()
 
 
+LOCAL_INTERRUPTED_MSG = "Génération interrompue (serveur redémarré)"
+
+
+# ---------------------------------------------------------------- section « Local » (ComfyUI)
+_LOCAL_GEN_COLS = ("kind", "status", "prompt", "seed", "params", "inputs", "output_path", "error",
+                   "job_id", "parent_id", "created_at", "started_at", "finished_at")
+
+
+def local_gen_add(**fields: Any) -> int:
+    """Insère une génération locale (Comfy) ; `params` / `inputs` peuvent être des dict/list."""
+    import json
+
+    row = {k: fields.get(k) for k in _LOCAL_GEN_COLS}
+    for k in ("params", "inputs"):
+        if not isinstance(row[k], str):
+            row[k] = json.dumps(row[k] if row[k] is not None else ({} if k == "params" else []),
+                                ensure_ascii=False)
+    row["status"] = row["status"] or "en_attente"
+    row["created_at"] = float(row["created_at"] or time.time())
+    con = connect()
+    try:
+        cur = con.execute(
+            f"INSERT INTO local_gens({', '.join(_LOCAL_GEN_COLS)}) "
+            f"VALUES({', '.join('?' * len(_LOCAL_GEN_COLS))})",
+            tuple(row[k] for k in _LOCAL_GEN_COLS),
+        )
+        con.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        con.close()
+
+
+def local_gen_update(gen_id: int, **fields: Any) -> None:
+    import json
+
+    cols = {k: v for k, v in fields.items() if k in _LOCAL_GEN_COLS}
+    if not cols:
+        return
+    for k in ("params", "inputs"):
+        if k in cols and not isinstance(cols[k], str):
+            cols[k] = json.dumps(cols[k], ensure_ascii=False)
+    con = connect()
+    try:
+        con.execute(f"UPDATE local_gens SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+                    (*cols.values(), int(gen_id)))
+        con.commit()
+    finally:
+        con.close()
+
+
+def local_gen_get(gen_id: int) -> dict[str, Any] | None:
+    con = connect()
+    try:
+        r = con.execute("SELECT * FROM local_gens WHERE id=?", (int(gen_id),)).fetchone()
+    finally:
+        con.close()
+    return dict(r) if r else None
+
+
+def local_gens_list(kind: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+    """Générations locales, plus récentes d'abord (filtre facultatif video|image)."""
+    sql, params = "SELECT * FROM local_gens", []
+    if kind:
+        sql += " WHERE kind=?"
+        params.append(kind)
+    con = connect()
+    try:
+        rows = con.execute(sql + " ORDER BY id DESC LIMIT ?", (*params, max(1, int(limit)))).fetchall()
+    finally:
+        con.close()
+    return [dict(r) for r in rows]
+
+
+def local_gen_delete(gen_id: int) -> None:
+    con = connect()
+    try:
+        con.execute("DELETE FROM local_gens WHERE id=?", (int(gen_id),))
+        con.commit()
+    finally:
+        con.close()
+
+
 def job_inflight_done(job_id: str) -> None:
     con = connect()
     try:
@@ -1610,6 +1708,16 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
         for job in rows:
             mode = str(job.get("output_mode") or "")
             ad_id = int(job["ad_id"])
+            if mode.startswith("local_"):
+                # Section « Local » (ComfyUI) : aucune pub ni plan concerné → seule la génération
+                # locale passe en échec (pas d'activité « Pub #0 »).
+                con.execute(
+                    "UPDATE local_gens SET status='echec', error=?, finished_at=? WHERE job_id=? "
+                    "AND status IN ('en_attente', 'en_cours')",
+                    (LOCAL_INTERRUPTED_MSG, time.time(), str(job["job_id"])),
+                )
+                out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": []})
+                continue
             try:
                 scene_ns = [int(n) for n in json.loads(job.get("scene_ns") or "[]")]
             except (TypeError, ValueError):

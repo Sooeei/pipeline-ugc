@@ -37,6 +37,12 @@ VOICES_DIR = DATA_DIR / "voix"
 VOICEOVER_DIR = DATA_DIR / "voix_off"
 # Pipeline « Objet animé » : images de référence + images générées, un dossier par pub.
 OBJET_DIR = MEDIA_DIR / "objet"
+# Section « Local » (ComfyUI sur le PC, gratuit) : images importées (inputs/) et rendus (out/).
+LOCAL_DIR = MEDIA_DIR / "local"
+LOCAL_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+LOCAL_VIDEO_SECONDS = (3, 15)                 # durée min / max d'une vidéo locale (s)
+LOCAL_VIDEO_MEGAPIXELS = (0.4, 0.6, 0.9)      # résolutions proposées (MiniMax H3)
+LOCAL_IMAGE_MAX_REFS = 9                      # Qwen Image Edit : 9 réfs en plus de l'image
 
 # Limite Gradium : ~1500 caractères par session TTS → au-delà, on découpe en segments.
 GRADIUM_MAX_CHARS = 1500

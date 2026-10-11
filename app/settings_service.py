@@ -51,3 +51,27 @@ def load_provider_config() -> ProviderConfig:
 
 def is_dry_run() -> bool:
     return db.get_setting("dry_run", "1") == "1"
+
+
+# Section « Local » (ComfyUI) : réglages propres, JAMAIS via /api/settings (piège dry_run).
+def load_local_settings() -> dict[str, object]:
+    try:
+        port = int(db.get_setting("local_comfy_port", "0") or 0)
+    except ValueError:
+        port = 0
+    return {
+        "comfy_port": port if 0 <= port <= 65535 else 0,
+        "comfy_exe": db.get_setting("local_comfy_exe", ""),
+        "auto_free": db.get_setting("local_auto_free", "0") == "1",
+    }
+
+
+def save_local_settings(*, comfy_port: int | None = None, comfy_exe: str | None = None,
+                        auto_free: bool | None = None) -> dict[str, object]:
+    if comfy_port is not None:
+        db.set_setting("local_comfy_port", str(int(comfy_port)))
+    if comfy_exe is not None:
+        db.set_setting("local_comfy_exe", comfy_exe.strip().strip('"').strip())
+    if auto_free is not None:
+        db.set_setting("local_auto_free", "1" if auto_free else "0")
+    return load_local_settings()

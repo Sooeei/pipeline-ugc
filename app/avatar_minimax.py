@@ -93,6 +93,24 @@ def shoot_style_video_line(style: str | None) -> str:
     return prompt_profiles.shoot_style_line(style, "video")
 
 
+# Direction qui occupe déjà les mains (test réel 11/10 : « pats the mattress top » + « hands resting
+# calmly » se contredisaient) → pas de « hands resting calmly ».
+_HANDS_RE = re.compile(
+    r"\b(hand|hands|finger|fingers|palm|arm|arms|holds?|holding|pats?|patting|touch(?:es|ing)?|"
+    r"taps?|tapping|points?|pointing|waves?|waving|press(?:es|ing)?|strok(?:e|es|ing)|rubs?|"
+    r"rubbing|lifts?|lifting|raises?|raising|grabs?|picks?|shows?|showing|applies|applying|"
+    r"opens?|opening|gestures?|gesturing|hugs?|hugging|squeez(?:e|es|ing))\b", re.I)
+
+
+def _subject(direction: str) -> str:
+    """« The person from Picture 1 <verbe…> » ; direction sans verbe (« warm natural smile, hands
+    resting calmly ») → « The person from Picture 1, <direction>, » pour garder une phrase correcte."""
+    first = (direction.split() or [""])[0].lower().strip(",.")
+    is_verb = first.endswith("s") and not first.endswith("ss") or first in {
+        "is", "sits", "stands", "lies", "leans", "looks", "speaks", "talks", "holds", "smiles"}
+    return f"The person from Picture 1 {direction}" if is_verb else f"The person from Picture 1, {direction},"
+
+
 def block_prompt(ad: dict[str, Any], clip: dict[str, Any]) -> str:
     """Prompt ANGLAIS MiniMax d'un bloc : scène UGC + direction du plan (anglais, gestes de tête
     retirés si parlé) + style de tournage (K9) + réplique FR VERBATIM nettoyée (brain.spoken_clean)
@@ -109,15 +127,15 @@ def block_prompt(ad: dict[str, Any], clip: dict[str, Any]) -> str:
     if spoken and not off:
         motion, _removed = lipsync_rules.strip_lipsync_gestures(motion)
     direction = _clean_direction(motion) or DEFAULT_DIRECTION
-    hands = re.search(r"\b(hand|hands|holds?|holding)\b", direction, re.I)
+    hands = _HANDS_RE.search(direction)
     # Direction qui parle déjà de sourire (« smiles warmly ») : pas de 2e phrase de sourire.
     smiles = re.search(r"\bsmil(?:e|es|ed|ing)\b", direction, re.I)
     parts = ["UGC vertical video filmed on a smartphone."]
     if off:
-        parts.append(f"The person from Picture 1 {direction}, mouth closed, does not speak, "
+        parts.append(f"{_subject(direction).rstrip(',')}, mouth closed, does not speak, "
                      "listening naturally.")
     else:
-        parts.append(f"The person from Picture 1 {direction}, looking straight into the camera"
+        parts.append(f"{_subject(direction).rstrip(',')}, looking straight into the camera"
                      f"{'' if smiles else ' with a warm natural smile'}"
                      f"{'' if hands else ', hands resting calmly'}.")
     parts.append(shoot_style_video_line(ad.get("shoot_style")))

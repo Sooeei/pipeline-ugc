@@ -161,6 +161,11 @@ def test_clip_released_even_if_job_crashes(monkeypatch):
                              output_mode="avatar_video", clip_ids=ids)
     j = _wait_job(job.id)
     assert j.state == "echec"
+    # Le verrou est libéré dans le `finally` du job, juste APRÈS le passage à « echec ».
+    for _ in range(250):
+        if not jobs.manager.busy_clip_ids() and not [r for r in db.jobs_inflight() if r.get("job_id") == job.id]:
+            break
+        time.sleep(0.02)
     assert jobs.manager.busy_clip_ids() == []
     assert not [r for r in db.jobs_inflight() if r.get("job_id") == job.id]
 

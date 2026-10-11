@@ -420,3 +420,13 @@ def test_model_helpers_minimax():
     avatar_video._record_cost(ProviderConfig(dry_run=False), 1, MM, 5, {})
     assert _cost_rows() == 0
     assert avatar_minimax.change_voice_after_animation({}, {}, Path("x.mp4")) == Path("x.mp4")
+
+
+def test_block_prompt_reads_well_after_real_test():
+    """Test réel 11/10 : direction sans verbe (« warm natural smile… ») et geste de main (« pats »)."""
+    from app import avatar_minimax as m
+
+    p = m.block_prompt({}, {"script": "Bonjour à tous.", "video_prompt": "warm natural smile, hands resting calmly"})
+    assert "The person from Picture 1, warm natural smile, hands resting calmly, looking straight" in p
+    p = m.block_prompt({}, {"script": "Bonjour à tous.", "video_prompt": "pats the mattress top, smiling"})
+    assert "pats the mattress top" in p and "hands resting calmly" not in p

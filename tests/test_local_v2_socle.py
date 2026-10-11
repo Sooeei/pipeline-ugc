@@ -233,7 +233,7 @@ def test_stubs_signatures():
     assert local_queue.busy_reason() == "" and local_queue.recover() is None
     assert local_queue.router.routes == []
     assert local_images.image_engine_of({"image_engine": "qwen_local"}) == "qwen_local"
-    assert local_images.image_engine_of(None) == "nano" and local_images.t2i_available() is False
+    assert local_images.image_engine_of(None) == "nano" and isinstance(local_images.t2i_available(), bool)
     from pathlib import Path
     v = Path("x.mp4")
     assert avatar_minimax.change_voice_after_animation({}, {}, v) is v

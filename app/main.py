@@ -37,6 +37,7 @@ from . import (
     gen_trace,
     jobs,
     keyframe_versions,
+    local_images,
     media,
     pipeline,
     presets,
@@ -1187,6 +1188,8 @@ def create_app() -> FastAPI:
         bible: str = Form(""),
         style: str = Form(""),
         client_preset_id: int = Form(0),
+        image_engine: str = Form(""),
+        shoot_style: str = Form(""),
         files: list[UploadFile] = File(default=[]),
     ) -> dict[str, Any]:
         """Génère le Plan 1 (la personne) — SÉQUENTIEL : les autres via /consistency après
@@ -1204,6 +1207,10 @@ def create_app() -> FastAPI:
         personas_json = _json(await run_in_threadpool(_resolve_personas, cfg, personas))
         bible_json = _json(brain.normalize_bible(bible)) if bible.strip() else ""
         style_v = config_app.normalize_omni_style(style)
+        # Moteur d'images EFFECTIF dès la création (le Plan 1 part tout de suite) : formulaire,
+        # sinon preset client, sinon Nano Banana.
+        engine_v = config_app.normalize_image_engine(
+            image_engine.strip() or presets.preset_ad_settings(client_preset_id).get("image_engine"))
 
         def _on_ad(aid: int) -> None:
             db.set_ad_voice_profile(aid, profile_json)
@@ -1222,6 +1229,14 @@ def create_app() -> FastAPI:
                              voice_mode=config_app.normalize_voice_mode(config_app.DEFAULT_VOICE_MODE))
             if client_preset_id:
                 presets.apply_preset_settings(aid, client_preset_id)
+            # Moteur d'images / style de tournage choisis dans le formulaire : priment sur le preset.
+            local_fields: dict[str, Any] = {}
+            if image_engine.strip():
+                local_fields["image_engine"] = engine_v
+            if shoot_style.strip():
+                local_fields["shoot_style"] = config_app.normalize_shoot_style(shoot_style)
+            if local_fields:
+                db.set_ad_fields(aid, **local_fields)
 
         def _on_clip(clip_id: int, s: dict[str, Any]) -> None:
             fields: dict[str, Any] = {k: s[k] for k in _BLOCK_FIELDS if s.get(k) not in (None, "")}
@@ -1240,8 +1255,29 @@ def create_app() -> FastAPI:
         return await _start_plan_images(
             cfg, "avatar_omni", ad_name, shots, files, ref_kinds, confirm,
             clip_script=lambda s: str(s.get("dialogue", "")),
-            on_ad=_on_ad, on_clip=_on_clip,
+            on_ad=_on_ad, on_clip=_on_clip, image_engine=engine_v,
         )
+
+    @app.patch("/api/avatar-omni/image-options/{ad_id}")
+    def avatar_omni_image_options(ad_id: int, body: ImageOptionsIn) -> dict[str, Any]:
+        """Moteur des images de plan (« nano » | « qwen_local ») et style de tournage (« pose » |
+        « selfie ») d'une pub Avatar IA. Seules les clés fournies changent ; les images déjà faites
+        ne sont pas touchées (les prochaines générations / retouches suivent le nouveau choix)."""
+        ad = db.get_ad(ad_id)
+        if ad is None or ad.get("kind") != "avatar_omni":
+            raise HTTPException(404, "Pub introuvable.")
+        fields: dict[str, Any] = {}
+        if body.image_engine is not None:
+            if str(body.image_engine).strip().lower() not in config_app.IMAGE_ENGINES:
+                raise HTTPException(400, "Moteur d'images inconnu (nano | qwen_local).")
+            fields["image_engine"] = config_app.normalize_image_engine(body.image_engine)
+        if body.shoot_style is not None:
+            if str(body.shoot_style).strip().lower() not in config_app.SHOOT_STYLES:
+                raise HTTPException(400, "Style de tournage inconnu (pose | selfie).")
+            fields["shoot_style"] = config_app.normalize_shoot_style(body.shoot_style)
+        if fields:
+            db.set_ad_fields(ad_id, **fields)
+        return {"ok": True, **local_images.ad_fields(db.get_ad(ad_id) or ad)}
 
     @app.post("/api/avatar-omni/regenerate-image/{clip_id}")
     def avatar_omni_regenerate(clip_id: int, body: RegenerateIn) -> dict[str, Any]:
@@ -1553,6 +1589,8 @@ def create_app() -> FastAPI:
             # Bloc parlé animé par Grok : gestes de tête retirés → avertissement sur la carte.
             s["lipsync_warning"] = avatar_video.lipsync_warning(clip_row, video_model)
         resp.update(avatar_video.ad_v2_fields(ad))
+        # Moteur des images (zone B) : image_engine, qwen_t2i_available, qwen_plan1_note…
+        resp.update(local_images.ad_fields(ad))
         # Omni : réplique > ~7 s (lip-sync peu fiable) / gestes de tête retirés → alertes FR.
         resp["alerts"].extend(a for a in resp.get("omni_alerts") or [] if a not in resp["alerts"])
         # Pilotage : durées cibles non tenues + résolution bornée par le modèle.
@@ -2255,6 +2293,12 @@ class ClipPlanOptionsIn(BaseModel):
 
 class ValidateIn(BaseModel):
     valide: bool = True
+
+
+class ImageOptionsIn(BaseModel):
+    """Options IMAGE d'une pub (zone B) : None = inchangé."""
+    image_engine: str | None = None   # nano | qwen_local
+    shoot_style: str | None = None    # pose | selfie
 
 
 class AnimateIn(BaseModel):
@@ -3181,17 +3225,25 @@ async def _start_plan_images(
     clip_script: Callable[[dict[str, Any]], str],
     on_clip: Callable[[int, dict[str, Any]], None] | None = None,
     on_ad: Callable[[int], None] | None = None,
-    generate_first: bool = True,
+    generate_first: bool = True, image_engine: str = "",
 ) -> dict[str, Any]:
     """Commun Objet / Mashup / Avatar IA : contrôles (confirmation, clé OpenRouter), création de la
     pub + des clips (refs_needed conservé), sauvegarde des réfs typées, puis job image du Plan 1
     SEULEMENT (il fixe le personnage/la personne ; les suivants via /consistency après validation).
     `clip_script(s)` = texte stocké dans clip.script ; `on_clip`/`on_ad` = champs propres au type.
-    `generate_first=False` (Objet : image du Plan 1 uploadée) → aucun job, aucun coût : job_id None."""
+    `generate_first=False` (Objet : image du Plan 1 uploadée) → aucun job, aucun coût : job_id None.
+    `image_engine` = moteur effectif de la pub (« qwen_local » : Plan 1 sur Comfy, gratuit → ni
+    confirmation ni clé, sauf repli Nano Banana d'un Plan 1 sans réf quand le t2i est absent)."""
+    plan1_refs = [f.filename for f in files if f is not None and f.filename]
+    if shots and shots[0].get("refs_needed") == []:
+        plan1_refs = []   # plan neutre : aucune réf envoyée
+    # Hors boucle événementielle : sans réf, la disponibilité du t2i est vérifiée auprès de Comfy.
+    engine = await run_in_threadpool(local_images.plan1_engine, {"image_engine": image_engine}, plan1_refs)
+    paid = engine == "nano"
     # Confirmation coûts : les images Nano Banana sont payantes (OpenRouter).
-    if generate_first and not cfg.dry_run and not confirm:
+    if paid and generate_first and not cfg.dry_run and not confirm:
         raise HTTPException(400, "Confirmation requise avant de générer des images.")
-    if generate_first and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+    if paid and generate_first and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
 
     ad_id = db.create_ad(ad_name, "", _json(shots), kind=kind)
@@ -3226,8 +3278,10 @@ async def _start_plan_images(
         output_mode="objet_images", ref_paths=ref_paths, character_ref="",
     )
     return {
-        "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
+        "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run if paid else False,
         "plans_total": len(job_shots), "generated_now": len(first_only),
+        "image_engine": config_app.normalize_image_engine(image_engine),
+        "local_images": not paid,
     }
 
 
@@ -3336,6 +3390,20 @@ def _ad_shots_response(
     }
 
 
+def _images_paid(ad: dict[str, Any], clips: list[dict[str, Any]], *, has_anchor: bool) -> bool:
+    """Vrai si au moins une des images de ces plans passera par Nano Banana (payant) : pub en
+    Nano Banana, ou pub en « Qwen (local) » avec un plan SANS aucune image (ni ancre ni réf, ou
+    plan neutre) alors que le texte→image est absent de Comfy (repli Nano Banana)."""
+    if not local_images.is_local(ad):
+        return True
+    have_refs = bool(db.list_ref_images(int(ad["id"])))
+    for c in clips:
+        neutral = config_app.normalize_refs_needed(c.get("refs_needed")) == []
+        if (neutral or not (has_anchor or have_refs)) and local_images.needs_nano(ad, False):
+            return True
+    return False
+
+
 def _regenerate_image(
     clip_id: int, body: RegenerateIn, kind: str, kind_label: str, *, allow_prompt_edit: bool,
     correction: str = "",
@@ -3352,13 +3420,14 @@ def _regenerate_image(
     ad = db.get_ad(int(clip["ad_id"]))
     if ad is None or ad.get("kind") != kind:
         raise HTTPException(400, f"Ce plan n'appartient pas à {kind_label}.")
-    if not cfg.dry_run and not body.confirm:
-        raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
-    _raise_if_clips_busy(int(ad["id"]), [int(clip_id)])   # vidéo/retouche de ce plan en cours → 409
     # Cohérence : la référence (ancre validée sinon 1er plan validé) est passée en 1re image SI
     # elle existe et n'est pas le plan régénéré (le préfixe de cohérence dépend du kind, pipeline).
     ref = _consistency_ref(db.clips_for_ad(int(ad["id"])))
     character_ref = str(ref["image_path"]) if ref and int(ref["id"]) != clip_id else ""
+    paid = _images_paid(ad, [clip], has_anchor=bool(character_ref))
+    if paid and not cfg.dry_run and not body.confirm:
+        raise HTTPException(400, "Confirmation requise (régénérer une image coûte des crédits).")
+    _raise_if_clips_busy(int(ad["id"]), [int(clip_id)])   # vidéo/retouche de ce plan en cours → 409
 
     # Corrections NON empilées : la BASE du plan (sans correction) est stockée à part
     # (prompt_base) et seule la DERNIÈRE correction (last_correction) lui est ajoutée ; une
@@ -3408,15 +3477,19 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
 
     # --- Phase IMAGE : régénérer les images échouées (tous les pipelines passent par Nano Banana).
     if img_fail:
-        if not cfg.dry_run and not body.confirm:
+        ref = _consistency_ref(clips)
+        # Pub en « Qwen (local) » : images gratuites sur Comfy → ni confirmation, ni clé, ni plafond
+        # (sauf repli Nano Banana d'un plan sans image quand le texte→image est absent).
+        paid = _images_paid(ad, img_fail, has_anchor=ref is not None)
+        if paid and not cfg.dry_run and not body.confirm:
             raise HTTPException(400, "Confirmation requise (régénérer des images coûte des crédits).")
-        if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+        if paid and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
             raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
         est = cost.estimate_objet(len(img_fail))["usd_images"]
         if kind == "avatar_omni":   # keyframes : toujours Nano Banana Pro
             est = round(len(img_fail) * cost.omni_keyframe_image_usd(), 2)
-        _check_spend_cap(cfg, est, body.confirm_over_cap)
-        ref = _consistency_ref(clips)
+        if paid:
+            _check_spend_cap(cfg, est, body.confirm_over_cap)
         shots = [
             {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": keyframe_versions.effective_prompt(c),
              "refs_needed": c.get("refs_needed")}
@@ -3431,7 +3504,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
             character_ref=str(ref["image_path"]) if ref else "",
         )
         return {"ok": True, "job_id": job.id, "ad_id": ad_id, "phase": "images",
-                "n": len(img_fail), "dry_run": cfg.dry_run}
+                "n": len(img_fail), "dry_run": cfg.dry_run if paid else False}
 
     # --- Phase ANIMATION : réanimer les plans avec image non encore « pret » (skip pret automatique).
     if kind == "avatar_omni" and int(ad.get("pipeline_version") or 1) == 2:
@@ -3507,9 +3580,11 @@ def _run_consistency(
     ]
     if not targets:
         raise HTTPException(400, "Aucun autre plan à uniformiser (un seul plan ?).")
-    if not cfg.dry_run and not body.confirm:
+    # Pub en « Qwen (local) » : plans suivants sur Comfy (ancre en image 1), gratuits.
+    paid = _images_paid(ad, targets, has_anchor=True)
+    if paid and not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise (régénérer des images coûte des crédits).")
-    if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+    if paid and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
     shots = [
         {"clip_id": c["id"], "n": c["scene_n"], "prompt_image": keyframe_versions.effective_prompt(c),
@@ -3524,7 +3599,7 @@ def _run_consistency(
         ref_paths=db.list_ref_images(ad_id), character_ref=str(ref["image_path"]),
     )
     return {"ok": True, "job_id": job.id, "ad_id": ad_id, "n": len(targets),
-            "ref_plan": ref["scene_n"], "dry_run": cfg.dry_run}
+            "ref_plan": ref["scene_n"], "dry_run": cfg.dry_run if paid else False}
 
 
 def _set_clip_validation(clip_id: int, valide: bool) -> dict[str, Any]:

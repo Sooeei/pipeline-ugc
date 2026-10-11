@@ -37,6 +37,7 @@ from .providers import ProviderError
 WORKFLOWS_DIR = Path(__file__).resolve().parent / "comfy_workflows"
 VIDEO_WORKFLOW = "video_minimax_h3_i2v"
 IMAGE_WORKFLOW = "image_qwen_image_2_1_image_edit"
+T2I_WORKFLOW = "image_qwen_image_2_1_t2i"      # Qwen Image 2.1 texte→image (zone B, K6)
 DEFAULT_EXE = r"D:\IA\Comfy Desktop\Comfy Desktop.exe"
 DEFAULT_PORTS = (8188, 8000)
 
@@ -436,6 +437,86 @@ def build_image_workflow(image: str, refs: list[str], instruction: str, *, width
     else:
         _set(wf, name, "459:468", "switch", False)
     return wf
+
+
+def build_t2i_workflow(prompt: str, *, width: int = 1536, height: int = 2752, seed: int = 0,
+                       steps: int = 25) -> dict[str, Any]:
+    """Qwen Image 2.1 texte→image (aucune image d'entrée) : prompt tel quel, latent vide
+    width×height, seed et nombre d'étapes du KSampler."""
+    name = T2I_WORKFLOW
+    wf = copy.deepcopy(_load_template(name))
+    _set(wf, name, "459:452", "prompt", str(prompt or ""))
+    _set(wf, name, "459:456", "width", int(width))
+    _set(wf, name, "459:456", "height", int(height))
+    _set(wf, name, "459:458", "seed", int(seed))
+    _set(wf, name, "459:458", "steps", max(1, int(steps)))
+    return wf
+
+
+# Disponibilité du texte→image dans le Comfy de l'utilisateur, par url (GET /object_info, en
+# cache : un modèle installé ne disparaît pas pendant une session). `t2i_ready_cached` la relit.
+_T2I_READY: dict[str, bool] = {}
+
+
+def _object_info_choices(spec: Any) -> list[Any]:
+    """Valeurs permises d'une entrée COMBO (ancien format [[…]] ou nouveau ["COMBO", {options}])."""
+    if isinstance(spec, list | tuple) and spec:
+        if isinstance(spec[0], list | tuple):
+            return list(spec[0])
+        if len(spec) > 1 and isinstance(spec[1], dict):
+            return list(spec[1].get("options") or [])
+    return []
+
+
+def t2i_ready(url: str, *, refresh: bool = False) -> bool:
+    """Vrai si le Comfy à `url` peut exécuter le workflow texte→image : chaque nœud du template
+    existe (GET /object_info/<classe>) et chaque modèle des chargeurs (*_name) est installé.
+    Résultat mis en cache par url. Comfy injoignable → ComfyOffline (rien n'est mis en cache)."""
+    base = url.rstrip("/")
+    if not refresh and base in _T2I_READY:
+        return _T2I_READY[base]
+    try:
+        tpl = _load_template(T2I_WORKFLOW)
+    except ComfyError:
+        return False
+    infos: dict[str, Any] = {}
+    ok = True
+    for node in tpl.values():
+        ct = str(node.get("class_type") or "")
+        if ct not in infos:
+            try:
+                r = _http("GET", f"{base}/object_info/{ct}", timeout=HTTP_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001
+                if _is_conn_error(exc):
+                    raise ComfyOffline(OFFLINE_MSG) from exc
+                raise
+            body = _json(r) if 200 <= int(getattr(r, "status_code", 500)) < 300 else None
+            infos[ct] = (body or {}).get(ct) if isinstance(body, dict) else None
+        info = infos[ct]
+        if not isinstance(info, dict):
+            _log_detail(f"t2i : nœud {ct} absent de Comfy")
+            ok = False
+            break
+        required = ((info.get("input") or {}).get("required") or {})
+        for key, value in (node.get("inputs") or {}).items():
+            if not key.endswith("_name") or isinstance(value, list):
+                continue
+            if value not in _object_info_choices(required.get(key)):
+                _log_detail(f"t2i : modèle absent de Comfy ({ct}.{key} = {value})")
+                ok = False
+                break
+        if not ok:
+            break
+    _T2I_READY[base] = ok
+    return ok
+
+
+def t2i_ready_cached(url: str | None = None) -> bool | None:
+    """Dernier résultat connu de `t2i_ready` (url donnée, sinon le plus récent) ; None si jamais
+    vérifié. Aucun appel réseau."""
+    if url is not None:
+        return _T2I_READY.get(url.rstrip("/"))
+    return list(_T2I_READY.values())[-1] if _T2I_READY else None
 
 
 # --------------------------------------------------------------------------- exécution

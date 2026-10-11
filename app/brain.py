@@ -2513,6 +2513,20 @@ def with_no_camera_gear(positions: str) -> str:
     return f"{p} {NO_CAMERA_GEAR}".strip()
 
 
+# Style de tournage (K9) des prompts IMAGE (Nano Banana ET Qwen). « pose » = comportement
+# historique (téléphone fixe) : AUCUNE phrase ajoutée → prompts Nano strictement inchangés.
+# « selfie » : phrase de prompt_profiles + cadrage à bout de bras (positions de la bible).
+SELFIE_ARM_FRAMING = ("Selfie framing at arm's length: the speaking character holds the camera, "
+                      "one arm partly leaving the frame edge.")
+
+
+def shoot_style_image_line(style: str | None) -> str:
+    """Phrase de cadrage IMAGE du style de tournage ("" en « pose »)."""
+    if config_app.normalize_shoot_style(style) != "selfie":
+        return ""
+    return f"{prompt_profiles.shoot_style_line('selfie', 'image')} {SELFIE_ARM_FRAMING}"
+
+
 # ---------------------------------------------------------------- personnages VERBATIM
 # La description saisie par l'utilisateur (traduite littéralement) est insérée MOT POUR MOT dans
 # la bible : Claude ne peut que COMPLÉTER ce qui manque, jamais réécrire (ex. « Bright green eyes »

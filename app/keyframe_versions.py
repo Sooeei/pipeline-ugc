@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from . import config_app, db
+from . import config_app, db, local_images
 
 router = APIRouter()
 
@@ -615,6 +615,17 @@ def retouch(cfg: Any, clip_id: int, instruction: str, *, with_product_refs: bool
     style = pipeline.ad_style(ad) if ad.get("kind") == "avatar_omni" else ("3d" if ad.get("kind") == "objet" else "")
     folder = pipeline.objet_dir(int(ad["id"]), str(ad["name"]))
     dest = prepare_path(clip_id, folder, int(clip["scene_n"]))
+    if local_images.is_local(ad):
+        # Pub en « Qwen (local) » : même consigne VERBATIM, rendu Comfy (coût 0, aucun journal
+        # payant), version « local ». La simulation globale ne s'applique pas.
+        out = local_images.retouch_local(ad, clip, instr, refs[1:], dest)
+        entry = record(clip_id, out, "local", keyframe_source="qwen_local", note=instr)
+        res = apply_image(clip_id, str(out), keyframe_source="qwen_local")
+        db.log_activity(str(ad.get("kind") or "objet"),
+                        f"Plan {clip['scene_n']} : retouche locale « {instr[:80]} ».")
+        return {"ok": True, **res, "v": entry["v"], "image_url": _media_url(str(out)),
+                "prompt": local_images.retouch_prompt(ad, clip, instr, refs[1:]),
+                "filter_retry": False, "engine": "qwen_local"}
     kcfg = pipeline.omni_keyframe_cfg(cfg)   # retouche : toujours Nano Banana Pro
     note = instr
     with gen_trace.context(ad_id=int(ad["id"]), clip_id=clip_id, mode=gen_trace.mode_of_ad(ad),
@@ -749,11 +760,13 @@ def api_tool(clip_id: int, tool: str, body: RectIn | None = None) -> dict[str, A
 def api_retouch(clip_id: int, body: RetouchIn) -> dict[str, Any]:
     from .settings_service import load_provider_config
 
-    _clip_or_404(clip_id)
+    clip = _clip_or_404(clip_id)
     cfg = load_provider_config()
-    if not cfg.dry_run and not body.confirm:
+    # Pub en « Qwen (local) » : retouche gratuite sur Comfy → ni confirmation ni clé OpenRouter.
+    local = local_images.is_local(db.get_ad(int(clip["ad_id"])))
+    if not local and not cfg.dry_run and not body.confirm:
         raise HTTPException(400, "Confirmation requise (une retouche Nano Banana Pro est payante).")
-    if not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
+    if not local and not cfg.dry_run and not (cfg.openrouter_api_key or "").strip():
         raise HTTPException(400, "Clé API OpenRouter (Nano Banana) manquante (Réglages).")
     clip = db.get_clip(clip_id) or {}
     cur = str(clip.get("image_path") or "")
@@ -770,7 +783,7 @@ def api_retouch(clip_id: int, body: RetouchIn) -> dict[str, Any]:
 
     def _run(on_update: Any) -> dict[str, Any]:
         on_update({"scene": n, "phase": "image", "status": "en_cours",
-                   "message": f"Plan {n} : retouche en cours…"})
+                   "message": f"Plan {n} : retouche {'locale (Qwen) ' if local else ''}en cours…"})
         try:
             res = retouch(cfg, clip_id, body.instruction, with_product_refs=body.with_product_refs)
         except Exception as exc:
@@ -782,7 +795,8 @@ def api_retouch(clip_id: int, body: RetouchIn) -> dict[str, Any]:
 
     job = jobs.manager.start(cfg, int(clip["ad_id"]), str(ad.get("name") or ""), [{"n": n}], "",
                              output_mode="retouche", only_clip_id=clip_id, runner=_run)
-    return {"ok": True, "job_id": job.id, "clip_id": clip_id, "dry_run": cfg.dry_run}
+    return {"ok": True, "job_id": job.id, "clip_id": clip_id,
+            "dry_run": False if local else cfg.dry_run}
 
 
 _FACE_METHOD_LABELS = {

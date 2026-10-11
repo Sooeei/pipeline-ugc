@@ -430,7 +430,8 @@ def test_sources(c, fake):
     _wait(c, g["job_id"])
     s = c.get("/api/local/sources").json()
     ad = next(a for a in s["ads"] if a["id"] == ad_id)
-    assert ad["kind"] == "objet" and [p["ref"] for p in ad["plans"]] == [f"clip:{cid}"]
+    # plan sans image : cible possible (« Utiliser comme image du plan »), jamais source (ref None)
+    assert ad["kind"] == "objet" and [p["ref"] for p in ad["plans"]] == [f"clip:{cid}", None]
     assert ad["sheet"][0]["ref"] == f"adsheet:{ad_id}:face"
     cl = next(x for x in s["clients"] if x["id"] == pid)
     assert cl["photos"][0]["ref"] == f"preset:{pid}:profil"
@@ -555,3 +556,20 @@ def test_index_served_with_local_cache_bust(c):
     assert r.status_code == 200
     if "/static/local.js" in r.text:
         assert "/static/local.js?v=" in r.text
+
+
+def test_comfy_prompt_id_persisted_and_cancelled_after_restart(monkeypatch):
+    """Rendu Comfy d'un job interrompu par l'arrêt de l'app : prompt_id mémorisé en base, renvoyé
+    par recover_interrupted_jobs et annulé dans Comfy au démarrage."""
+    gid = db.local_gen_add(kind="image", status="en_cours", prompt="x", seed=1, params={},
+                           inputs=[], job_id="jobX", created_at=time.time())
+    db.local_gen_update(gid, comfy_prompt_id="pid-123")
+    db.job_inflight_add("jobX", 0, "local_image", [1])
+    rec = [r for r in db.recover_interrupted_jobs() if r["job_id"] == "jobX"]
+    assert rec and rec[0]["comfy_prompt_ids"] == ["pid-123"]
+    assert db.local_gen_get(gid)["status"] == "echec"
+    cancelled = []
+    monkeypatch.setattr(local_routes.comfy_local, "detect", lambda port=0, timeout=1.5: {"url": "http://x"})
+    monkeypatch.setattr(local_routes.comfy_local, "cancel", lambda url, pid: cancelled.append(pid))
+    local_routes.cancel_interrupted(["pid-123"])
+    assert cancelled == ["pid-123"]

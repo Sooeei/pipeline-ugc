@@ -270,9 +270,9 @@ def test_video_prompt_text_defaut():
 
 def test_video_prompt_text_direction_et_horaire():
     t = comfy_local.video_prompt_text("On ouvre à 9:30 !", "Sits cross-legged on the bed.")
-    assert "The person from Picture 1 sits cross-legged on the bed." in t
+    assert ("The person from Picture 1 sits cross-legged on the bed, looking straight into the camera "
+            "with a warm natural smile, hands resting calmly.") in t
     assert '"On ouvre à 9:30 !"' in t
-    assert "hands resting calmly" not in t     # la direction remplace la posture par défaut
 
 
 def test_video_prompt_text_sans_replique():
@@ -573,3 +573,9 @@ def test_templates_bruts_valides():
     for name in (comfy_local.VIDEO_WORKFLOW, comfy_local.IMAGE_WORKFLOW):
         api = json.loads((comfy_local.WORKFLOWS_DIR / f"{name}.api.json").read_text("utf-8"))
         assert _validate(api) == [], name
+
+
+def test_video_prompt_direction_with_hands_keeps_no_resting_hands():
+    t = comfy_local.video_prompt_text("Bonjour", "holds the jar near her face")
+    assert "holds the jar near her face, looking straight into the camera with a warm natural smile." in t
+    assert "hands resting calmly" not in t

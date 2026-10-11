@@ -820,3 +820,5 @@ label.inline select { margin: 0; min-width: 160px; }
   .local-gallery { grid-template-columns: 1fr; }
   .local-pick-grid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); }
 }
+
+.local-noimg { display: flex; align-items: center; justify-content: center; aspect-ratio: 9 / 16; background: var(--panel-2); color: var(--muted, #888); }

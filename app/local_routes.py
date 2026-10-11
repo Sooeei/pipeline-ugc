@@ -166,6 +166,9 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
     on_update({"scene": 1, "phase": "local", "status": "en_cours", "percent": 0})
 
     def _progress(ev: dict[str, Any]) -> None:
+        pid = str(ev.get("prompt_id") or "")
+        if pid and pid != st.get("prompt_id"):   # mémorisé en base : annulable après un redémarrage
+            db.local_gen_update(gen_id, comfy_prompt_id=pid)
         with _cond:
             for k in ("percent", "node", "node_label", "prompt_id", "phase"):
                 if k in ev:
@@ -198,6 +201,8 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
             wf = comfy_local.build_image_workflow(
                 image, refs, str(gen.get("prompt") or ""), width=params.get("width"),
                 height=params.get("height"), seed=int(gen["seed"]))
+        if cancel_ev.is_set():   # annulé pendant la détection / l'envoi des images
+            raise comfy_local.ComfyCancelled(CANCELLED_MSG)
         out = comfy_local.run(url, wf, dest_dir=out_dir(), stem=f"{gen_id}_{st['kind']}",
                               on_progress=_progress, should_cancel=cancel_ev.is_set)
     except comfy_local.ComfyCancelled:
@@ -501,14 +506,36 @@ def local_settings_post(body: LocalSettingsIn) -> dict[str, Any]:
                                auto_free=body.auto_free)
 
 
+def cancel_interrupted(prompt_ids: list[str]) -> None:
+    """Au démarrage : annule dans Comfy les rendus d'un job Local interrompu par l'arrêt de l'app
+    (sinon ils occupent le GPU et la génération suivante attend derrière). Jamais d'exception."""
+    if not prompt_ids:
+        return
+    try:
+        det = comfy_local.detect(int(load_local_settings()["comfy_port"] or 0))
+        if det:
+            for pid in prompt_ids:
+                comfy_local.cancel(str(det["url"]), pid)
+                _log_detail(f"[LOCAL] rendu Comfy orphelin annulé : {pid}")
+    except Exception as exc:  # noqa: BLE001 - le démarrage ne doit jamais échouer pour ça
+        _log_detail(f"[LOCAL] annulation des rendus orphelins impossible : {exc!r}")
+
+
 @router.get("/api/local/sources")
 def local_sources() -> dict[str, Any]:
     ads: list[dict[str, Any]] = []
     for ad in db.list_ads_with_clips():
-        plans = [{"clip_id": int(c["id"]), "scene_n": int(c["scene_n"]), "label": f"Plan {c['scene_n']}",
-                  "url": media.media_url(c["image_path"]), "ref": f"clip:{int(c['id'])}"}
-                 for c in ad["clips"]
-                 if c.get("image_path") and Path(str(c["image_path"])).is_file()]
+        # Plans AVEC image (sources d'image) + plans SANS image des pubs à images (cibles possibles
+        # de « Utiliser comme image du plan », url null : jamais proposés comme source).
+        plans = []
+        for c in ad["clips"]:
+            has_img = bool(c.get("image_path") and Path(str(c["image_path"])).is_file())
+            if not has_img and ad.get("kind") not in keyframe_versions.IMAGE_KINDS:
+                continue
+            plans.append({"clip_id": int(c["id"]), "scene_n": int(c["scene_n"]),
+                          "label": f"Plan {c['scene_n']}",
+                          "url": media.media_url(c["image_path"]) if has_img else None,
+                          "ref": f"clip:{int(c['id'])}" if has_img else None})
         sheet = [{"angle": p["angle"], "label": product_sheet.ANGLE_LABELS_FR.get(p["angle"], p["angle"]),
                   "url": media.media_url(p["path"]), "ref": f"adsheet:{int(ad['id'])}:{p['angle']}"}
                  for p in product_sheet.ad_sheet(ad)["photos"] if Path(p["path"]).is_file()]

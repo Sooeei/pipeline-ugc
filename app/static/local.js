@@ -146,7 +146,8 @@
   function thumbBtn(item, caption) {
     const i = picker.items.push(item) - 1;
     return `<button type="button" class="local-pick" data-pick="${i}" title="${esc(caption)}">` +
-      `<img src="${esc(item.url)}" alt="" loading="lazy" /><span>${esc(caption)}</span></button>`;
+      (item.url ? `<img src="${esc(item.url)}" alt="" loading="lazy" />` : `<span class="local-noimg">—</span>`) +
+      `<span>${esc(caption)}</span></button>`;
   }
   function pickerRender() {
     const body = $("localPickerBody");
@@ -163,19 +164,21 @@
     }
     let html = "";
     if (picker.tab === "plans") {
-      const ads = (s.ads || []).filter((a) => (a.plans || []).length);
+      // Plans sans image (url null) : seulement comme CIBLE (« Utiliser comme image du plan »).
+      const ads = (s.ads || []).filter((a) => (a.plans || []).some((p) => p.url || picker.mode === "plans"));
       if (picker.ad) {
         const a = picker.ad;
         html = `<p class="small"><b>${esc(a.name || "Pub #" + a.id)}</b> — choisis un plan :</p><div class="local-pick-grid">` +
-          a.plans.map((p) => thumbBtn({ ...p, ad_id: a.id, ad_name: a.name },
-            `Plan ${p.scene_n ?? "?"}${p.label ? " · " + p.label : ""}`)).join("") + `</div>`;
+          a.plans.filter((p) => p.url || picker.mode === "plans").map((p) => thumbBtn(
+            { ...p, ad_id: a.id, ad_name: a.name },
+            (p.label || `Plan ${p.scene_n ?? "?"}`) + (p.url ? "" : " (sans image)"))).join("") + `</div>`;
       } else if (!ads.length) {
         html = `<p class="muted">Aucune pub n'a encore de plan avec une image.</p>`;
       } else {
         html = `<div class="local-ad-list">` + ads.map((a) => {
-          const first = a.plans[0];
+          const first = a.plans.find((p) => p.url) || a.plans[0];
           return `<button type="button" class="local-ad" data-ad="${esc(a.id)}">` +
-            `<img src="${esc(first.url)}" alt="" loading="lazy" />` +
+            (first.url ? `<img src="${esc(first.url)}" alt="" loading="lazy" />` : `<span class="local-noimg">—</span>`) +
             `<span><b>${esc(a.name || "Pub #" + a.id)}</b><br><span class="muted small">` +
             `${esc(a.kind || "")} · ${a.plans.length} plan${a.plans.length > 1 ? "s" : ""}</span></span></button>`;
         }).join("") + `</div>`;

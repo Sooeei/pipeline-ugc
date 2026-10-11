@@ -62,9 +62,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Reprise après plantage : plans restés « en cours » → « échec — à relancer » (jamais de
     # relance automatique d'un appel payant).
     try:
+        orphans: list[str] = []
         for r in db.recover_interrupted_jobs():
             prov._log_detail(f"[REPRISE] job {r['job_id']} interrompu (pub {r['ad_id']}, "
                              f"{r['mode']}) : plans {r['reset']} remis « à relancer ».")
+            orphans += r.get("comfy_prompt_ids") or []
+        if orphans:   # rendus Comfy de la section Local : annulés en fond (Comfy peut être lent)
+            import threading
+
+            from . import local_routes
+
+            threading.Thread(target=local_routes.cancel_interrupted, args=(orphans,),
+                             daemon=True).start()
     except Exception as exc:  # noqa: BLE001 - la reprise ne doit jamais empêcher le démarrage
         prov._log_detail(f"[REPRISE] impossible : {exc!r}")
     _quiet_connection_resets()

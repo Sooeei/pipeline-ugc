@@ -304,7 +304,11 @@ def video_prompt_text(dialogue: str, direction: str) -> str:
 
     d = _clean_direction(direction)
     if d:
-        subject = f"The person from Picture 1 {d}."
+        # La direction remplace la posture par défaut ; regard caméra + sourire gardés, et mains
+        # au calme seulement si la direction ne dit rien des mains (jamais de geste ajouté).
+        hands = re.search(r"\b(hand|hands|holds?|holding|main|mains|tient|tenir)\b", d, re.I)
+        subject = (f"The person from Picture 1 {d}, looking straight into the camera with a warm "
+                   f"natural smile{'' if hands else ', hands resting calmly'}.")
     else:
         subject = (f"The person from Picture 1 {_DEFAULT_DIRECTION}, looking straight into the "
                    "camera with a warm natural smile, hands resting calmly.")

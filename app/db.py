@@ -1609,7 +1609,10 @@ LOCAL_INTERRUPTED_MSG = "Génération interrompue (serveur redémarré)"
 
 # ---------------------------------------------------------------- section « Local » (ComfyUI)
 _LOCAL_GEN_COLS = ("kind", "status", "prompt", "seed", "params", "inputs", "output_path", "error",
-                   "job_id", "parent_id", "created_at", "started_at", "finished_at")
+                   "job_id", "parent_id", "created_at", "started_at", "finished_at",
+                   "comfy_prompt_id")
+# id du prompt dans la file Comfy : après un redémarrage de l'app, le rendu orphelin est annulé.
+_MIGRATIONS.setdefault("local_gens", []).append(("comfy_prompt_id", "TEXT DEFAULT ''"))
 
 
 def local_gen_add(**fields: Any) -> int:
@@ -1710,13 +1713,18 @@ def recover_interrupted_jobs() -> list[dict[str, Any]]:
             ad_id = int(job["ad_id"])
             if mode.startswith("local_"):
                 # Section « Local » (ComfyUI) : aucune pub ni plan concerné → seule la génération
-                # locale passe en échec (pas d'activité « Pub #0 »).
+                # locale passe en échec (pas d'activité « Pub #0 »). Les prompts encore dans la
+                # file Comfy sont renvoyés (`comfy_prompt_ids`) pour être annulés côté Comfy.
+                pids = [str(r[0]) for r in con.execute(
+                    "SELECT comfy_prompt_id FROM local_gens WHERE job_id=? AND status IN "
+                    "('en_attente', 'en_cours') AND comfy_prompt_id != ''", (str(job["job_id"]),))]
                 con.execute(
                     "UPDATE local_gens SET status='echec', error=?, finished_at=? WHERE job_id=? "
                     "AND status IN ('en_attente', 'en_cours')",
                     (LOCAL_INTERRUPTED_MSG, time.time(), str(job["job_id"])),
                 )
-                out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": []})
+                out.append({"job_id": job["job_id"], "ad_id": ad_id, "mode": mode, "reset": [],
+                            "comfy_prompt_ids": pids})
                 continue
             try:
                 scene_ns = [int(n) for n in json.loads(job.get("scene_ns") or "[]")]

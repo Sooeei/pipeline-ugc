@@ -38,7 +38,7 @@ def test_free_port_and_instance_detection():
     assert main._running_instance_port() is None  # aucun PORT_FILE en test → pas d'instance
 
 
-def test_settings_and_avatars():
+def test_settings_dry_run_and_key_flags():
     with _client() as c:
         # force le mode simulation
         r = c.post("/api/settings", json={"dry_run": True, "gradium_api_key": "gd_test"})
@@ -46,20 +46,13 @@ def test_settings_and_avatars():
 
         s = c.get("/api/settings").json()
         assert s["dry_run"] is True
-
-        r = c.post("/api/avatars", json={"label": "maquilleuse_50", "avatar_id": "AV_REAL"})
-        assert r.status_code == 200
-        avs = r.json()["avatars"]
-        assert any(a["label"] == "maquilleuse_50" for a in avs)
-
-        rid = [a for a in avs if a["label"] == "maquilleuse_50"][0]["id"]
-        r = c.delete(f"/api/avatars/{rid}")
-        assert r.status_code == 200
+        assert s["gradium_api_key_set"] is True and "gradium_api_key" not in s   # jamais en clair
+        assert isinstance(s["voices"], list)
 
 
 def test_settings_empty_keeps_openrouter_and_xai_keys():
     """Régression : réenregistrer avec les champs OpenRouter/xAI VIDES ne doit PAS effacer les
-    clés déjà en base (« laisse vide = garder », comme Gradium/HeyGen/Anthropic)."""
+    clés déjà en base (« laisse vide = garder », comme Gradium/Anthropic)."""
     with _client() as c:
         # 1) enregistrement AVEC les deux clés
         r = c.post("/api/settings", json={"openrouter_api_key": "sk-or-v1-AAA", "xai_api_key": "xai-BBB"})
@@ -89,6 +82,8 @@ def test_test_connection_dry_run():
         r = c.post("/api/test-connection")
         assert r.status_code == 200
         assert r.json()["dry_run"] is True
+        assert set(r.json()) == {"dry_run", "gradium", "nano_banana", "grok", "kling", "gemini",
+                                 "anthropic"}
 
 
 def test_dashboard():
@@ -97,81 +92,10 @@ def test_dashboard():
         r = c.get("/api/dashboard")
         assert r.status_code == 200
         body = r.json()
-        # v2 : Gradium / HeyGen retirés ; soldes OpenRouter / xAI / ElevenLabs.
-        assert "gradium_credits" not in body and "heygen_quota" not in body
+        # v2 : soldes OpenRouter / xAI / ElevenLabs uniquement (plus de crédits Gradium ni de quota).
+        assert "gradium_credits" not in body and not any("quota" in k for k in body)
         assert {"openrouter", "xai", "elevenlabs"} <= set(body)
         assert "total_videos" in body
-
-
-def test_estimate():
-    with _client() as c:
-        r = c.post("/api/estimate", json={"scenes": [{"n": 1, "script": "un deux trois"}]})
-        assert r.status_code == 200
-        assert r.json()["scenes"] == 1
-
-
-def test_generate_and_library_dry_run():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
-        scenes = [
-            {"n": 1, "script": "Scène une.", "motion_prompt": "smile"},
-            {"n": 2, "script": "Scène deux.", "motion_prompt": "nod"},
-        ]
-        r = c.post(
-            "/api/generate",
-            json={"ad_name": "pubtest", "avatar_label": "av1", "scenes": scenes, "confirm": True},
-        )
-        assert r.status_code == 200, r.text
-        job_id = r.json()["job_id"]
-
-        # poll jusqu'à fin (max ~30 s)
-        state = "en_cours"
-        for _ in range(120):
-            snap = c.get(f"/api/jobs/{job_id}").json()
-            state = snap["state"]
-            if state not in ("en_cours", "en_attente"):
-                break
-            time.sleep(0.25)
-        assert state in ("termine", "partiel"), snap
-
-        lib = c.get("/api/library").json()
-        assert lib["ads"], "aucune pub en bibliothèque"
-        clips = lib["ads"][0]["clips"]
-        ready = [x for x in clips if x["status"] == "pret"]
-        assert ready, "aucun clip prêt"
-        assert ready[0]["media_url"], "media_url manquant"
-
-        # téléchargement
-        dl = c.get(f"/api/clips/{ready[0]['id']}/download")
-        assert dl.status_code == 200
-        assert dl.headers["content-type"].startswith("video/")
-
-
-def test_generate_rejects_missing_avatar():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        r = c.post(
-            "/api/generate",
-            json={"ad_name": "x", "avatar_label": "inexistant", "scenes": [{"n": 1, "script": "a"}]},
-        )
-        assert r.status_code == 400
-
-
-def test_generate_rejects_duplicate_scene_number():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
-        r = c.post(
-            "/api/generate",
-            json={
-                "ad_name": "x",
-                "avatar_label": "av1",
-                "scenes": [{"n": 1, "script": "a"}, {"n": 1, "script": "b"}],
-            },
-        )
-        assert r.status_code == 400
-        assert "double" in r.json()["detail"].lower()
 
 
 # ==================================================== OBJET ANIMÉ (Nano Banana + Grok, simulation)
@@ -185,53 +109,17 @@ def _wait_job(c, job_id, tries=120):
     return snap
 
 
-def test_generate_retry_reruns_only_failed_scenes():
-    from app import db
-
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "avR", "avatar_id": "AV_REAL"})
-        ad_id = db.create_ad("pub_retry", "avR", "[]", kind="avatar")
-        ok_clip = db.create_clip(ad_id, 1, "Scène une.", "smile")
-        db.update_clip(ok_clip, status="pret", mp4_path="deja.mp4")
-        bad_clip = db.create_clip(ad_id, 2, "Scène deux.", "nod")
-        db.update_clip(bad_clip, status="echec", error="boom")
-
-        r = c.post(f"/api/generate/retry/{ad_id}", json={"confirm": True})
-        assert r.status_code == 200, r.text
-        assert r.json()["retry"] == 1                     # seule la scène en échec est relancée
-        snap = _wait_job(c, r.json()["job_id"])
-        assert snap["state"] in ("termine", "partiel"), snap
-
-        clips = db.clips_for_ad(ad_id)
-        assert len(clips) == 2                            # AUCUN doublon (clip réutilisé)
-        by_n = {c["scene_n"]: c for c in clips}
-        assert by_n[2]["status"] == "pret"                # l'échec relancé a réussi (simulation)
-        assert by_n[1]["mp4_path"] == "deja.mp4"          # la scène déjà OK n'est pas retouchée
-
-
-def test_generate_retry_without_failures_is_400():
-    from app import db
-
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "avR", "avatar_id": "AV_REAL"})
-        ad_id = db.create_ad("pub_ok", "avR", "[]", kind="avatar")
-        db.update_clip(db.create_clip(ad_id, 1, "s", "m"), status="pret", mp4_path="x")
-        assert c.post(f"/api/generate/retry/{ad_id}", json={"confirm": True}).status_code == 400
-
-
 def test_download_ad_zip_numbered_in_order():
     import io
     import zipfile
 
     from app import db
-    from app.pipeline import ad_media_dir
+    from app.pipeline import objet_dir
 
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
-        ad_id = db.create_ad("ma_pub_zip", "av", "[]", kind="avatar")
-        folder = ad_media_dir(ad_id)
+        ad_id = db.create_ad("ma_pub_zip", "", "[]", kind="objet")
+        folder = objet_dir(ad_id, "ma_pub_zip")
         for n in (2, 1):  # créés dans le désordre → doivent sortir triés
             p = folder / f"{n}.mp4"
             p.write_bytes(b"FAKE-MP4-" + bytes([n]))
@@ -250,8 +138,35 @@ def test_download_ad_zip_empty_is_404():
     from app import db
 
     with _client() as c:
-        ad_id = db.create_ad("vide", "av", "[]", kind="avatar")
+        ad_id = db.create_ad("vide", "", "[]", kind="objet")
         assert c.get(f"/api/ads/{ad_id}/download").status_code == 404
+
+
+def test_clip_download_serves_ready_video():
+    """« Télécharger » un clip prêt (pub Objet animé) : fichier vidéo nommé <pub>_<n>.mp4 ;
+    404 si le clip n'a pas de vidéo ou n'existe pas."""
+    from app import db
+    from app.pipeline import objet_dir
+
+    with _client() as c:
+        ad_id = db.create_ad("pub_dl", "", "[]", kind="objet")
+        p = objet_dir(ad_id, "pub_dl") / "3.mp4"
+        p.write_bytes(b"FAKE-MP4")
+        ready = db.create_clip(ad_id, 3, "scene 3", "m")
+        db.update_clip(ready, mp4_path=str(p), status="pret")
+        no_video = db.create_clip(ad_id, 4, "scene 4", "m")
+
+        lib = c.get("/api/library").json()
+        clip = next(x for a in lib["ads"] if a["id"] == ad_id for x in a["clips"] if x["id"] == ready)
+        assert clip["status"] == "pret" and clip["media_url"], "media_url manquant"
+
+        dl = c.get(f"/api/clips/{ready}/download")
+        assert dl.status_code == 200
+        assert dl.headers["content-type"].startswith("video/")
+        assert "pub_dl_3.mp4" in dl.headers.get("content-disposition", "")
+        assert dl.content == b"FAKE-MP4"
+        assert c.get(f"/api/clips/{no_video}/download").status_code == 404
+        assert c.get("/api/clips/999999/download").status_code == 404
 
 
 def _mashup_gen_all(c, ad_id):
@@ -449,34 +364,6 @@ def test_gradium_voice_sample_generates_and_caches():
         # deuxième appel → servi depuis le cache disque (aucune nouvelle génération)
         r2 = c.post("/api/gradium/voices/v1/sample", json={}).json()
         assert r2["cached"] is True and r2["sample_url"] == r1["sample_url"]
-
-
-def test_heygen_avatars_simulation_returns_note():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        r = c.get("/api/heygen/avatars")
-        assert r.status_code == 200
-        j = r.json()
-        assert j.get("simulation") is True and j.get("avatars") == []
-
-
-def test_heygen_avatars_caches_to_disk(monkeypatch):
-    from app import providers
-
-    fake = {
-        "ok": True, "simulation": False,
-        "avatars": [{"avatar_id": "A1", "name": "Anna", "gender": "female",
-                     "preview_image_url": "http://x/a.png", "premium": False, "is_photo": False}],
-        "talking_photos": [{"avatar_id": "P1", "name": "Photo", "is_photo": True}],
-    }
-    monkeypatch.setattr(providers, "heygen_list_avatars_full", lambda cfg: fake)
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": False, "heygen_api_key": "k"})
-        r1 = c.get("/api/heygen/avatars?refresh=true").json()
-        assert r1["cached"] is False and r1["count"] == 2
-        # deuxième appel sans refresh → servi depuis le cache disque
-        r2 = c.get("/api/heygen/avatars").json()
-        assert r2["cached"] is True and len(r2["avatars"]) == 1 and len(r2["talking_photos"]) == 1
 
 
 def test_resume_no_failure_returns_400():
@@ -757,7 +644,7 @@ def test_download_passes_auth_header(monkeypatch):
     out = _P(tempfile.mkdtemp()) / "f.mp4"
     providers._download("https://x/y", str(out), headers={"Authorization": "Bearer z"})
     assert seen["headers"] == {"Authorization": "Bearer z"}
-    # sans headers → None (pipelines HeyGen/Grok inchangés)
+    # sans headers → None (téléchargements sans authentification inchangés)
     providers._download("https://x/y", str(out))
     assert seen["headers"] is None
 
@@ -1061,21 +948,6 @@ def test_audio_ads_never_in_library_even_before_terminal_status():
         assert all(a["name"] != "audio_en_cours" for a in lib["ads"])
 
 
-def test_generate_rejects_non_integer_scene_number():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
-        r = c.post(
-            "/api/generate",
-            json={
-                "ad_name": "x",
-                "avatar_label": "av1",
-                "scenes": [{"n": "intro", "script": "a"}],
-            },
-        )
-        assert r.status_code == 400
-
-
 def test_rejects_bad_host_header():
     with _client() as c:
         r = c.get("/api/health", headers={"host": "evil.example.com"})
@@ -1093,64 +965,6 @@ def test_settings_include_anthropic():
         assert s["brain_model"] == "claude-sonnet-5"
 
 
-def test_brain_generate_scenes_dry_run():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        r = c.post(
-            "/api/brain/generate-scenes",
-            json={
-                "script": "Première phrase du hook. Deuxième idée ici. Et une conclusion.",
-                "brief": "ton sincère",
-                "style": "avatar",
-                "avatar_label": "maquilleuse_50",
-            },
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert len(body["scenes"]) == 3
-        assert body["estimate"]["scenes"] == 3
-        assert body["dry_run"] is True
-
-
-def test_brain_generate_full_pipeline_dry_run():
-    """Parcours complet : cerveau -> scènes -> génération vidéos -> bibliothèque."""
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
-        brain_res = c.post(
-            "/api/brain/generate-scenes",
-            json={"script": "Phrase une. Phrase deux.", "brief": "", "style": "avatar",
-                  "avatar_label": "av1"},
-        ).json()
-        r = c.post(
-            "/api/generate",
-            json={"ad_name": "brainpub", "avatar_label": "av1",
-                  "scenes": brain_res["scenes"], "confirm": True},
-        )
-        assert r.status_code == 200, r.text
-        job_id = r.json()["job_id"]
-        state = "en_cours"
-        for _ in range(120):
-            snap = c.get(f"/api/jobs/{job_id}").json()
-            state = snap["state"]
-            if state not in ("en_cours", "en_attente"):
-                break
-            time.sleep(0.25)
-        assert state in ("termine", "partiel"), snap
-        lib = c.get("/api/library").json()
-        assert lib["ads"], "aucune pub en bibliothèque"
-
-
-def test_brain_style_bientot_rejected():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        r = c.post(
-            "/api/brain/generate-scenes",
-            json={"script": "Un texte.", "style": "voix_off", "avatar_label": "av"},
-        )
-        assert r.status_code == 400
-
-
 def test_voices_api_crud():
     with _client() as c:
         r = c.post("/api/voices", json={"label": "Voix Québec", "voice_id": "VID_X"})
@@ -1166,75 +980,6 @@ def test_voices_api_crud():
         assert not any(v["label"] == "Voix Québec" for v in r.json()["voices"])
 
 
-def test_settings_cost_mode_roundtrip():
-    with _client() as c:
-        c.post("/api/settings", json={"cost_mode": "classique", "dry_run": True})
-        assert c.get("/api/settings").json()["cost_mode"] == "classique"
-        # valeur invalide -> défaut premium
-        c.post("/api/settings", json={"cost_mode": "n_importe_quoi", "dry_run": True})
-        assert c.get("/api/settings").json()["cost_mode"] == "premium"
-
-
-def test_estimate_endpoint_returns_both_modes():
-    with _client() as c:
-        r = c.post("/api/estimate", json={"scenes": [{"n": 1, "script": "un deux trois quatre"}],
-                                          "mode": "classique"})
-        b = r.json()
-        assert b["credits_par_mode"]["premium"] > b["credits_par_mode"]["classique"]
-        assert b["credits_estimes"] == b["credits_par_mode"]["classique"]
-
-
-def test_generate_voices_only_dry_run():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "Robine", "avatar_id": "AV_REAL"})
-        c.post("/api/voices", json={"label": "Maude", "voice_id": "VID"})
-        r = c.post("/api/generate", json={
-            "ad_name": "pub_voix", "avatar_label": "Robine", "voice_label": "Maude",
-            "cost_mode": "voix_seules",  # 3e mode de sortie
-            "scenes": [{"n": 1, "script": "un"}, {"n": 2, "script": "deux"}],
-            "confirm": False,  # pas de confirmation crédits pour voix seules
-        })
-        assert r.status_code == 200, r.text
-        assert r.json()["voix_seules"] is True
-        jid = r.json()["job_id"]
-        state = "en_cours"
-        for _ in range(80):
-            snap = c.get(f"/api/jobs/{jid}").json()
-            state = snap["state"]
-            if state not in ("en_cours", "en_attente"):
-                break
-            time.sleep(0.1)
-        assert state == "termine", snap
-        assert snap["summary"].get("folder")          # dossier renseigné
-        assert "HeyGen" in snap["summary"].get("message", "")
-        # exclue de la Bibliothèque (finie à la main dehors)
-        lib = c.get("/api/library").json()
-        assert not any(a["name"] == "pub_voix" for a in lib["ads"])
-
-
-def test_voices_only_does_not_require_valid_avatar():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        # aucun avatar valide (label inexistant) : voix seules ne l'exige pas
-        r = c.post("/api/generate", json={
-            "ad_name": "p", "avatar_label": "Inconnu", "cost_mode": "voix_seules",
-            "scenes": [{"n": 1, "script": "a"}],
-        })
-        assert r.status_code == 200, r.text
-
-
-def test_generate_classique_mode_dry_run():
-    with _client() as c:
-        c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
-        c.post("/api/voices", json={"label": "v1", "voice_id": "VID"})
-        r = c.post("/api/generate", json={"ad_name": "x", "avatar_label": "av1", "voice_label": "v1",
-                                          "cost_mode": "classique", "scenes": [{"n": 1, "script": "a"}],
-                                          "confirm": True})
-        assert r.status_code == 200, r.text
-
-
 def test_voice_migrated_on_boot():
     # config.py fournit un GRADIUM_VOICE_ID → migré en 1re voix "Ma voix" au démarrage.
     with _client() as c:
@@ -1242,41 +987,39 @@ def test_voice_migrated_on_boot():
         assert any(v["label"] == "Ma voix" for v in s["voices"])
 
 
-def test_generate_with_voice_label_dry_run():
+def test_voiceover_with_voice_label_dry_run():
     with _client() as c:
         c.post("/api/settings", json={"dry_run": True})
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
         c.post("/api/voices", json={"label": "VoixTest", "voice_id": "VID_Y"})
         r = c.post(
-            "/api/generate",
-            json={"ad_name": "x", "avatar_label": "av1", "voice_label": "VoixTest",
-                  "scenes": [{"n": 1, "script": "une phrase"}], "confirm": True},
+            "/api/voiceover/generate",
+            json={"ad_name": "x", "voice_label": "VoixTest", "script": "une phrase"},
         )
         assert r.status_code == 200, r.text
+        assert _wait_job(c, r.json()["job_id"])["state"] == "termine"
 
 
-def test_generate_real_mode_requires_voice():
+def test_voiceover_real_mode_requires_voice():
     from app import db as _db
 
     with _client() as c:
-        c.post("/api/avatars", json={"label": "av1", "avatar_id": "AV_REAL"})
         # vider toutes les voix + le réglage legacy → aucune voix disponible
         for v in c.get("/api/settings").json()["voices"]:
             c.delete(f"/api/voices/{v['id']}")
         _db.set_setting("gradium_voice_id", "")
         c.post("/api/settings", json={"dry_run": False})
         r = c.post(
-            "/api/generate",
-            json={"ad_name": "x", "avatar_label": "av1",
-                  "scenes": [{"n": 1, "script": "a"}], "confirm": True},
+            "/api/voiceover/generate",
+            json={"ad_name": "x", "script": "a", "confirm": True},
         )
         assert r.status_code == 400
         assert "voix" in r.json()["detail"].lower()
+        assert _db.list_ads_with_clips() == []          # rien n'a été créé ni lancé
 
 
-def test_photos_gallery_lists_objet_images_and_excludes_avatar():
+def test_photos_gallery_lists_objet_images_and_excludes_audio():
     """Galerie Photos : les images « objet animé » apparaissent groupées par pub avec leur
-    prompt_image ; les pubs avatar/voix n'y sont pas."""
+    prompt_image ; les pubs audio (voix off) n'y sont pas."""
     from app import config_app, db
 
     with _client() as c:
@@ -1284,9 +1027,9 @@ def test_photos_gallery_lists_objet_images_and_excludes_avatar():
         cid = db.create_clip(ad_id, 1, "", "the character waves", "cute Lunia character, faithful label")
         img = str(config_app.MEDIA_DIR / "objet" / f"Lunia_{ad_id}" / "1.png")
         db.update_clip(cid, image_path=img, status="valide")
-        # une pub avatar ne doit PAS apparaître dans Photos
-        av = db.create_ad("avatar_pub", "Robine", "[]", kind="avatar")
-        db.create_clip(av, 1, "script", "motion", "")
+        # une pub audio (voix off) ne doit PAS apparaître dans Photos
+        av = db.create_ad("audio_pub", "", "[]", kind="audio")
+        db.create_clip(av, 1, "script", "", "")
 
         r = c.get("/api/photos")
         assert r.status_code == 200
@@ -1298,7 +1041,7 @@ def test_photos_gallery_lists_objet_images_and_excludes_avatar():
         assert im["prompt_image"] == "cute Lunia character, faithful label"
         assert im["image_url"] == f"/media/objet/Lunia_{ad_id}/1.png"
         assert im["video_url"] is None  # pas encore animé
-        assert all(a["id"] != av for a in ads)  # avatar exclu de Photos
+        assert all(a["id"] != av for a in ads)  # pub audio exclue de Photos
 
 
 def test_photos_image_download_endpoint():

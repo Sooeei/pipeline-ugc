@@ -67,10 +67,6 @@
         <!-- Étape 1 : style d'UGC -->
         <h2>1. Style d'UGC</h2>
         <div class="styles" id="styleCards">
-          <button class="style-card active" data-style="avatar">
-            <div class="style-emoji">🧍</div><div class="style-name">Avatar</div>
-            <div class="style-tag">disponible</div>
-          </button>
           <button class="style-card" data-style="objet_vivant">
             <div class="style-emoji">📦</div><div class="style-name">Objet animé</div>
             <div class="style-tag">disponible</div>
@@ -83,79 +79,12 @@
             <div class="style-emoji">🎬</div><div class="style-name">Mashup IA</div>
             <div class="style-tag">disponible</div>
           </button>
-          <button class="style-card" data-style="avatar_omni">
+          <button class="style-card active" data-style="avatar_omni">
             <div class="style-emoji">🧑</div><div class="style-name">Avatar IA (Omni)</div>
             <div class="style-tag">disponible</div>
             <div class="style-badge" title="Google n'évalue officiellement que l'anglais : le français fonctionne mais reste expérimental">🇫🇷 voix FR expérimentale</div>
           </button>
         </div>
-
-        <!-- ============ FLUX AVATAR ============ -->
-        <div id="avatarFlow">
-        <!-- Étape 2 : avatar + voix -->
-        <h2>2. Avatar &amp; voix</h2>
-        <div class="row grid2">
-          <label>Avatar <select id="avatarSelect"></select></label>
-          <label>Voix Gradium <select id="voiceSelect"></select></label>
-        </div>
-
-        <!-- Étape 3 : script + brief -->
-        <h2>3. Ton script &amp; ton brief</h2>
-        <label>Script (verbatim — jamais modifié)
-          <textarea id="scriptText" rows="7" placeholder="Colle ici le texte exact de ta pub…"></textarea>
-        </label>
-        <label>Brief (ton, persona, contexte — n'apparaît pas dans les clips)
-          <textarea id="briefText" rows="3" placeholder="Ex. maquilleuse québécoise 50 ans, ton sincère et posé, cible femmes 45-65…"></textarea>
-        </label>
-        <div class="row">
-          <button class="btn primary" id="brainBtn">🧠 Générer les scènes</button>
-          <button class="btn" id="importJsonBtn">Importer un scenes.json</button>
-          <input type="file" id="scenesFile" accept=".json" class="hidden" />
-        </div>
-        <div id="brainMsg" class="test-result"></div>
-
-        <!-- Étape 4 : scènes générées + coût -->
-        <div id="adPreview" class="hidden">
-          <h2>4. Scènes générées</h2>
-          <div class="row grid2">
-            <label>Nom de la pub <input type="text" id="adName" /></label>
-          </div>
-          <div class="scenes-preview" id="scenesPreview"></div>
-
-          <h2>5. Mode qualité / coût</h2>
-          <div class="modes" id="modeCards">
-            <button class="mode-card" data-mode="premium">
-              <div class="mode-name">💎 Premium</div>
-              <div class="mode-desc">Avatar V + mouvement custom · qualité max</div>
-              <div class="mode-cost" id="modeCostPremium">—</div>
-            </button>
-            <button class="mode-card" data-mode="classique">
-              <div class="mode-name">💠 Classique</div>
-              <div class="mode-desc">Avatar IV · gestes automatiques · moins cher</div>
-              <div class="mode-cost" id="modeCostClassique">—</div>
-            </button>
-            <button class="mode-card" data-mode="voix_seules">
-              <div class="mode-name">🎙️ Voix seules</div>
-              <div class="mode-desc">Voix Gradium seulement · tu finis dans HeyGen à la main</div>
-              <div class="mode-cost" id="modeCostVoix">0 crédit API</div>
-            </button>
-          </div>
-          <div class="estimate" id="estimate"></div>
-
-          <div class="row">
-            <button class="btn primary" id="generateBtn">🎬 Générer les vidéos</button>
-          </div>
-        </div>
-
-        <div id="progressArea" class="hidden">
-          <h2>Progression <span class="muted" style="font-size:13px;font-weight:400">— voix d'abord (2 max), puis vidéos en parallèle</span></h2>
-          <div id="progPhase" class="prog-phase"></div>
-          <div class="progressbar"><div class="progressbar-fill" id="progFill"></div></div>
-          <div class="prog-count" id="progCount"></div>
-          <ul class="scene-progress" id="sceneProgress"></ul>
-          <button class="btn danger-outline hidden" id="retryFailedBtn">🔁 Réessayer les scènes en échec</button>
-        </div>
-        </div><!-- /avatarFlow -->
 
         <!-- ============ FLUX OBJET ANIMÉ ============ -->
         <div id="objetFlow" class="hidden">
@@ -414,7 +343,7 @@
         </div><!-- /mashupFlow -->
 
         <!-- ============ FLUX AVATAR IA (Omni : Nano Banana → Google Gemini Omni, vidéo + voix) ============ -->
-        <div id="avatarOmniFlow" class="hidden">
+        <div id="avatarOmniFlow">
           <p class="muted">Une personne IA photoréaliste (adulte, visage générique) dit ton script face caméra.
             Google Omni génère la vidéo <b>et</b> la voix en une passe.
             <span class="ao-flag">🇫🇷 voix FR expérimentale</span> (Google n'évalue officiellement que l'anglais).</p>
@@ -834,17 +763,15 @@
           <button class="btn" id="refreshLib">↻ Rafraîchir</button>
         </header>
         <div class="subtabs">
-          <button class="subtab active" data-libtab="avatar">🎬 Avatar</button>
           <button class="subtab" data-libtab="objet">📦 Objet animé</button>
           <button class="subtab" data-libtab="mashup">🎬 Mashup IA</button>
-          <button class="subtab" data-libtab="avatar_omni">🧑 Avatar IA</button>
+          <button class="subtab active" data-libtab="avatar_omni">🧑 Avatar IA</button>
           <button class="subtab" data-libtab="voices">🎙️ Voix off</button>
           <button class="subtab" data-libtab="photos">🖼️ Photos</button>
         </div>
-        <div class="lib-panel" data-libpanel="avatar"><div id="libAvatarContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="objet"><div id="libObjetContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="mashup"><div id="libMashupContent"></div></div>
-        <div class="lib-panel hidden" data-libpanel="avatar_omni"><div id="libAvatarOmniContent"></div></div>
+        <div class="lib-panel" data-libpanel="avatar_omni"><div id="libAvatarOmniContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="voices"><div id="libVoicesContent"></div></div>
         <div class="lib-panel hidden" data-libpanel="photos"><div id="photosContent"></div></div>
       </section>
@@ -1231,7 +1158,6 @@
         <div class="card-block">
           <h2>Clés &amp; voix</h2>
           <label>Clé API Gradium <input type="password" id="gradiumKey" /></label>
-          <label>Clé API HeyGen <input type="password" id="heygenKey" /></label>
           <label>Clé API OpenRouter (Nano Banana — images « Objet animé », format sk-or-v1-…)
             <input type="password" id="openrouterKey" /></label>
           <label>Clé API xAI (Grok) — animation « Objet animé »
@@ -1263,17 +1189,8 @@
             </div>
           </fieldset>
           <label>Modèle Gradium <input type="text" id="gradiumModel" /></label>
-          <label>Format des voix off / voix seules
+          <label>Format des voix off
             <select id="audioFormat"></select>
-          </label>
-          <p class="muted">Le moteur HeyGen (Avatar V / Avatar IV) est choisi par le mode
-            qualité/coût ci-dessus, plus le mode « par pub » dans Nouvelle pub.</p>
-          <label>voice_id HeyGen (optionnel) <input type="text" id="heygenVoiceId" /></label>
-          <label>Mode qualité / coût par défaut
-            <select id="costModeDefault">
-              <option value="premium">Premium — Avatar V + mouvement custom (~4 cr/s, plus cher)</option>
-              <option value="classique">Classique — Avatar IV, gestes auto (~1,5 cr/s, moins cher)</option>
-            </select>
           </label>
           <label>Modèle d'image « Objet animé » (Nano Banana / Gemini)
             <select id="objetImageModel"></select>
@@ -1337,33 +1254,6 @@
         </div>
 
         <div class="card-block">
-          <h2>Avatars</h2>
-          <p class="muted">Plusieurs avatars possibles : un label + son avatar_id (déjà créé sur HeyGen).</p>
-          <ul class="avatars" id="avatarsList"></ul>
-          <div class="row grid2">
-            <input type="text" id="newAvatarLabel" placeholder="label (ex. maquilleuse_50)" />
-            <input type="text" id="newAvatarId" placeholder="avatar_id HeyGen" />
-          </div>
-          <div class="row">
-            <button class="btn" id="addAvatar">+ Ajouter</button>
-            <button class="btn" id="browseHeygenBtn" type="button">🖼️ Parcourir les avatars HeyGen</button>
-          </div>
-          <div id="heygenPicker" class="heygen-picker hidden">
-            <div class="row">
-              <input type="search" id="heygenSearch" placeholder="Rechercher un avatar par nom…" />
-              <select id="heygenGender">
-                <option value="">Tous genres</option>
-                <option value="male">Homme</option>
-                <option value="female">Femme</option>
-              </select>
-              <button class="btn small" id="heygenRefresh" type="button" title="Rafraîchir depuis HeyGen (lent)">↻ Rafraîchir</button>
-            </div>
-            <div id="heygenMsg" class="muted"></div>
-            <div id="heygenGrid" class="heygen-grid"></div>
-          </div>
-        </div>
-
-        <div class="card-block">
           <h2>Voix Gradium</h2>
           <p class="muted">Plusieurs voix possibles : un label lisible + son voice_id Gradium (voix clonée).</p>
           <ul class="avatars" id="voicesList"></ul>
@@ -1375,7 +1265,7 @@
             <button class="btn" id="addVoice">+ Ajouter</button>
             <button class="btn" id="browseVoicesBtn" type="button">🎙️ Parcourir les voix Gradium</button>
           </div>
-          <div id="voicePicker" class="heygen-picker hidden">
+          <div id="voicePicker" class="picker-box hidden">
             <div class="row">
               <input type="search" id="voiceSearch" placeholder="Rechercher (nom, description)…" />
               <select id="voiceLang"><option value="">Toutes langues</option></select>

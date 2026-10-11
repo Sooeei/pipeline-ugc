@@ -1,12 +1,11 @@
-"""Orchestration d'une pub : pour chaque scène, voix → upload → rendu → clip.
+"""Orchestration d'une pub (images, animation, voix off, Avatar IA).
 
-S'appuie sur app/providers.py. Résilient : une scène en échec n'interrompt pas les
+S'appuie sur app/providers.py. Résilient : un plan en échec n'interrompt pas les
 autres. Émet des événements de progression via `on_update`.
 """
 
 from __future__ import annotations
 
-import html
 import json
 import math
 import os
@@ -44,9 +43,6 @@ from .providers import (
     build_grok_prompt,
     gradium_tts,
     grok_generate_video,
-    heygen_create_video,
-    heygen_render_to_file,
-    heygen_upload_audio,
     kling_generate_video,
     nano_banana_generate_image,
     omni_extend_video,
@@ -146,133 +142,7 @@ def _safe_worker(worker: Callable[[dict[str, Any]], bool], item: dict[str, Any])
         return False
 
 
-def _parallel_map(
-    items: list[dict[str, Any]],
-    worker: Callable[[dict[str, Any]], Any],
-    max_parallel: int,
-) -> list[Any]:
-    """Applique `worker(item)` EN PARALLÈLE (au plus `max_parallel` à la fois) et renvoie les
-    résultats DANS L'ORDRE des items. Le worker gère ses propres erreurs (il ne doit pas lever)."""
-    if not items:
-        return []
-    workers = max(1, min(int(max_parallel or 1), len(items)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gen") as ex:
-        return list(ex.map(worker, items))
-
-
-def ad_media_dir(ad_id: int) -> Path:
-    d = config_app.MEDIA_DIR / f"ad_{ad_id}"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _voice_one_scene(
-    cfg: ProviderConfig, ad_id: int, out_dir: Path, s: dict[str, Any], emit: UpdateFn,
-) -> dict[str, Any]:
-    """PHASE 1 — génère la VOIX Gradium d'UNE scène (retry auto sur échec ponctuel, ex. la
-    limite de sessions simultanées Gradium). Renvoie {n, clip_id, motion, wav, ok}. Ne lève
-    jamais : un échec est signalé par ok=False. Réutilise le clip existant (relance des échoués)."""
-    n = int(s["n"])
-    script = str(s["script"])          # VERBATIM : jamais modifié
-    motion = str(s.get("motion_prompt", ""))
-    clip_id = int(s["clip_id"]) if s.get("clip_id") else db.create_clip(ad_id, n, script, motion)
-    wav = out_dir / f"{n}.wav"
-    emit({"scene": n, "phase": "voix", "status": "en_cours"})
-    last: Exception | None = None
-    for attempt in range(max(1, config_app.GRADIUM_TTS_RETRIES)):
-        try:
-            # Voix intermédiaire de l'avatar : TOUJOURS en WAV (HeyGen exige un upload WAV/x-wav).
-            gradium_tts(cfg, script, wav, fmt="wav")
-            db.update_clip(clip_id, wav_path=str(wav), status="voix_pret", error=None)
-            if not cfg.dry_run:
-                cost.record_gradium_tts(ad_id)
-            # Voix prête : la scène reste « en cours » (la vidéo suivra en phase 2).
-            emit({"scene": n, "phase": "voix_ok", "status": "en_cours", "voice_ok": True})
-            return {"n": n, "clip_id": clip_id, "motion": motion, "script": script,
-                    "wav": wav, "ok": True}
-        except Exception as exc:  # noqa: BLE001 - on réessaie (concurrency Gradium ponctuelle)
-            last = exc
-            if attempt + 1 < config_app.GRADIUM_TTS_RETRIES:
-                time.sleep(1.5 * (attempt + 1))
-    _emit_clip_failure(emit, clip_id, n, last)
-    return {"n": n, "clip_id": clip_id, "motion": motion, "script": script, "wav": wav, "ok": False}
-
-
-def _render_one_video(
-    cfg: ProviderConfig, ad_id: int, ad_name: str, out_dir: Path,
-    prep: dict[str, Any], avatar_id: str, emit: UpdateFn,
-) -> bool:
-    """PHASE 2 — rend la VIDÉO HeyGen d'UNE scène à partir de sa voix DÉJÀ générée (upload audio
-    + motion prompt). Lancée en parallèle (HeyGen accepte plusieurs rendus simultanés)."""
-    n = int(prep["n"])
-    clip_id = int(prep["clip_id"])
-    script = str(prep["script"])
-    motion = str(prep.get("motion", ""))
-    wav = prep["wav"]
-    mp4 = out_dir / f"{n}.mp4"
-    try:
-        emit({"scene": n, "phase": "upload", "status": "en_cours", "voice_ok": True})
-        asset = heygen_upload_audio(cfg, wav)
-        emit({"scene": n, "phase": "rendu", "status": "en_cours", "voice_ok": True})
-        with gen_trace.context(ad_id=ad_id, clip_id=clip_id, mode=gen_trace.MODE_AVATAR, step="video"):
-            vid = heygen_create_video(cfg, avatar_id, asset, motion, f"{ad_name}_{n:02d}",
-                                      seconds=len(script.split()) / cost.WORDS_PER_SEC)
-        heygen_render_to_file(cfg, vid, mp4, scene_label=f"scene {n}")
-        if not cfg.dry_run:
-            cost.record_heygen_clip(ad_id, len(script.split()) / cost.WORDS_PER_SEC, cfg.cost_mode)
-        db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)
-        emit({"scene": n, "phase": "pret", "status": "ok", "mp4": str(mp4), "voice_ok": True})
-        return True
-    except Exception as exc:  # noqa: BLE001 - une scène en échec ne bloque pas les autres
-        return _emit_clip_failure(emit, clip_id, n, exc, extra={"voice_ok": True})
-
-
-def generate_ad(
-    cfg: ProviderConfig,
-    ad_id: int,
-    ad_name: str,
-    scenes: list[dict[str, Any]],
-    avatar_id: str,
-    on_update: UpdateFn | None = None,
-    is_retry: bool = False,
-) -> dict[str, Any]:
-    """Génération avatar en 2 PHASES (Gradium limite les sessions TTS simultanées, HeyGen non) :
-      PHASE 1 — TOUTES les voix Gradium d'abord, 2 par 2 (GRADIUM_MAX_PARALLEL), retry auto.
-                On ATTEND que toutes les voix soient prêtes.
-      PHASE 2 — PUIS toutes les vidéos HeyGen EN PARALLÈLE (HEYGEN_MAX_PARALLEL), chacune
-                réutilisant la voix déjà générée de sa scène.
-    Une scène dont la voix échoue n'est pas envoyée en phase 2 et compte comme échec."""
-    emit = on_update or _noop
-    out_dir = ad_media_dir(ad_id)
-
-    # ---- PHASE 1 : voix Gradium (file bornée à 2) ----
-    emit({"job_phase": "voix"})
-    prepared = _parallel_map(
-        scenes,
-        lambda s: _voice_one_scene(cfg, ad_id, out_dir, s, emit),
-        config_app.GRADIUM_MAX_PARALLEL,
-    )
-    ready = [p for p in prepared if p.get("ok")]
-    voice_ko = len(prepared) - len(ready)
-
-    # ---- PHASE 2 : vidéos HeyGen (en parallèle) ----
-    emit({"job_phase": "videos"})
-    video_results = _parallel_map(
-        ready,
-        lambda p: _render_one_video(cfg, ad_id, ad_name, out_dir, p, avatar_id, emit),
-        config_app.HEYGEN_MAX_PARALLEL,
-    )
-    ok = sum(1 for r in video_results if r)
-    ko = voice_ko + (len(ready) - ok)   # voix ratées + vidéos ratées
-
-    status = "termine" if ko == 0 else ("partiel" if ok else "echec")
-    db.set_ad_status(ad_id, status)
-    verb = "Relance" if is_retry else "Pub"
-    db.log_activity("generation", f"{verb} « {ad_name} » : {ok} ok, {ko} en échec.")
-    return {"ok": ok, "echec": ko, "status": status, "ad_id": ad_id}
-
-
-# ==================================================================== VOIX SEULES
+# ==================================================================== DOSSIERS DE SORTIE
 # Noms de périphériques réservés par Windows : interdits même comme nom de dossier.
 _WIN_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
@@ -306,48 +176,6 @@ def _unique_pub_dir(base_dir: Path, ad_id: int, ad_name: str) -> Path:
     return d
 
 
-def voices_dir(ad_id: int, ad_name: str) -> Path:
-    """Dossier de sortie « voix seules », nommé d'après la pub (sans écrasement)."""
-    return _unique_pub_dir(config_app.VOICES_DIR, ad_id, ad_name)
-
-
-def _write_recap(
-    folder: Path, ad_name: str, avatar_label: str, scenes: list[dict[str, Any]], ext: str = "mp3"
-) -> Path:
-    """Récap HTML lisible : par scène numérotée, le script verbatim + le motion prompt."""
-    rows = []
-    for s in scenes:
-        n = int(s["n"])
-        script = html.escape(str(s["script"]))
-        motion = html.escape(str(s.get("motion_prompt", "")))
-        rows.append(
-            f'<div class="scene"><h3>Scène {n} <span class="wav">→ audio : {n}.{ext}</span></h3>'
-            f'<p class="lbl">Script (lu par l\'avatar, verbatim) :</p><p class="script">{script}</p>'
-            f'<p class="lbl">Motion prompt (à coller dans HeyGen) :</p>'
-            f'<p class="motion">{motion or "—"}</p></div>'
-        )
-    style = (
-        "body{font-family:Segoe UI,system-ui,sans-serif;max-width:820px;margin:24px auto;"
-        "padding:0 16px;color:#1a1a1a}h1{margin-bottom:4px}.hint{background:#eef3ff;border:1px "
-        "solid #cdd9f5;padding:12px 14px;border-radius:8px}.scene{border:1px solid #e2e2e2;"
-        "border-radius:10px;padding:12px 16px;margin:14px 0}.scene h3{margin:0 0 8px}.wav{font-"
-        "weight:400;color:#2a6;font-size:14px}.lbl{color:#666;font-size:13px;margin:8px 0 2px}"
-        ".script{font-size:16px;margin:0}.motion{font-style:italic;color:#333;margin:0}"
-    )
-    doc = (
-        f'<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>{html.escape(ad_name)} — récap voix</title><style>{style}</style></head><body>"
-        f"<h1>{html.escape(ad_name)}</h1>"
-        f"<p>Avatar : <b>{html.escape(avatar_label or '—')}</b> · Format 9:16 vertical</p>"
-        f'<p class="hint">Dans HeyGen, pour CHAQUE scène et dans l\'ordre : dépose l\'audio '
-        f"<b>N.{ext}</b> (à côté de ce fichier) puis colle le <b>motion prompt N</b> ci-dessous.</p>"
-        f"{''.join(rows)}</body></html>"
-    )
-    path = folder / "recap.html"
-    path.write_text(doc, encoding="utf-8")
-    return path
-
-
 def _open_folder(folder: Path) -> None:
     """Ouvre le dossier dans l'explorateur Windows (désactivé en test via UGC_NO_OPEN)."""
     if os.environ.get("UGC_NO_OPEN") == "1":
@@ -359,55 +187,6 @@ def _open_folder(folder: Path) -> None:
         opener(str(folder))
     except Exception:  # noqa: BLE001
         pass
-
-
-def generate_voices_only(
-    cfg: ProviderConfig,
-    ad_id: int,
-    ad_name: str,
-    scenes: list[dict[str, Any]],
-    on_update: UpdateFn | None = None,
-    avatar_label: str = "",
-) -> dict[str, Any]:
-    """Mode « Voix seules » : voix Gradium par scène → N.wav + recap.html, SANS appeler
-    l'API vidéo HeyGen (0 crédit API). Ouvre le dossier à la fin."""
-    emit = on_update or _noop
-    folder = voices_dir(ad_id, ad_name)
-    ok, ko = 0, 0
-
-    for s in scenes:
-        n = int(s["n"])
-        script = str(s["script"])           # VERBATIM : jamais modifié
-        motion = str(s.get("motion_prompt", ""))
-        clip_id = db.create_clip(ad_id, n, script, motion)
-        ext = config_app.audio_ext(cfg.audio_format)
-        out = folder / f"{n}.{ext}"
-        try:
-            emit({"scene": n, "phase": "voix", "status": "en_cours"})
-            audio_path = gradium_tts(cfg, script, out)   # MP3 par défaut ; renvoie le chemin réel
-            if not cfg.dry_run:
-                cost.record_gradium_tts(ad_id)
-            db.update_clip(clip_id, wav_path=audio_path, status="voix_pret", error=None)
-            emit({"scene": n, "phase": "pret", "status": "ok", "wav": audio_path})
-            ok += 1
-        except Exception as exc:  # noqa: BLE001 - une scène en échec ne bloque pas les autres
-            _emit_clip_failure(emit, clip_id, n, exc)
-            ko += 1
-
-    recap = _write_recap(folder, ad_name, avatar_label, scenes, ext=config_app.audio_ext(cfg.audio_format))
-    db.set_ad_status(ad_id, "voix_seules")
-    db.log_activity(
-        "voix_seules", f"Voix seules « {ad_name} » : {ok} ok, {ko} en échec → {folder}"
-    )
-    _open_folder(folder)
-    message = (
-        f"Voix générées (0 crédit API). Va dans HeyGen → avatar {avatar_label or 'ton avatar'} "
-        "→ pour chaque scène, dépose l'audio N + colle le motion prompt N, dans l'ordre."
-    )
-    return {
-        "ok": ok, "echec": ko, "status": "voix_seules",
-        "folder": str(folder), "recap": str(recap), "message": message,
-    }
 
 
 # ==================================================================== OBJET ANIMÉ (images)
@@ -2785,7 +2564,7 @@ def split_voiceover(script: str, max_chars: int = config_app.GRADIUM_MAX_CHARS) 
     Si le script tient en une session (≤ max_chars) → un seul segment. Sinon on regroupe des
     phrases entières par paquets ≤ max_chars (découpe au mot si une phrase est démesurée).
     Le texte des mots/ponctuation est préservé (seuls les espaces de frontière varient), ce
-    que le garde-fou verbatim (brain.verbatim_ok) tolère.
+    que le garde-fou verbatim (brain.dialogue_verbatim_ok) tolère.
     """
     text = script.strip()
     if not text:
@@ -2828,7 +2607,7 @@ def voiceover_verbatim_ok(original: str, segments: list[str]) -> bool:
     `split_voiceover` est déterministe et ne fait que COUPER (jamais fusionner/réordonner) :
     la seule différence possible avec l'original est la disparition de certains espaces de
     frontière. On valide donc que le contenu NON-BLANC (mots + ponctuation, dans l'ordre) est
-    identique des deux côtés. (Le garde-fou global brain.verbatim_ok, lui, suppose un espace
+    identique des deux côtés. (Le garde-fou global brain.dialogue_verbatim_ok, lui, suppose un espace
     de frontière uniforme et rejette à tort les découpes mixtes phrase + coupe mi-token.)
     """
     return "".join(original.split()) == "".join("".join(segments).split())

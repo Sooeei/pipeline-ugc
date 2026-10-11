@@ -1,7 +1,7 @@
 """Import unique des valeurs de config.py vers la base, au tout premier lancement.
 
 On ne réécrit rien si des réglages existent déjà. Ainsi l'utilisateur retrouve ce
-qu'il avait mis dans config.py (clés, voice_id, avatars) directement dans l'UI.
+qu'il avait mis dans config.py (clés, voice_id) directement dans l'UI.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def seed_from_config_if_empty() -> bool:
     if db.get_setting("seeded", "") == "1":
         return False
     # Base d'une version antérieure avec des clés déjà présentes → ne rien réimporter.
-    if any(existing.get(k) for k in ("gradium_api_key", "heygen_api_key", "anthropic_api_key")):
+    if any(existing.get(k) for k in ("gradium_api_key", "anthropic_api_key")):
         db.set_setting("seeded", "1")
         return False
 
@@ -65,19 +65,11 @@ def seed_from_config_if_empty() -> bool:
         return "" if (not v or "xxxx" in v.lower()) else v
 
     db.set_setting("gradium_api_key", _key("GRADIUM_API_KEY"))
-    db.set_setting("heygen_api_key", _key("HEYGEN_API_KEY"))
     # Objet animé : clés Google (Nano Banana) et xAI (Grok) saisies via Réglages (pas seedées).
     db.set_setting("anthropic_api_key", _key("ANTHROPIC_API_KEY"))
     db.set_setting("gradium_voice_id", _s("GRADIUM_VOICE_ID"))
     db.set_setting("gradium_model", _s("GRADIUM_MODEL", config_app.DEFAULT_GRADIUM_MODEL))
-    db.set_setting("heygen_voice_id", _s("HEYGEN_VOICE_ID"))
     db.set_setting("brain_model", _s("BRAIN_MODEL", config_app.DEFAULT_BRAIN_MODEL))
-
-    avatars = getattr(cfg, "AVATARS", {}) or {}
-    if isinstance(avatars, dict) and not db.list_avatars():
-        for label, avatar_id in avatars.items():
-            if label and avatar_id:
-                db.add_avatar(str(label), str(avatar_id))
 
     db.set_setting("seeded", "1")
     db.log_activity("systeme", "Réglages importés depuis config.py")

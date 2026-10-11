@@ -184,7 +184,11 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     if (sec === "library") loadLibrary();
     if (sec === "costs") loadCosts();
     if (sec === "settings") loadSettings();
-    if (sec === "new") { populateNewPubSelectors(); objClientRefresh(); }
+    if (sec === "new") {
+      // Réglages chargés d'abord, puis initialisation du flux affiché (Avatar IA par défaut).
+      populateNewPubSelectors().catch(() => {}).then(() => applyStyleFlow(selectedStyle));
+      objClientRefresh();
+    }
     if (sec === "clients") loadClientsPanel();
   });
 });
@@ -214,7 +218,6 @@ async function loadSettings() {
   const s = await api("/api/settings");
   currentSettings = s;
   setKeyField("gradiumKey", s.gradium_api_key_set);
-  setKeyField("heygenKey", s.heygen_api_key_set);
   setKeyField("openrouterKey", s.openrouter_api_key_set);
   setKeyField("xaiKey", s.xai_api_key_set);
   setKeyField("anthropicKey", s.anthropic_api_key_set);
@@ -223,9 +226,7 @@ async function loadSettings() {
   if ($("geminiKey")) setKeyField("geminiKey", s.gemini_api_key_set);
   if ($("elevenlabsKey")) setKeyField("elevenlabsKey", s.elevenlabs_api_key_set);
   $("gradiumModel").value = s.gradium_model || "default";
-  $("heygenVoiceId").value = s.heygen_voice_id || "";
   $("brainModel").value = s.brain_model || "claude-sonnet-5";
-  $("costModeDefault").value = s.cost_mode || "premium";
   // Menu du modèle d'image « Objet animé » (options fournies par le serveur).
   const imgSel = $("objetImageModel");
   imgSel.innerHTML = "";
@@ -288,7 +289,6 @@ async function loadSettings() {
   }
   if ($("driftThreshold")) $("driftThreshold").value = s.drift_threshold ?? 0.8;
   setModeBadge(!!s.dry_run);
-  renderAvatars(s.avatars || []);
   renderVoices(s.voices || []);
   renderMashStyleChips(s.mashup_style_suggestions || []);
 }
@@ -368,24 +368,6 @@ function renderMashStyleChips(suggestions) {
   });
 }
 
-function renderAvatars(avatars) {
-  const ul = $("avatarsList");
-  ul.innerHTML = "";
-  if (!avatars.length) ul.innerHTML = '<li class="muted">Aucun avatar pour le moment.</li>';
-  avatars.forEach((a) => {
-    const li = document.createElement("li");
-    li.innerHTML =
-      `<span class="lab">${esc(a.label)}</span><span class="aid">${esc(a.avatar_id)}</span>` +
-      `<button class="del" title="Supprimer">✕</button>`;
-    li.querySelector(".del").addEventListener("click", async () => {
-      const res = await api("/api/avatars/" + a.id, { method: "DELETE" });
-      renderAvatars(res.avatars);
-      toast("Avatar supprimé.");
-    });
-    ul.appendChild(li);
-  });
-}
-
 function renderVoices(voices) {
   const ul = $("voicesList");
   ul.innerHTML = "";
@@ -408,11 +390,9 @@ function renderVoices(voices) {
 $("saveSettings").addEventListener("click", async () => {
   const body = {
     gradium_api_key: $("gradiumKey").value.trim(),
-    heygen_api_key: $("heygenKey").value.trim(),
     openrouter_api_key: $("openrouterKey").value.trim(),
     xai_api_key: $("xaiKey").value.trim(),
     gradium_model: $("gradiumModel").value.trim(),
-    heygen_voice_id: $("heygenVoiceId").value.trim(),
     anthropic_api_key: $("anthropicKey").value.trim(),
     brain_engine: brainEngineValue(),
     claude_code_token: $("claudeCodeToken") ? $("claudeCodeToken").value.trim() : "",
@@ -420,7 +400,6 @@ $("saveSettings").addEventListener("click", async () => {
     gemini_api_key: ($("geminiKey") && $("geminiKey").value.trim()) || "",   // vide = garder
     elevenlabs_api_key: ($("elevenlabsKey") && $("elevenlabsKey").value.trim()) || "",   // vide = garder
     brain_model: $("brainModel").value.trim(),
-    cost_mode: $("costModeDefault").value,
     objet_image_model: $("objetImageModel").value,
     nb_image_size: ($("nbImageSize") && $("nbImageSize").value) || "2K",
     objet_video_model: $("objetVideoModel").value,
@@ -448,106 +427,6 @@ $("saveSettings").addEventListener("click", async () => {
   await loadSettings(); // rafraîchit les indicateurs « clé enregistrée »
   toast("Réglages enregistrés ✓");
 });
-
-$("addAvatar").addEventListener("click", async () => {
-  const label = $("newAvatarLabel").value.trim();
-  const avatar_id = $("newAvatarId").value.trim();
-  if (!label || !avatar_id) return toast("Label et avatar_id requis.");
-  const res = await api("/api/avatars", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ label, avatar_id }),
-  });
-  renderAvatars(res.avatars);
-  $("newAvatarLabel").value = "";
-  $("newAvatarId").value = "";
-  toast("Avatar ajouté ✓");
-});
-
-// ---- JALON 4 : sélecteur visuel d'avatars HeyGen (grille de vignettes, cache serveur) ----
-let heygenAvatars = null;   // cache mémoire du dernier chargement (avatars + talking_photos)
-
-$("browseHeygenBtn").addEventListener("click", async () => {
-  const picker = $("heygenPicker");
-  picker.classList.toggle("hidden");
-  if (!picker.classList.contains("hidden") && heygenAvatars === null) {
-    await loadHeygenAvatars(false);
-  }
-});
-
-$("heygenRefresh").addEventListener("click", () => loadHeygenAvatars(true));
-$("heygenSearch").addEventListener("input", renderHeygenGrid);
-$("heygenGender").addEventListener("change", renderHeygenGrid);
-
-async function loadHeygenAvatars(refresh) {
-  const msg = $("heygenMsg");
-  msg.textContent = refresh ? "Rafraîchissement depuis HeyGen (peut prendre jusqu'à 3 min)…" : "Chargement…";
-  $("heygenGrid").innerHTML = "";
-  try {
-    const r = await api("/api/heygen/avatars?refresh=" + (refresh ? "true" : "false"));
-    if (r.simulation) {
-      msg.textContent = "Mode simulation : liste HeyGen indisponible (désactive « Mode simulation » et ajoute ta clé HeyGen pour parcourir les avatars).";
-      heygenAvatars = { avatars: [], talking_photos: [] };
-      return;
-    }
-    if (!r.ok && !r.avatars) {
-      msg.textContent = "✗ " + (r.message || r.note || "Échec du chargement des avatars HeyGen.");
-      return;
-    }
-    heygenAvatars = { avatars: r.avatars || [], talking_photos: r.talking_photos || [] };
-    const total = (r.count != null) ? r.count : (heygenAvatars.avatars.length + heygenAvatars.talking_photos.length);
-    const when = r.cached ? "cache local" : "à l'instant";
-    msg.textContent = `${total} avatar(s) — ${when}.` + (r.note ? " ⚠ " + r.note : "");
-    renderHeygenGrid();
-  } catch (e) {
-    msg.textContent = "✗ " + e.message;
-  }
-}
-
-function renderHeygenGrid() {
-  if (!heygenAvatars) return;
-  const grid = $("heygenGrid");
-  const q = $("heygenSearch").value.trim().toLowerCase();
-  const gender = $("heygenGender").value;
-  const all = [...heygenAvatars.avatars, ...heygenAvatars.talking_photos];
-  const items = all.filter((a) => {
-    if (gender && (a.gender || "").toLowerCase() !== gender) return false;
-    if (q && !(a.name || "").toLowerCase().includes(q) && !(a.avatar_id || "").toLowerCase().includes(q)) return false;
-    return true;
-  }).slice(0, 200);   // borne l'affichage (1200+ avatars possibles)
-  grid.innerHTML = "";
-  if (!items.length) {
-    grid.innerHTML = '<p class="muted">Aucun avatar ne correspond.</p>';
-    return;
-  }
-  items.forEach((a) => grid.appendChild(heygenCard(a)));
-}
-
-function heygenCard(a) {
-  const cell = document.createElement("div");
-  cell.className = "heygen-card";
-  const img = a.preview_image_url
-    ? `<img loading="lazy" src="${esc(a.preview_image_url)}" alt="${esc(a.name)}" />`
-    : `<div class="thumb empty">pas d'aperçu</div>`;
-  const photoBadge = a.is_photo ? '<span class="badge warn" title="Photo avatar : fonctionne en Avatar IV / mode Classique uniquement">Classique</span>' : "";
-  const premBadge = a.premium ? '<span class="badge">Premium</span>' : "";
-  cell.innerHTML =
-    img +
-    `<div class="hg-name" title="${esc(a.avatar_id)}">${esc(a.name || a.avatar_id)}</div>` +
-    `<div class="hg-meta">${esc(a.gender || "")} ${photoBadge}${premBadge}</div>` +
-    `<button class="btn small hg-pick" type="button">Choisir</button>`;
-  cell.querySelector(".hg-pick").addEventListener("click", () => {
-    // Pré-remplit label + id ; le photo avatar exige le mode Classique → on avertit.
-    const slug = (a.name || a.avatar_id).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
-    $("newAvatarLabel").value = slug || "avatar";
-    $("newAvatarId").value = a.avatar_id || "";
-    if (a.is_photo)
-      toast("⚠ Photo avatar : à utiliser en mode Avatar IV / Classique (pas Avatar V/Premium).");
-    else toast("Avatar pré-rempli — clique « + Ajouter » pour l'enregistrer.");
-    $("newAvatarLabel").scrollIntoView({ behavior: "smooth", block: "center" });
-  });
-  return cell;
-}
 
 $("addVoice").addEventListener("click", async () => {
   const label = $("newVoiceLabel").value.trim();
@@ -719,7 +598,6 @@ $("testConn").addEventListener("click", async () => {
   try {
     const r = await api("/api/test-connection", { method: "POST" });
     const g = r.gradium || {};
-    const h = r.heygen || {};
     const line = (label, o) => {
       const ok = o.ok !== false;
       const cls = ok ? "ok" : "ko";
@@ -732,15 +610,11 @@ $("testConn").addEventListener("click", async () => {
     let html = "";
     if (r.dry_run) html += '<div class="muted">Mode simulation : validation réelle désactivée.</div>';
     html += line("Gradium", g);
-    html += line("HeyGen", h);
     html += line("Nano Banana (images Objet animé)", nb);
     html += line("Grok (animation Objet animé)", grok);
     if (r.kling) html += line("Kling (Mashup)", r.kling);
     if (r.gemini) html += line("Google Gemini (Avatar IA Omni)", r.gemini);
     html += line("Anthropic (cerveau)", a);
-    if (h.avatars && h.avatars.length) {
-      html += `<div class="muted">${h.avatars.length} avatars trouvés sur le compte.</div>`;
-    }
     el.innerHTML = html;
   } catch (e) {
     el.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
@@ -757,9 +631,9 @@ async function loadDashboard() {
   $("totalVideos").textContent = d.total_videos ?? "0";
   const ul = $("activityList");
   ul.innerHTML = "";
-  // Stack actuelle : les entrées d'activité liées à Gradium / HeyGen (ancien mode « Avatar ») ne
-  // sont plus affichées sur le tableau de bord (toujours en base).
-  d.activity = (d.activity || []).filter((a) => !/gradium|heygen/i.test(`${a.kind} ${a.message}`));
+  // Stack actuelle : les entrées d'activité liées à Gradium ne sont plus affichées sur le
+  // tableau de bord (toujours en base).
+  d.activity = (d.activity || []).filter((a) => !/gradium/i.test(`${a.kind} ${a.message}`));
   (d.activity || []).forEach((a) => {
     const li = document.createElement("li");
     li.innerHTML =
@@ -828,10 +702,7 @@ function renderElevenlabsTile(el, o) {
 }
 
 // ------------------------------------------------ NOUVELLE PUB
-let parsedAd = null;
-let selectedStyle = "avatar";
-let selectedMode = "premium";
-let lastEstimate = null;
+let selectedStyle = "avatar_omni";
 
 // -- Étape 1 : choix du style --
 document.querySelectorAll(".style-card").forEach((card) => {
@@ -846,9 +717,8 @@ document.querySelectorAll(".style-card").forEach((card) => {
   });
 });
 
-// Bascule l'interface entre les flux Avatar / Objet animé / Voix off.
+// Bascule l'interface entre les flux Avatar IA / Objet animé / Mashup / Voix off.
 function applyStyleFlow(style) {
-  $("avatarFlow").classList.toggle("hidden", style !== "avatar");
   $("objetFlow").classList.toggle("hidden", style !== "objet_vivant");
   $("voixoffFlow").classList.toggle("hidden", style !== "voix_off");
   $("mashupFlow").classList.toggle("hidden", style !== "mashup");
@@ -856,163 +726,10 @@ function applyStyleFlow(style) {
   if (style === "avatar_omni") aoEnsureVoiceSelects();
 }
 
-// -- Étape 3 : cerveau IA --
-$("brainBtn").addEventListener("click", async () => {
-  const script = $("scriptText").value.trim();
-  const brief = $("briefText").value.trim();
-  const avatar_label = $("avatarSelect").value;
-  const msg = $("brainMsg");
-  if (!script) return toast("Colle d'abord ton script.");
-  if (!avatar_label) return toast("Choisis un avatar (ou ajoute-en un dans Réglages).");
-
-  msg.innerHTML = "🧠 Découpage en cours…";
-  $("brainBtn").disabled = true;
-  try {
-    const r = await api("/api/brain/generate-scenes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ script, brief, style: selectedStyle, avatar_label }),
-    });
-    parsedAd = { ad: r.ad, avatar: r.avatar, scenes: r.scenes };
-    msg.innerHTML = `<div class="ok">✓ ${r.scenes.length} scènes générées${r.dry_run ? " (simulation)" : ""}.</div>`;
-    showPreview(parsedAd, r.estimate);
-  } catch (e) {
-    msg.innerHTML = `<div class="ko">✗ ${esc(e.message)}</div>`;
-  } finally {
-    $("brainBtn").disabled = false;
-  }
-});
-
-// -- Import d'un scenes.json (avancé / secours) --
-$("importJsonBtn").addEventListener("click", () => $("scenesFile").click());
-$("scenesFile").addEventListener("change", (ev) => {
-  const f = ev.target.files[0];
-  if (!f) return;
-  const rd = new FileReader();
-  rd.onload = async () => {
-    let data;
-    try {
-      data = JSON.parse(String(rd.result));
-    } catch {
-      return toast("JSON invalide — vérifie le format.");
-    }
-    const scenes = data.scenes || [];
-    if (!scenes.length) return toast("Aucune scène dans le JSON.");
-    parsedAd = { ad: data.ad || "pub", avatar: data.avatar, scenes };
-    await populateNewPubSelectors(data.avatar, data.voice);
-    const est = await api("/api/estimate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenes }),
-    });
-    showPreview(parsedAd, est);
-  };
-  rd.readAsText(f, "utf-8");
-});
-
-function showPreview(ad, est) {
-  lastEstimate = est;
-  $("adName").value = ad.ad || "pub";
-  const prev = $("scenesPreview");
-  prev.innerHTML = "";
-  (ad.scenes || []).forEach((s, i) => {
-    const div = document.createElement("div");
-    div.className = "scene-card";
-    div.innerHTML =
-      `<div><span class="n">#${s.n ?? i + 1}</span></div>` +
-      `<div class="script">${esc(s.script || "")}</div>` +
-      `<div class="motion">🎭 ${esc(s.motion_prompt || "—")}</div>`;
-    prev.appendChild(div);
-  });
-  renderModeCosts(est);
-  // mode par défaut = celui des Réglages
-  selectMode((currentSettings && currentSettings.cost_mode) || "premium");
-  $("adPreview").classList.remove("hidden");
-}
-
-function renderModeCosts(est) {
-  const cm = est.credits_par_mode || {};
-  const tx = est.taux_par_mode || {};
-  $("modeCostPremium").textContent = `≈ ${frNum(cm.premium ?? 0)} crédits  ·  ${tx.premium ?? 4} cr/s`;
-  $("modeCostClassique").textContent = `≈ ${frNum(cm.classique ?? 0)} crédits  ·  ${tx.classique ?? 2} cr/s`;
-}
-
-function selectMode(mode) {
-  selectedMode = ["classique", "voix_seules"].includes(mode) ? mode : "premium";
-  document.querySelectorAll(".mode-card").forEach((c) =>
-    c.classList.toggle("active", c.dataset.mode === selectedMode)
-  );
-  updateEstimateLine();
-}
-
-function updateEstimateLine() {
-  const est = lastEstimate;
-  if (!est) return;
-  const n = est.scenes || 0;
-  if (selectedMode === "voix_seules") {
-    $("estimate").innerHTML =
-      `Mode <b>Voix seules</b> : <b>0 crédit API</b> ` +
-      `<span class="muted">(${n} scène${n > 1 ? "s" : ""} — voix Gradium uniquement)</span>` +
-      `<div class="card-sub">Un dossier avec les audios numérotés (1.wav, 2.wav…) + un récap s'ouvrira à la fin. ` +
-      `Tu finis la vidéo dans HeyGen à la main. Aucun crédit vidéo dépensé.</div>`;
-    return;
-  }
-  const total = (est.credits_par_mode && est.credits_par_mode[selectedMode]) ?? est.credits_estimes ?? 0;
-  const perScene = n ? Math.round(total / n) : 0;
-  const label = selectedMode === "classique" ? "Classique" : "Premium";
-  $("estimate").innerHTML =
-    `Mode <b>${label}</b> : ≈ <b>${frNum(total)} crédit${total > 1 ? "s" : ""} au total</b> ` +
-    `<span class="muted">(${n} scène${n > 1 ? "s" : ""}, ~${frNum(perScene)} crédit${perScene > 1 ? "s" : ""}/scène)</span>` +
-    `<div class="card-sub">~${est.minutes} min de vidéo · payé seulement en mode réel</div>`;
-}
-
-document.querySelectorAll(".mode-card").forEach((card) => {
-  card.addEventListener("click", () => selectMode(card.dataset.mode));
-});
-
-async function populateAvatarSelect(selected) {
-  const s = currentSettings || (await api("/api/settings"));
-  currentSettings = s;
-  const sel = $("avatarSelect");
-  sel.innerHTML = "";
-  (s.avatars || []).forEach((a) => {
-    const o = document.createElement("option");
-    o.value = a.label;
-    o.textContent = `${a.label} (${a.avatar_id})`;
-    if (a.label === selected) o.selected = true;
-    sel.appendChild(o);
-  });
-  if (!(s.avatars || []).length) {
-    const o = document.createElement("option");
-    o.value = "";
-    o.textContent = "— aucun avatar (ajoute-en dans Réglages) —";
-    sel.appendChild(o);
-  }
-}
-
-async function populateVoiceSelect(selected) {
-  const s = currentSettings || (await api("/api/settings"));
-  currentSettings = s;
-  const sel = $("voiceSelect");
-  sel.innerHTML = "";
-  (s.voices || []).forEach((v) => {
-    const o = document.createElement("option");
-    o.value = v.label;               // on choisit par LABEL, l'ID reste interne
-    o.textContent = v.label;         // jamais l'ID à l'écran
-    if (v.label === selected) o.selected = true;
-    sel.appendChild(o);
-  });
-  if (!(s.voices || []).length) {
-    const o = document.createElement("option");
-    o.value = "";
-    o.textContent = "— aucune voix (ajoute-en dans Réglages) —";
-    sel.appendChild(o);
-  }
-}
-
-async function populateNewPubSelectors(avatarLabel, voiceLabel) {
-  await populateAvatarSelect(avatarLabel);
-  await populateVoiceSelect(voiceLabel);
+// Entrée dans « Nouvelle pub » : charge les réglages s'ils ne le sont pas encore (voix de la
+// Voix off, mode simulation lu par les autres flux), puis remplit le sélecteur de voix.
+async function populateNewPubSelectors(voiceLabel) {
+  if (!currentSettings) currentSettings = await api("/api/settings");
   populateSelectFromVoices("voVoiceSelect", voiceLabel);
 }
 
@@ -1037,112 +754,14 @@ function populateSelectFromVoices(selectId, selected) {
   }
 }
 
-$("generateBtn").addEventListener("click", async () => {
-  if (!parsedAd) return;
-  const scenes = parsedAd.scenes || [];
-  const avatar_label = $("avatarSelect").value;
-  const voice_label = $("voiceSelect").value;
-  const voixSeules = selectedMode === "voix_seules";
-  if (!voixSeules && !avatar_label) return toast("Choisis un avatar (ou ajoute-en un dans Réglages).");
-  if (!voice_label) return toast("Choisis une voix (ou ajoute-en une dans Réglages).");
-
-  // Mode « Voix seules » : aucun crédit vidéo → pas de confirmation de dépense.
-  const dryRun = currentSettings && currentSettings.dry_run;
-  if (!voixSeules && !dryRun) {
-    const total =
-      (lastEstimate && lastEstimate.credits_par_mode && lastEstimate.credits_par_mode[selectedMode]) ?? "?";
-    const label = selectedMode === "classique" ? "Classique" : "Premium";
-    const ok = await showModal({
-      title: "Mode réel — dépense de crédits",
-      message: `Mode ${label} : cette génération va dépenser ≈ ${total === "?" ? "?" : frNum(total)} crédits HeyGen pour de vrai. Continuer ?`,
-      confirmText: "Générer",
-      cancelText: "Annuler",
-      danger: true,
-    });
-    if (!ok) return;
-  }
-
-  let res;
-  try {
-    res = await api("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ad_name: $("adName").value.trim() || "pub",
-        avatar_label,
-        voice_label,
-        cost_mode: selectedMode,
-        scenes,
-        confirm: true,
-      }),
-    });
-  } catch (e) {
-    return toast(e.message);
-  }
-
-  _lastAvatarAdId = res.ad_id;
-  $("retryFailedBtn").classList.add("hidden");
-  $("progressArea").classList.remove("hidden");
-  initSceneProgress(scenes);
-  pollJob(res.job_id);
-});
-
-// Relance EN PARALLÈLE uniquement les scènes en échec de la dernière pub avatar.
-let _lastAvatarAdId = null;
-$("retryFailedBtn").addEventListener("click", async () => {
-  if (_lastAvatarAdId == null) return;
-  const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
-    const ok = await showModal({
-      title: "Relancer les scènes en échec",
-      message: "Cette relance va rappeler HeyGen (crédits) pour les scènes qui ont planté. Continuer ?",
-      confirmText: "Réessayer", cancelText: "Annuler", danger: true,
-    });
-    if (!ok) return;
-  }
-  let res;
-  try {
-    res = await api("/api/generate/retry/" + _lastAvatarAdId, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: true }),
-    });
-  } catch (e) {
-    return toast(e.message);
-  }
-  $("retryFailedBtn").classList.add("hidden");
-  toast(`Relance de ${res.retry} scène(s) en échec…`);
-  pollJob(res.job_id);
-});
-
-function initSceneProgress(scenes) {
-  const ul = $("sceneProgress");
-  ul.innerHTML = "";
-  scenes.forEach((s, i) => {
-    const n = s.n ?? i + 1;
-    const li = document.createElement("li");
-    li.id = "sp-" + n;
-    li.innerHTML =
-      `<div class="sp-row"><span class="dot"></span><span>Scène ${n}</span>` +
-      `<span class="phase">en attente</span></div><div class="scene-err"></div>`;
-    ul.appendChild(li);
-  });
-  $("progFill").style.width = "0%";
-  $("progCount").textContent = "";
-  if ($("progPhase")) {
-    $("progPhase").textContent = "Phase 1 — Voix (Gradium, 2 max)…";
-    $("progPhase").className = "prog-phase p1";
-  }
-}
-
 const PHASE_LABEL = {
-  en_attente: "en attente", voix: "voix off…", voix_ok: "voix ✓ (attente vidéo)",
-  upload: "envoi audio…", rendu: "rendu vidéo…", image: "image…", animation: "animation…",
+  en_attente: "en attente", voix: "voix off…",
+  image: "image…", animation: "animation…",
   clip: "clip ✓", pret: "prêt ✓", erreur: "échec", attente_tier1: "pause Tier 1",
   keyframe: "keyframe…", omni: "vidéo Omni…", extension: "extension Omni…", assemblage: "assemblage…",
 };
 
-// Traduit une erreur brute (Gradium/HeyGen) en message court et lisible.
+// Traduit une erreur brute d'un fournisseur en message court et lisible.
 // Le message complet reste disponible au survol (title).
 function prettyError(raw) {
   const m = String(raw || "échec");
@@ -1152,7 +771,6 @@ function prettyError(raw) {
   if (/quota|insufficient|not enough|no.*credit|crédits insuffisants/i.test(m)) return "crédits insuffisants";
   if (/too long|trop long|max.*char|character limit|1500\s*(car|char)/i.test(m)) return "texte trop long (max 1500 car.)";
   if (/voice.*not found|voix introuvable|invalid voice|unknown voice/i.test(m)) return "voix introuvable";
-  if (/content type not match|audio\/x-wav|format audio/i.test(m)) return "format audio refusé par HeyGen";
   if (/avatar.*not found|invalid avatar|avatar introuvable/i.test(m)) return "avatar introuvable";
   // Le backend renvoie désormais un message FR clair → on l'affiche tel quel, SAUF s'il ressemble
   // encore à du brut technique (JSON, trace, code HTTP, balise) → message générique. Le texte
@@ -1161,77 +779,6 @@ function prettyError(raw) {
     return "erreur inattendue — réessaie ; si ça persiste, vérifie tes clés (Réglages)";
   }
   return m.length > 140 ? m.slice(0, 140) + "…" : m;
-}
-
-async function pollJob(jobId) {
-  try {
-    const j = await api("/api/jobs/" + jobId);
-    (j.scenes || []).forEach((sc) => {
-      const li = $("sp-" + sc.n);
-      if (!li) return;
-      const dot = li.querySelector(".dot");
-      const phase = li.querySelector(".phase");
-      const errEl = li.querySelector(".scene-err");
-      dot.className = "dot " + (sc.status === "ok" ? "ok" : sc.status === "echec" ? "echec" : sc.phase === "en_attente" ? "" : "en_cours");
-      phase.textContent = PHASE_LABEL[sc.phase] || sc.phase || "";
-      // Affiche le VRAI message d'erreur sous la scène (et au survol), pas juste « échec ».
-      if (sc.status === "echec") {
-        const msg = prettyError(sc.message);
-        errEl.textContent = "⚠ " + msg;
-        errEl.title = sc.message || msg;
-        errEl.style.display = "block";
-      } else {
-        errEl.textContent = "";
-        errEl.style.display = "none";
-      }
-    });
-    // Bannière des 2 phases (avatar) : Phase 1 voix (X/total) → Phase 2 vidéos.
-    const phaseEl = $("progPhase");
-    if (phaseEl) {
-      const vd = j.voices_done ?? 0;
-      if (j.phase === "voix") {
-        phaseEl.textContent = `Phase 1 — Voix (Gradium, 2 max) : ${vd}/${j.total} générées`;
-        phaseEl.className = "prog-phase p1";
-      } else if (j.phase === "videos") {
-        phaseEl.textContent = `Phase 2 — Vidéos (HeyGen, en parallèle) · voix ${vd}/${j.total} prêtes`;
-        phaseEl.className = "prog-phase p2";
-      } else {
-        phaseEl.textContent = "";
-        phaseEl.className = "prog-phase";
-      }
-    }
-    const pct = j.total ? Math.round((j.done / j.total) * 100) : 0;
-    $("progFill").style.width = pct + "%";
-    $("progCount").textContent = `${j.done}/${j.total} vidéos`;
-
-    if (j.state === "en_cours" || j.state === "en_attente") {
-      setTimeout(() => pollJob(jobId), 800);
-    } else {
-      const sm = j.summary || {};
-      if (sm.status === "voix_seules" || sm.folder) {
-        // Mode « Voix seules » : pas de vidéo, pas de Bibliothèque → message + dossier ouvert.
-        showModal({
-          title: "🎙️ Voix générées (0 crédit API)",
-          message:
-            (sm.message || "Voix générées.") +
-            (sm.folder ? `\n\nDossier : ${sm.folder}\n(Il vient de s'ouvrir dans l'explorateur.)` : ""),
-          confirmText: "OK",
-          cancelText: "",
-        });
-      } else {
-        const failed = Number(sm.echec || 0);
-        toast(
-          `Terminé : ${sm.ok ?? j.done} clip(s) prêt(s)` +
-          (failed ? `, ${failed} en échec.` : ".")
-        );
-        // Bouton « réessayer les échoués » (relance parallèle) si au moins une scène a planté.
-        $("retryFailedBtn").classList.toggle("hidden", !(failed > 0 && _lastAvatarAdId != null));
-        loadLibrary();
-      }
-    }
-  } catch (e) {
-    toast("Suivi interrompu : " + e.message);
-  }
 }
 
 // ================================================ OBJET ANIMÉ (Nano Banana + Grok)
@@ -2309,7 +1856,7 @@ async function pollVoJob(jobId) {
 }
 
 // ------------------------------------------------ BIBLIOTHÈQUE (sous-sections)
-let _libTab = "avatar";
+let _libTab = "avatar_omni";
 
 // En-tête d'un « dossier » de pub : titre + bouton « Télécharger tout (ZIP) ». `asset` cible le
 // type de fichier (video | audio | image) ; le bouton n'apparaît que s'il y a quelque chose à zipper.
@@ -2338,7 +1885,7 @@ function libAdHeader(ad, asset, hasFiles) {
 }
 
 // Type de pub → carte de style de « Nouvelle pub » qui porte son éditeur de plans. Les modes sans
-// éditeur de plans (Avatar HeyGen historique, Voix off) n'ont pas de bouton.
+// éditeur de plans (Voix off) n'ont pas de bouton.
 const EDITOR_FLOWS = { objet: "objet_vivant", mashup: "mashup", avatar_omni: "avatar_omni" };
 
 // Rouvre une pub existante dans l'éditeur, exactement comme juste après sa création : bon style,
@@ -2610,21 +2157,19 @@ async function aoLibRelaunch(ad, c, btn, state) {
   }
 }
 
-// Avatar (HeyGen) + Objet animé (Grok) partagent /api/library ; on filtre par ad.kind.
+// Objet animé (Grok), Mashup et Avatar IA partagent /api/library ; on filtre par ad.kind.
 async function loadLibraryVideos() {
   const r = await api("/api/library");
-  const avatar = r.ads.filter((a) => a.kind === "avatar");
   const objet = r.ads.filter((a) => a.kind === "objet");
   const mashup = r.ads.filter((a) => a.kind === "mashup");
   const omni = r.ads.filter((a) => a.kind === "avatar_omni");
-  renderClipAds($("libAvatarContent"), avatar, "Aucune vidéo avatar (HeyGen) pour l’instant.");
   renderClipAds($("libObjetContent"), objet, "Aucun clip objet animé (Grok) pour l’instant.");
   renderClipAds($("libMashupContent"), mashup, "Aucun clip Mashup IA pour l’instant.");
   if ($("libAvatarOmniContent"))
     renderClipAds($("libAvatarOmniContent"), omni, "Aucun clip Avatar IA (Omni) pour l’instant.");
 }
 
-// Voix off : pubs audio (Voix seules + Voix off) avec lecteur + téléchargement du .wav.
+// Voix off : pubs audio (Voix off) avec lecteur + téléchargement du .wav.
 async function loadVoicesLibrary() {
   const r = await api("/api/library/voices");
   const root = $("libVoicesContent");
@@ -2662,7 +2207,7 @@ async function loadVoicesLibrary() {
 }
 
 async function loadLibTab(tab) {
-  if (tab === "avatar" || tab === "objet" || tab === "mashup" || tab === "avatar_omni") await loadLibraryVideos();
+  if (tab === "objet" || tab === "mashup" || tab === "avatar_omni") await loadLibraryVideos();
   else if (tab === "voices") await loadVoicesLibrary();
   else if (tab === "photos") await loadPhotos();
 }
@@ -2682,7 +2227,7 @@ document.querySelectorAll("#library .subtab").forEach((b) =>
   b.addEventListener("click", () => showLibTab(b.dataset.libtab))
 );
 
-// Ouverture de la Bibliothèque : on affiche l’onglet courant (défaut : Avatar).
+// Ouverture de la Bibliothèque : on affiche l’onglet courant (défaut : Avatar IA).
 function loadLibrary() {
   showLibTab(_libTab);
 }
@@ -2752,7 +2297,7 @@ const COST_COLORS = {
   openrouter: "#5b8cff",
   grok: "#22c55e",
   kling: "#06b6d4",
-  heygen: "#f59e0b",
+  ancien_fournisseur: "#f59e0b",
   gradium: "#a855f7",
   anthropic: "#ec4899",
   claude_code: "#d97706",
@@ -2912,10 +2457,10 @@ async function loadCosts() {
 function costReportHTML(r, opts = {}) {
   const t = r.totals || { usd: 0, credits: 0, events: 0 };
   const emptySvc = opts.emptyMsg || "Aucune génération réelle pour l’instant (la simulation ne compte pas).";
-  // Total DÉJÀ en USD (HeyGen converti à l'enregistrement) → un seul montant, devise au choix.
+  // Total DÉJÀ en USD (crédits de l'ancien fournisseur convertis à l'enregistrement) → un seul montant, devise au choix.
   let html =
     `<div class="cost-total">Total estimé : <b>${money(t.usd)}</b>` +
-    (t.credits ? ` <span class="muted">(dont ${frNum(t.credits)} crédits HeyGen)</span>` : "") +
+    (t.credits ? ` <span class="muted">(dont ${frNum(t.credits)} crédits — ancien fournisseur)</span>` : "") +
     `<span class="muted"> · ${t.events || 0} génération(s) réelle(s)</span></div>`;
 
   html += `<h3>Par service</h3>`;
@@ -2924,7 +2469,7 @@ function costReportHTML(r, opts = {}) {
   } else {
     html += '<table class="cost-table"><thead><tr><th>Service</th><th>Généré</th><th>Coût estimé</th></tr></thead><tbody>';
     (r.services || []).forEach((s) => {
-      // Montant dans la devise choisie ; crédits en indice pour HeyGen (info).
+      // Montant dans la devise choisie ; crédits en indice pour l'ancien fournisseur (info).
       const c = money(s.usd) + (s.credits ? ` <span class="muted">(${frNum(s.credits)} cr)</span>` : "");
       html += `<tr><td>${esc(s.label)}</td><td>${esc(s.units)}</td><td class="num">${c}</td></tr>`;
     });

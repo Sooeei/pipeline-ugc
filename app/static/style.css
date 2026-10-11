@@ -134,7 +134,7 @@ label.check input { width: auto; margin: 0; }
 .test-result .ko { color: var(--err); }
 
 /* ---------- Nouvelle pub : styles UGC ---------- */
-.styles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 8px; }
+.styles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 8px; }
 .style-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 18px 12px; cursor: pointer; color: var(--text); text-align: center;
@@ -146,19 +146,6 @@ label.check input { width: auto; margin: 0; }
 .style-name { font-weight: 600; margin-top: 6px; }
 .style-tag { font-size: 11px; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 .style-card.active .style-tag { color: var(--ok); }
-
-/* ---------- Nouvelle pub : modes qualité/coût ---------- */
-.modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 8px; }
-.mode-card {
-  background: var(--panel); border: 2px solid var(--line); border-radius: var(--radius);
-  padding: 16px 16px; cursor: pointer; color: var(--text); text-align: left;
-}
-.mode-card:hover { border-color: var(--accent); }
-.mode-card.active { border-color: var(--accent); background: var(--panel-2); }
-.mode-name { font-weight: 700; font-size: 16px; }
-.mode-desc { color: var(--muted); font-size: 12px; margin-top: 4px; }
-.mode-cost { margin-top: 10px; font-size: 18px; font-weight: 700; color: var(--accent); }
-.mode-card.active .mode-cost { color: var(--ok); }
 
 /* ---------- Nouvelle pub ---------- */
 .estimate {
@@ -178,10 +165,6 @@ label.check input { width: auto; margin: 0; }
 .progressbar { height: 10px; background: var(--panel-2); border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
 .progressbar-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .3s; }
 .prog-count { color: var(--muted); font-size: 13px; margin: 8px 0 14px; }
-.prog-phase { font-size: 13px; font-weight: 600; margin: 2px 0 10px; padding: 6px 12px; border-radius: 8px; display: inline-block; }
-.prog-phase:empty { display: none; }
-.prog-phase.p1 { background: rgba(91,140,255,.15); color: var(--accent); border: 1px solid var(--accent); }
-.prog-phase.p2 { background: rgba(55,201,121,.15); color: var(--ok); border: 1px solid var(--ok); }
 .scene-progress { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
 .scene-progress li { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .scene-progress .sp-row { display: flex; align-items: center; gap: 12px; }
@@ -350,22 +333,9 @@ label.check input { width: auto; margin: 0; }
 .overview .ov-fail { color: var(--warn, #d98a2b); font-weight: 600; }
 .overview .ov-warn { flex-basis: 100%; color: var(--warn, #d98a2b); font-size: 13px; }
 .overview .btn { margin-left: auto; }
-/* sélecteur d'avatars HeyGen (jalon 4) */
-.heygen-picker { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
-.heygen-picker .row { gap: 8px; align-items: center; }
-.heygen-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 10px; margin-top: 10px; max-height: 420px; overflow-y: auto;
-}
-.heygen-card {
-  border: 1px solid var(--line); border-radius: 8px; padding: 6px; text-align: center;
-  display: flex; flex-direction: column; gap: 4px;
-}
-.heygen-card img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 6px; }
-.heygen-card .hg-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.heygen-card .hg-meta { font-size: 11px; opacity: .8; display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; }
-.heygen-card .badge.warn { background: var(--warn, #d98a2b); color: #1a1200; }
-.heygen-card .hg-pick { margin-top: auto; }
+/* encadré du sélecteur de voix (Réglages) */
+.picker-box { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.picker-box .row { gap: 8px; align-items: center; }
 /* liste de voix Gradium (jalon 5) */
 .voice-list { margin-top: 10px; max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .voice-row {

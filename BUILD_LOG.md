@@ -1,5 +1,7 @@
 # BUILD_LOG — journal de construction
 
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
+
 Format : date · jalon · ce qui a été fait · résultat des vérifs (ruff/mypy/pytest/boot/E2E).
 
 ## 2026-07-15
@@ -50,10 +52,6 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   script d'origine, normalisation espaces uniquement) ; **retry ≤ 2** puis refus « découpage
   refusé (texte altéré) » ; **DRY_RUN** = découpage local par phrases préservant le texte.
 - Réglages étendus : `ANTHROPIC_API_KEY` + `brain_model` (API + UI + bootstrap + test connexion).
-- Endpoint `POST /api/brain/generate-scenes`.
-- UI « Nouvelle pub » refaite : **style (Avatar OK, Objet vivant / Voix off = bientôt) →
-  avatar + voix → script + brief → 🧠 Générer les scènes → aperçu + coût → 🎬 Générer les
-  vidéos** (pipeline existant). Import scenes.json gardé en secours.
 - Vérif : ruff ✓ · mypy ✓ (12 fichiers) · **pytest 33/33** (dont E2E cerveau→pipeline→biblio
   et tests verbatim OK/rejeté) · boot réel ✓.
 - **Sous-agents** :
@@ -65,32 +63,29 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
     fournisseur. Point « modèle invalide » du relecteur ÉCARTÉ : `claude-sonnet-5` est l'ID
     correct (savoir périmé du sous-agent ; vérifié doc Anthropic).
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 36/36** · boot réel ✓.
-- App relancée : nouveau parcours visible. Reste : les 3 vraies clés pour le test live.
+- App relancée : nouveau parcours visible.
 
-## 2026-07-15 — Voix Gradium par LABEL (comme les avatars)
+## 2026-07-15 — Voix Gradium par LABEL
 
-- **db** : table `voices` (label, voice_id) + fonctions (list/add/delete/voice_id_for_label/
-  first_voice_id) calquées sur les avatars.
+- **db** : table `voices` (label, voice_id) + fonctions (list/add/delete/voice_id_for_label/first_voice_id).
 - **Migration auto** (`bootstrap.migrate_voice_to_list`, appelée au boot) : l'ancien
   `gradium_voice_id` devient la 1re voix « Ma voix » — aucune re-saisie. Idempotente.
 - **settings_service** : voix par défaut = 1re de la liste (repli sur l'ancien réglage).
-- **API** : `/api/voices` (POST/DELETE), `GenerateIn.voice_label`, résolution
-  label→voice_id dans `/api/generate` (repli voix par défaut). `gradium_voice_id` n'est plus
+- **API** : `/api/voices` (POST/DELETE). `gradium_voice_id` n'est plus
   écrit via /api/settings (géré par la liste).
 - **UI** : carte « Voix Gradium » dans Réglages (liste + ajouter/supprimer) ; champ voix de
-  « Nouvelle pub » = menu déroulant qui affiche UNIQUEMENT les labels ; le select avatar
-  reste « label (id) » comme avant.
+  « Nouvelle pub » = menu déroulant qui affiche UNIQUEMENT les labels.
 - **Fiabilité tests** : `conftest` vide les tables en SQL (plus de suppression du .db
   verrouillé sous Windows) ; ordre enfants→parents pour les FK.
 - Vérif : ruff ✓ · mypy ✓ · **pytest 44/44** · boot réel ✓ (UI voix servie, migration OK).
 - **Sous-agents** :
   - *Testeur* : TOUT VERT (44 tests, boot, UI voix servie, migration auto, E2E voix complet + suppression).
-  - *Relecteur* : 0 défaut critique, feature fidèle aux avatars. 2 correctifs IMPORTANTS intégrés :
+  - *Relecteur* : 0 défaut critique. 2 correctifs IMPORTANTS intégrés :
     (I-1) migration one-shot via flag `voice_migrated` — plus de résurrection de « Ma voix »
     si l'utilisateur supprime toutes ses voix ; (I-2) garde-fou serveur « aucune voix » en
-    mode réel (symétrique à l'avatar). + nettoyage du champ mort `gradium_voice_id`.
+    mode réel. + nettoyage du champ mort `gradium_voice_id`.
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 46/46** · boot réel ✓.
-- App relancée sur base propre : voix migrée « Ma voix ». Reste : les 3 vraies clés (test live).
+- App relancée sur base propre : voix migrée « Ma voix ».
 
 ## 2026-07-15 — Persistance des clés + lancement type application
 
@@ -130,82 +125,7 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 51/51** · relancé : serveur pythonw sans console +
     fenêtre Chrome --app, base stable, placeholders non affichés comme configurés.
 
-## 2026-07-15 — Résolution par mode (Classique 720p, Premium 1080p)
-
-- Classique coûtait encore ~3 cr/s (6s=18) : le payload n'envoyait AUCUNE `resolution` →
-  HeyGen prenait son défaut 1080p. Sondage (avatar bidon, gratuit) : enum accepté
-  `4k`/`1080p`/`720p` (entiers rejetés). Ajout `resolution` au mode : Premium 1080p,
-  Classique 720p. Payloads complets des 2 modes re-vérifiés (schéma HeyGen OK, 404 avatar bidon).
-- Vérif ruff/mypy/pytest 58/58. App relancée. Estimation Classique 1,5 cr/s déjà en place.
-
-## 2026-07-15 — Vérif payload Classique (pas de motion) + taux 1,5 cr/s
-
-- Utilisateur voyait 21 cr pour 7s en Classique (=3 cr/s = ×2 du motion). Vérif :
-  `_create_video_payload` en Classique n'a NI motion_prompt NI enhance (engine avatar_iv) —
-  prouvé par inspection directe ET par trace end-to-end (endpoint→job→pipeline→create, tout
-  faké, 0 crédit) : `cost_mode="classique"` arrive bien jusqu'au payload. Le code est correct ;
-  le clip cher datait d'un état antérieur (front modes chargé / backend Python pas encore).
-- Estimation Classique ajustée à **1,5 cr/s** (Avatar IV sans ×2) → ~11 cr pour 7s (vs 4 cr/s
-  Premium = ~29 cr). Vérif ruff/mypy/pytest 58/58. App relancée.
-
-## 2026-07-15 — Modes qualité/coût Premium / Classique
-
-- Sondage empirique (avatar bidon → 400 gratuits) : `/v3/videos` REJETTE
-  `enhance_custom_motion_prompt` (« Extra inputs ») → jamais envoyé. Engine `avatar_iv`
-  accepté (schéma). Donc :
-  - **Premium** : engine `avatar_v` + `motion_prompt` présent (~4 cr/s).
-  - **Classique** : engine `avatar_iv` + `motion_prompt` OMIS (~2 cr/s, pas de ×2).
-  Le mode change RÉELLEMENT le payload (pas qu'un libellé).
-- `config_app.COST_MODES` (TypedDict), `ProviderConfig.cost_mode`, `_create_video_payload`
-  selon le mode, `cost.estimate` par mode (`credits_par_mode` / `taux_par_mode`),
-  réglage `cost_mode` (défaut, validé), `GenerateIn.cost_mode` appliqué avant le payload.
-- UI : gros boutons Premium/Classique dans « Nouvelle pub » avec coût sous chacun
-  (crédits total + cr/s) ; rappel/défaut dans Réglages ; confirmation « mode réel » montre
-  le total du mode choisi. Reste identique dans les 2 modes (voix, upload x-wav, 9:16, verbatim).
-- Vérif : ruff ✓ · mypy ✓ · **pytest 58/58** · node ✓ · estimation Premium 128 / Classique 64
-  (pub ~32 s). enhance non envoyé (test dédié).
-- **Sous-agents** :
-  - *Testeur* : TOUT VERT (8/8, 58 tests, payload par mode correct, les 2 modes produisent des
-    clips en simulation, estimation Premium>Classique, UI servie).
-  - *Relecteur* : 0 défaut critique. Point IMPORTANT corrigé : le réglage « Moteur HeyGen »
-    (heygen_engine) était devenu MORT (le moteur vient du mode) → **retiré partout** (UI + API +
-    config + ProviderConfig) pour ne pas induire en erreur. Mineur corrigé : `frNum` dans la
-    modale de confirmation. (Mineur laissé : Premium estimé 4 cr/s même si une scène n'a pas de
-    motion — le cerveau fournit toujours un motion ; estimation = plafond.)
-  - Re-vérif : ruff ✓ · mypy ✓ · **pytest 58/58** · node ✓ · plus aucune ref heygen_engine.
-
-## 2026-07-15 — Estimation de coût calée sur le réel (~4 crédits/s)
-
-- Coût observé : Avatar V (Digital Twin) + audio custom + motion prompt = **4 crédits/s**
-  (13s=52, 8s=32, 6s=24). Cause : motion prompt = ×2 (custom expressive motion) + Digital
-  Twin = tier le plus cher ($0.0667/s). Doc : IV et V coûtent PAREIL pour un Digital Twin
-  (pas d'économie V→IV) ; IV moins cher que V seulement pour les Photo Avatars.
-- L'app n'envoie PAS `enhance_custom_motion_prompt` (grep vide) → ne contribue pas au coût.
-  Vrai levier = le motion_prompt lui-même (×2) → proposer un toggle « motion prompts on/off ».
-- `cost.py` : `CREDITS_PER_SECOND = 4.0` (avant ≈0.67/s, sous-estimé ×6). Estimation à
-  relancer côté serveur (relance de l'app). Vérif ruff/mypy/pytest 53/53.
-
-## 2026-07-15 — Fix payload création vidéo HeyGen (/v3/videos)
-
-- Erreur réelle : `create (400) invalid_parameter « Extra inputs are not permitted » param video_title`.
-  Schéma strict côté HeyGen. Doc + test empirique (rejets gratuits) → payload confirmé :
-  `title` (PAS video_title), `aspect_ratio:"9:16"` (PAS dimension), `audio_asset_id` +
-  `motion_prompt` top-level, `engine:{type:"avatar_v"}`. Payload testé en réel → **HTTP 200**
-  (video_id renvoyé, status waiting) : une seule génération (autorisée), arrêt là.
-- `providers._create_video_payload` extrait + testé (`test_create_video_payload_confirmed_shape`).
-  `HEYGEN_FIELDS["dimension_mode"]="aspect_ratio"`.
-- Vérif : ruff ✓ · mypy ✓ · pytest 53/53.
-
-## 2026-07-15 — Fix upload voix + modales + raccourci + libellé coût
-
-### C1 — Bug « voix off » = en fait upload audio HeyGen
-- Cause racine trouvée dans la vraie base (clips.error) : `HeyGen upload (400) code 400543
-  « Content type not match audio/wav != audio/x-wav »`. La voix Gradium réussissait ;
-  l'upload de l'audio vers HeyGen échouait à cause du Content-Type.
-- Fix `providers._audio_mime` : WAV envoyé en `audio/x-wav`. **Vérifié en réel** (upload gratuit) :
-  audio/wav → 400543 ; audio/x-wav → SUCCÈS (asset_id renvoyé).
-- UI : `pollJob` affiche le VRAI message par scène (`.scene-err` + survol) via `prettyError`
-  (401 / trop long / voix introuvable / etc.), au lieu de « échec ». Test `_audio_mime` ajouté.
+## 2026-07-15 — Modales + raccourci réparé
 
 ### C2 — Vraie app (modales) + raccourci réparé
 - Modale intégrée (`showModal`/`alertModal` + overlay HTML/CSS) remplace le seul `confirm()` natif.
@@ -214,15 +134,12 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   disparaît). Fix : `_prepare_streams()` (redirige vers `app.log`) + `log_config=None`.
   **Vérifié en lançant le vrai .lnk comme un double-clic** : serveur up + fenêtre ouverte, 0 crash.
 
-### C3 — Libellé coût explicite
-- « ≈ N crédits au total (X scènes, ~M crédits/scène) » (même calcul, plus clair).
-
 - Vérif : ruff ✓ · mypy ✓ · pytest 52/52 · node --check ✓ · aucun popup natif restant.
 - **Sous-agents** :
-  - *Testeur* : TOUT VERT (8/8 : ruff, mypy, 52 tests, node, _audio_mime=audio/x-wav, modale servie,
-    raccourci correct, libellé coût).
-  - *Relecteur* : 0 défaut critique/important, 3 fixes corrects sans régression. 2 points MINEURS
-    corrigés : regex `401`/`1500` ancrées (plus de faux positifs), pluriel « crédit(s) au total ».
+  - *Testeur* : TOUT VERT (ruff, mypy, 52 tests, node, modale servie,
+    raccourci correct).
+  - *Relecteur* : 0 défaut critique/important, fixes corrects sans régression. 1 point MINEUR
+    corrigé : regex `401`/`1500` ancrées (plus de faux positifs).
   - Re-vérif : ruff ✓ · mypy ✓ · pytest 52/52 · anti-faux-positifs prettyError confirmé.
 - Raccourci « Pipeline UGC » testé en réel (double-clic) : serveur pythonw sans console + fenêtre,
   0 crash. App tourne (lancée par le raccourci), base/clés intactes, mode réel.
@@ -232,47 +149,13 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
 - Frontend uniquement (`static/app.js` + 1 ligne CSS `.card-sub`) ; backend et base intacts.
 - `renderCredits`/`renderQuota`/`pickNum`/`setTile` remplacent `fmtCredits`/`fmtQuota` : parse
   robuste, chiffre lisible (« 38 914 » via `toLocaleString('fr-FR')`) + sous-ligne « sur 45 000 »
-  (remaining_credits / allocated_credits). Champs manquants/inconnus → « — », **jamais de JSON
-  brut**. HeyGen rendu robuste pareil (gère `{remaining:{...}}`).
+  (remaining_credits / allocated_credits). Champs manquants/inconnus → « — », **jamais de JSON brut**.
 - Vérif : ruff ✓ · mypy ✓ · pytest 51/51 · logique JS testée sous node sur le cas réel signalé
   + cas limites (tous OK, aucun JSON brut). Fichier statique → visible après un rafraîchissement.
 
-## 2026-07-15 — Mode de sortie « Voix seules » (0 crédit API)
-
-Nouveau 3e mode à l'étape « Générer les vidéos » (à côté de Premium/Classique). Sans RIEN
-changer à la tuile « Voix off » (BIENTÔT), qui n'est pas touchée.
-- **Flux** : découpage cerveau + voix Gradium par scène → **S'ARRÊTE avant HeyGen** (0 crédit
-  vidéo). Crée un dossier au nom de la pub dans `%LOCALAPPDATA%\PipelineUGC\data\voix\` avec
-  `1.wav, 2.wav…` + `recap.html` (par scène : script verbatim + motion prompt à coller). Ouvre
-  le dossier (explorateur) et affiche le message « Voix générées (0 crédit API). Va dans HeyGen
-  → avatar … → dépose l'audio N + colle le motion prompt N, dans l'ordre. »
-- **N'atterrit PAS dans la Bibliothèque** (`/api/library` exclut `status == "voix_seules"`)
-  mais garde une trace (ad + clips `voix_pret` en base + dossier).
-- **Backend** : `pipeline.generate_voices_only` / `_write_recap` (HTML échappé) / `_safe_name`
-  / `voices_dir` / `_open_folder` (gardé par `UGC_NO_OPEN`) ; `jobs.start(output_mode=...)` ;
-  `/api/generate` (avatar & confirmation non requis en voix seules, voix toujours requise) ;
-  `config_app.VOICES_DIR`.
-- **Frontend** : 3e `.mode-card` `voix_seules` (grille 3 col.) ; `selectMode`/`updateEstimateLine`
-  (« 0 crédit API ») ; `#generateBtn` saute la modale de dépense ; `pollJob` affiche la modale
-  dossier au lieu de charger la Bibliothèque.
-- Vérif : ruff ✓ · mypy ✓ (12 fichiers) · **pytest 61/61** · boot uvicorn réel ✓ (health 200,
-  card `voix_seules` servie).
-- **Sous-agent relecteur** : 4 points de la spec corrects (aucun décalage de clés `summary`,
-  XSS échappé, verbatim intact, `UGC_NO_OPEN` en place). 2 durcissements intégrés :
-  - **[Moyen] écrasement silencieux** : deux pubs du même nom (défaut « pub ») écrivaient dans
-    le même dossier → `voices_dir` suffixe par `ad_id` si le dossier existe déjà (plus de perte
-    de .wav/recap précédents).
-  - **[Faible] noms réservés Windows** (CON, PRN, COM1…) : `_safe_name` les préfixe par `_`
-    (mkdir OK). Point « `#brainBtn` exige un avatar » ÉCARTÉ : pré-existant, hors périmètre,
-    Théo a toujours son avatar sélectionné.
-  - Re-vérif après correctifs : ruff ✓ · mypy ✓ · **pytest 63/63** (2 tests ajoutés :
-    non-écrasement même nom + `_safe_name` réservés/interdits/vide).
-- **Reste** : relancer l'app quand tu veux (double-clic « Pipeline UGC » ou `python -m app.main`)
-  pour voir le 3e bouton — l'instance en cours tourne encore l'ancien code.
-
 ## 2026-07-15 — NOUVEAU PIPELINE « Objet animé » (Higgsfield) — PHASE 1 (images + validation)
 
-2e type de pub, ajouté sans casser l'avatar ni « voix seules ». Recherche préalable du
+2e type de pub, ajouté sans casser les flux existants. Recherche préalable du
 SDK/API Higgsfield (endpoints/champs exacts, cf. mémoire higgsfield-api) : auth
 `Authorization: Key ID:SECRET`, Nano Banana images (réfs via `input_images`), image2video/dop,
 polling `GET /requests/{id}/status`. 3 incertitudes centralisées dans `providers.HIGGSFIELD_FIELDS`.
@@ -308,11 +191,10 @@ polling `GET /requests/{id}/status`. 3 incertitudes centralisées dans `provider
 - **Reste (phase 2, OA-7)** : brancher l'animation image→vidéo (image2video/dop) des plans
   VALIDÉS → clips numérotés en Bibliothèque + coût vidéo + confirmation. À faire après ton feu vert.
 
-## 2026-07-15 — Style « Voix off » activé (voix Gradium seule, version allégée de « voix seules »)
+## 2026-07-15 — Style « Voix off » activé (voix Gradium seule)
 
 4e style dans « Nouvelle pub » (la tuile 🎙️ Voix off n'est plus BIENTÔT). Script → voix
-Gradium SEULE : pas d'avatar, pas de motion, pas de HeyGen/Higgsfield, 0 crédit vidéo.
-Réutilise la voix Gradium + le pattern dossier/récap de « voix seules », allégé.
+Gradium SEULE : pas d'avatar, pas de motion, 0 crédit vidéo.
 
 - **Parcours** : choisir la voix → coller le script (verbatim) → (aperçu du découpage) →
   générer. Sortie : dossier au nom de la pub avec `1.wav, 2.wav…` (ou `voixoff.wav` si court)
@@ -332,7 +214,7 @@ Réutilise la voix Gradium + le pattern dossier/récap de « voix seules », all
 - **Sous-agent relecteur** : XSS/limite 1500/nommage/non-régression RAS. 3 correctifs intégrés :
   (1) **garde verbatim** remplacé (l'ancien `brain.verbatim_ok` global rejetait à tort les
   découpes MIXTES phrase + coupe mi-token) par une comparaison du contenu non-blanc ;
-  (2) pubs audio (voix off ET voix seules) marquées **`kind="audio"`** → exclues de la
+  (2) pubs audio marquées **`kind="audio"`** → exclues de la
   Bibliothèque même en cours/échec (corrige une fuite si le job plante) ; (3) échec global du
   job voix off affiché (plus de fausse modale « succès »).
 
@@ -416,7 +298,7 @@ d'image câblé sur sa clé) + de rendre le modèle configurable.
 
 Question de Théo : 500 crédits au dashboard mais l'API dit `not_enough_credits`.
 - **Diagnostic (0 coût)** : la clé de l'app = KEY_ID `17c8e4d1-…`. Aucun endpoint de solde exposé
-  par l'API (tous 404/405). **Crédits WEB ≠ crédits API** (comme HeyGen) : le pool web/abonnement
+  par l'API (tous 404/405). **Crédits WEB ≠ crédits API** : le pool web/abonnement
   (500) n'est PAS visible par la clé API, qui a un **wallet séparé, vide** → 403. À recharger sur
   cloud.higgsfield.ai (facturation API).
 - **Modèles réellement dispo sur ce compte = famille SOUL** (nano-banana = 404 backend ;
@@ -472,11 +354,11 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
   (fidélité produit), 9:16. **Modèles vérifiés RÉELS** (docs Google, juillet 2026).
 - **Vidéo = xAI Grok** (`providers.grok_generate_video`) : `POST api.x.ai/v1/videos/generations`,
   Bearer, `grok-imagine-video`, image→vidéo + polling. **Endpoint/modèle vérifiés RÉELS** (docs
-  xAI). Champs exacts du body dans `GROK_FIELDS` à caler au 1er vrai appel (comme HeyGen).
+  xAI). Champs exacts du body dans `GROK_FIELDS` à caler au 1er vrai appel.
 - Réglages : clés **Google** + **xAI** (Higgsfield retirée) ; coûts en **$** ; drag&drop réfs ;
   bouton « Animer ». Plus AUCUN code Higgsfield (grep = 0 dans app/).
 - Vérif (par moi, pas que l'agent) : ruff ✓ · mypy ✓ · **pytest 93** ✓ · boot ✓ (clés google/xai
-  servies, dropdowns, bouton Animer, dropzone) · avatar/voix seules/voix off intacts · modèles &
+  servies, dropdowns, bouton Animer, dropzone) · autres flux intacts · modèles &
   endpoints Google/xAI confirmés réels par recherche web.
 - **Reste (Théo)** : ajouter dans Réglages la clé **Google AI Studio** (aistudio.google.com,
   Nano Banana, offre gratuite) + la clé **xAI** (console.x.ai) ; `pip install google-genai` ;

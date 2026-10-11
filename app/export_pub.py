@@ -42,7 +42,7 @@ AD_CHARACTER_FIELDS: tuple[str, ...] = ("persos", "characters", "personas")
 
 # Clips exportables : vidéo prête (validée puis animée) ET fichier présent sur le disque.
 EXPORTABLE_STATUS = "pret"
-EXPORTABLE_KINDS = ("objet", "mashup", "avatar_omni", "avatar")
+EXPORTABLE_KINDS = ("objet", "mashup", "avatar_omni")
 
 _APOSTROPHES = re.compile("['’‘ʼ´`]")   # ' ’ ‘ ʼ ´ `
 _WIN_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')

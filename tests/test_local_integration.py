@@ -17,7 +17,7 @@ from test_comfy_local import _validate
 from app import comfy_local, comfy_queue, config_app, db, keyframe_versions, local_routes, pipeline
 from app.main import app
 
-_TABLES = ("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings", "avatars",
+_TABLES = ("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings",
            "voices", "activity", "characters", "presets", "jobs_inflight", "generations",
            "plan_feedback", "local_gens")
 

@@ -8,9 +8,6 @@ from app.providers import (
     ProviderConfig,
     gradium_credits,
     gradium_tts,
-    heygen_create_video,
-    heygen_render_to_file,
-    heygen_upload_audio,
 )
 
 
@@ -31,22 +28,6 @@ def test_gradium_tts_mp3_by_default(tmp_path):
     out = gradium_tts(_cfg(), "Bonjour ceci est un test.", tmp_path / "voix.wav")
     assert out.endswith(".mp3") and Path(out).exists() and Path(out).stat().st_size > 0
     assert not (tmp_path / "voix.wav").exists()
-
-
-def test_heygen_dry_run_flow(tmp_path):
-    cfg = _cfg()
-    asset = heygen_upload_audio(cfg, tmp_path / "voix.wav")
-    assert asset == "SIMU_ASSET_ID"
-    vid = heygen_create_video(cfg, "AV_1", asset, "gesture", "pub_01")
-    assert vid.startswith("SIMU_VIDEO")
-
-
-def test_heygen_render_makes_mp4(tmp_path):
-    if not media.ffmpeg_available():
-        return  # ffmpeg requis pour un vrai mp4 ; sinon on ne teste pas la lecture
-    out = tmp_path / "1.mp4"
-    heygen_render_to_file(_cfg(), "SIMU_VIDEO_x", out, scene_label="scene 1")
-    assert Path(out).exists() and Path(out).stat().st_size > 500
 
 
 def test_gradium_credits_simulation():
@@ -132,7 +113,7 @@ def test_request_with_retries_uses_large_timeout_and_succeeds(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(pv.requests, "request", fake_request)
-    r = pv._request_with_retries("GET", "https://x/y", service="HeyGen")
+    r = pv._request_with_retries("GET", "https://x/y", service="Gradium")
     assert r.status_code == 200
     assert seen["timeout"] == pv.CONNECTION_TEST_TIMEOUT  # timeout large appliqué
 
@@ -176,58 +157,12 @@ def test_request_with_retries_clear_message_after_exhaustion(monkeypatch):
 
     monkeypatch.setattr(pv.requests, "request", always_timeout)
     try:
-        pv._request_with_retries("GET", "https://x/y", service="HeyGen")
+        pv._request_with_retries("GET", "https://x/y", service="Gradium")
         raise AssertionError("aurait dû lever ProviderError")
     except pv.ProviderError as exc:
         msg = str(exc)
-        assert "HeyGen" in msg and "connexion instable" in msg.lower()
+        assert "Gradium" in msg and "connexion instable" in msg.lower()
         assert "pas forcément une clé invalide" in msg.lower()
-
-
-def test_audio_mime_wav_is_x_wav():
-    # HeyGen exige audio/x-wav pour un WAV (sinon 400 code 400543).
-    from app.providers import _audio_mime
-
-    assert _audio_mime("scene1.wav") == "audio/x-wav"
-    assert _audio_mime("C:/x/1.WAV") == "audio/x-wav"
-    assert _audio_mime("clip.mp3") == "audio/mpeg"
-
-
-def test_create_video_payload_confirmed_shape():
-    # Payload /v3/videos confirmé accepté par HeyGen (schéma strict).
-    from app.providers import ProviderConfig, _create_video_payload
-
-    p = _create_video_payload(
-        ProviderConfig(cost_mode="premium"), "AV1", "ASSET1", "smile", "ma_pub"
-    )
-    assert p["type"] == "avatar"
-    assert p["avatar_id"] == "AV1"
-    assert p["audio_asset_id"] == "ASSET1"
-    assert p["motion_prompt"] == "smile"
-    assert p["title"] == "ma_pub" and "video_title" not in p  # renommé
-    assert p["aspect_ratio"] == "9:16" and "dimension" not in p  # 9:16 par aspect_ratio
-    assert p["engine"] == {"type": "avatar_v"}
-
-
-def test_create_video_payload_modes():
-    # Le mode change RÉELLEMENT le payload (moteur + présence du motion).
-    from app.providers import ProviderConfig, _create_video_payload
-
-    prem = _create_video_payload(ProviderConfig(cost_mode="premium"), "AV1", "AS1", "smile", "t")
-    assert prem["engine"] == {"type": "avatar_v"}
-    assert prem["motion_prompt"] == "smile"
-
-    assert prem["resolution"] == "1080p"  # Premium : pleine résolution
-
-    clas = _create_video_payload(ProviderConfig(cost_mode="classique"), "AV1", "AS1", "smile", "t")
-    assert clas["engine"] == {"type": "avatar_iv"}
-    assert "motion_prompt" not in clas  # Classique : pas de motion prompt (pas de ×2)
-    assert clas["resolution"] == "720p"  # Classique : 720p (moins cher)
-    assert clas["title"] == "t" and clas["aspect_ratio"] == "9:16"
-
-    # enhance_custom_motion_prompt : JAMAIS envoyé (rejeté par HeyGen)
-    assert "enhance_custom_motion_prompt" not in prem
-    assert "enhance_custom_motion_prompt" not in clas
 
 
 # ---------------------------------------------------- Objet animé (Nano Banana + Grok)

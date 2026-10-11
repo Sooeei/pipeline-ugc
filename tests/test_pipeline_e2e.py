@@ -1,69 +1,9 @@
-"""E2E du cœur en simulation : génération complète → clips mp4 en base."""
+"""E2E du cœur en simulation : animation Objet animé, voix off, dossiers de sortie."""
 
 from pathlib import Path
 
 from app import db
-from app.pipeline import generate_ad
 from app.providers import ProviderConfig
-
-
-def test_avatar_two_phase_voices_then_videos(monkeypatch):
-    """Déroulé en 2 phases : TOUTES les voix Gradium (2 max simultanées) d'abord, PUIS les
-    vidéos HeyGen en parallèle. On instrumente les appels pour vérifier ordre + concurrence."""
-    import threading
-    import time
-
-    from app import config_app, pipeline
-
-    lock = threading.Lock()
-    cur = {"voice": 0, "video": 0}
-    peak = {"voice": 0, "video": 0}
-    timeline: list[tuple[str, str, float]] = []
-
-    def _mark(kind: str, edge: str) -> None:
-        with lock:
-            if edge == "start":
-                cur[kind] += 1
-                peak[kind] = max(peak[kind], cur[kind])
-            else:
-                cur[kind] -= 1
-            timeline.append((kind, edge, time.time()))
-
-    def fake_tts(cfg, script, wav, fmt="wav"):
-        _mark("voice", "start")
-        time.sleep(0.12)
-        Path(wav).write_bytes(b"w")
-        _mark("voice", "end")
-        return str(wav)
-
-    def fake_upload(cfg, wav):
-        _mark("video", "start")
-        time.sleep(0.12)
-        return "asset"
-
-    def fake_render(cfg, vid, mp4, scene_label=""):
-        Path(mp4).write_bytes(b"m")
-        _mark("video", "end")
-        return str(mp4)
-
-    monkeypatch.setattr(pipeline, "gradium_tts", fake_tts)
-    monkeypatch.setattr(pipeline, "heygen_upload_audio", fake_upload)
-    monkeypatch.setattr(pipeline, "heygen_create_video", lambda *a, **k: "vid")
-    monkeypatch.setattr(pipeline, "heygen_render_to_file", fake_render)
-
-    scenes = [{"n": i, "script": f"Scène {i}.", "motion_prompt": "m"} for i in range(1, 5)]
-    ad_id = db.create_ad("deux_phases", "av", "[]", kind="avatar")
-    res = generate_ad(ProviderConfig(dry_run=True), ad_id, "deux_phases", scenes, "AV")
-
-    assert res["ok"] == 4 and res["echec"] == 0
-    # 1) Au plus 2 voix EN MÊME TEMPS (limite Gradium), et au moins 2 l'ont été (file de 2).
-    assert peak["voice"] == config_app.GRADIUM_MAX_PARALLEL == 2
-    # 2) Les vidéos tournent EN PARALLÈLE (plus d'une à la fois).
-    assert peak["video"] >= 2
-    # 3) ORDRE : la DERNIÈRE voix se termine AVANT la 1re vidéo (phase 1 finie avant phase 2).
-    last_voice_end = max(t for k, e, t in timeline if k == "voice" and e == "end")
-    first_video_start = min(t for k, e, t in timeline if k == "video" and e == "start")
-    assert last_voice_end <= first_video_start
 
 
 def test_animate_objet_clips_dry_run():
@@ -85,32 +25,6 @@ def test_animate_objet_clips_dry_run():
     assert db.get_clip(c2)["status"] == "image_pret"  # intact
 
 
-def test_full_generation_dry_run():
-    scenes = [
-        {"n": 1, "script": "Première scène de test.", "motion_prompt": "smile"},
-        {"n": 2, "script": "Deuxième scène de test.", "motion_prompt": "nod"},
-    ]
-    ad_id = db.create_ad("pub_test", "label1", "[]")
-    cfg = ProviderConfig(dry_run=True)
-
-    events = []
-    summary = generate_ad(cfg, ad_id, "pub_test", scenes, "AV_1", on_update=events.append)
-
-    assert summary["ok"] == 2
-    assert summary["echec"] == 0
-    assert summary["status"] == "termine"
-
-    ads = db.list_ads_with_clips()
-    clips = ads[0]["clips"]
-    assert len(clips) == 2
-    for c in clips:
-        assert c["status"] == "pret"
-        assert c["mp4_path"] and Path(c["mp4_path"]).exists()
-
-    # la progression a bien émis des événements « pret »
-    assert any(e.get("phase") == "pret" for e in events)
-
-
 def test_split_voiceover_short_single_segment():
     from app.pipeline import split_voiceover
 
@@ -130,14 +44,14 @@ def test_split_voiceover_long_is_verbatim_and_within_limit():
     assert len(segs) >= 2
     assert all(len(s) <= 1500 for s in segs)               # respecte la limite Gradium
     # garde-fou verbatim : la concaténation reconstitue le script (espaces normalisés)
-    assert brain.verbatim_ok(script, [{"script": s} for s in segs])
+    assert brain.dialogue_verbatim_ok(script, [{"dialogue": s} for s in segs])
 
 
 def test_generate_voiceover_dry_run(tmp_path):
     from app.pipeline import generate_voiceover
     from app.providers import ProviderConfig
 
-    ad_id = db.create_ad("ma_voix_off", "", "[]")
+    ad_id = db.create_ad("ma_voix_off", "", "[]", kind="audio")
     segments = ["Premier segment de la voix.", "Deuxième segment de la voix."]
     summary = generate_voiceover(
         ProviderConfig(dry_run=True), ad_id, "ma_voix_off", segments,
@@ -175,7 +89,7 @@ def test_generate_voiceover_single_file(tmp_path):
     from app.pipeline import generate_voiceover
     from app.providers import ProviderConfig
 
-    ad_id = db.create_ad("courte", "", "[]")
+    ad_id = db.create_ad("courte", "", "[]", kind="audio")
     summary = generate_voiceover(
         ProviderConfig(dry_run=True), ad_id, "courte", ["Un seul segment court."],
         full_script="Un seul segment court.",
@@ -190,7 +104,7 @@ def test_generate_voiceover_wav_format_still_supported(tmp_path):
     from app.pipeline import generate_voiceover
     from app.providers import ProviderConfig
 
-    ad_id = db.create_ad("courte_wav", "", "[]")
+    ad_id = db.create_ad("courte_wav", "", "[]", kind="audio")
     summary = generate_voiceover(
         ProviderConfig(dry_run=True, audio_format="wav"), ad_id, "courte_wav",
         ["Un seul segment."], full_script="Un seul segment.",
@@ -199,48 +113,22 @@ def test_generate_voiceover_wav_format_still_supported(tmp_path):
     assert (folder / "voixoff.wav").exists() and not (folder / "voixoff.mp3").exists()
 
 
-def test_voices_only_dry_run():
-    from app.pipeline import generate_voices_only
+def test_voiceover_same_name_does_not_overwrite():
+    """Deux pubs du même nom (ex. « pub » par défaut) → dossiers distincts, aucun écrasement
+    (`_unique_pub_dir` : le 2e dossier est suffixé par l'id de la pub)."""
+    from app.pipeline import generate_voiceover
 
-    scenes = [
-        {"n": 1, "script": "Phrase une du hook.", "motion_prompt": "smile at camera"},
-        {"n": 2, "script": "Deuxième idée ici.", "motion_prompt": "soft nod"},
-    ]
-    ad_id = db.create_ad("ma_pub_voix", "Robine", "[]")
-    summary = generate_voices_only(
-        ProviderConfig(dry_run=True), ad_id, "ma_pub_voix", scenes, avatar_label="Robine"
-    )
-    assert summary["ok"] == 2 and summary["echec"] == 0
-    assert summary["status"] == "voix_seules"
-
-    folder = Path(summary["folder"])
-    assert (folder / "1.mp3").exists() and (folder / "2.mp3").exists()  # audios numérotés (MP3)
-    recap = folder / "recap.html"
-    assert recap.exists()
-    txt = recap.read_text(encoding="utf-8")
-    # récap : script verbatim + motion prompt + avatar
-    assert "Phrase une du hook." in txt and "smile at camera" in txt and "Robine" in txt
-
-    # trace en base : ad marquée voix_seules, scripts intacts (verbatim)
-    ad = next(a for a in db.list_ads_with_clips() if a["id"] == ad_id)
-    assert ad["status"] == "voix_seules"
-    assert [c["script"] for c in ad["clips"]] == ["Phrase une du hook.", "Deuxième idée ici."]
-
-
-def test_voices_only_same_name_does_not_overwrite():
-    """Deux pubs du même nom (ex. « pub » par défaut) → dossiers distincts, aucun écrasement."""
-    from app.pipeline import generate_voices_only
-
-    scenes = [{"n": 1, "script": "Une seule scène.", "motion_prompt": "smile"}]
     cfg = ProviderConfig(dry_run=True)
+    seg = ["Un seul segment."]
 
-    id1 = db.create_ad("pub", "Robine", "[]")
-    f1 = Path(generate_voices_only(cfg, id1, "pub", scenes)["folder"])
-    id2 = db.create_ad("pub", "Robine", "[]")
-    f2 = Path(generate_voices_only(cfg, id2, "pub", scenes)["folder"])
+    id1 = db.create_ad("meme_nom", "", "[]", kind="audio")
+    f1 = Path(generate_voiceover(cfg, id1, "meme_nom", seg, full_script=seg[0])["folder"])
+    id2 = db.create_ad("meme_nom", "", "[]", kind="audio")
+    f2 = Path(generate_voiceover(cfg, id2, "meme_nom", seg, full_script=seg[0])["folder"])
 
     assert f1 != f2                                   # pas le même dossier
-    assert (f1 / "1.mp3").exists() and (f2 / "1.mp3").exists()  # les deux voix conservées
+    assert f1.name == "meme_nom" and f2.name == f"meme_nom_{id2}"
+    assert (f1 / "voixoff.mp3").exists() and (f2 / "voixoff.mp3").exists()  # les deux voix conservées
 
 
 def test_safe_name_windows_reserved_and_illegal():

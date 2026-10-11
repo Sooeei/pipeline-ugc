@@ -1,9 +1,9 @@
 """Test d'installation propre (J2.8) : lance le .exe buildé dans un environnement ISOLÉ
 (dossier de données neuf, aucune clé) et vérifie boot + E2E en MODE SIMULATION.
 
-Déroulé : boot → /api/health (vierge : dry_run) → ajoute un avatar/voix factices →
-découpe un script (cerveau simulé) → génère la pub (voix + vidéo simulées) → confirme que
-des .mp4/.wav sont réellement produits. N'utilise NI tes clés NI ta base réelle.
+Déroulé : boot → /api/health (vierge : dry_run) → ajoute une voix factice → génère une
+« Voix off » (voix simulée, script découpé en segments) → confirme que les fichiers audio
+sont réellement produits. N'utilise NI tes clés NI ta base réelle.
 
 Usage : py -3.14 verify_install.py   (après le build PyInstaller)
 Sort en erreur (code 1) si quoi que ce soit échoue.
@@ -80,16 +80,11 @@ def main() -> int:
             print("FAIL : démarrage non vierge ou identité incorrecte.")
             return 1
 
-        post("/api/avatars", {"label": "avtest", "avatar_id": "av_test_123"})
         post("/api/voices", {"label": "voixtest", "voice_id": "v1"})
-        scenes = post(
-            "/api/brain/generate-scenes",
-            {"script": SCRIPT, "style": "avatar", "avatar_label": "avtest"},
-        )["scenes"]
-        job_id = post("/api/generate", {
-            "ad_name": "test_install", "avatar_label": "avtest",
-            "voice_label": "voixtest", "cost_mode": "classique", "scenes": scenes,
-        })["job_id"]
+        started = post("/api/voiceover/generate", {
+            "ad_name": "test_install", "voice_label": "voixtest", "script": SCRIPT,
+        })
+        job_id, segments = started["job_id"], int(started["segments"])
 
         state = None
         for _ in range(80):
@@ -98,20 +93,27 @@ def main() -> int:
                 break
             time.sleep(0.5)
         summary = get(f"/api/jobs/{job_id}").get("summary", {})
-        mp4 = glob.glob(os.path.join(data_dir, "**", "*.mp4"), recursive=True)
-        wav = glob.glob(os.path.join(data_dir, "**", "*.wav"), recursive=True)
-        print(f"state={state} summary={summary} mp4={len(mp4)} wav={len(wav)}")
+        folder = str(summary.get("folder") or "")
+        audio = [
+            f for ext in ("mp3", "wav")
+            for f in glob.glob(os.path.join(folder, f"*.{ext}"))
+            if os.path.getsize(f) > 0
+        ] if folder else []
+        print(f"state={state} summary={summary} audio={len(audio)}")
 
         ok = (
             state == "termine"
-            and summary.get("ok") == len(scenes)
+            and segments >= 1
+            and summary.get("ok") == segments
             and summary.get("echec") == 0
-            and len(mp4) == len(scenes)
+            and len(audio) == segments
+            and os.path.normcase(os.path.abspath(folder)).startswith(
+                os.path.normcase(os.path.abspath(data_dir)))
         )
         if not ok:
             print("FAIL : E2E simulation incomplet.")
             return 1
-        print(f"OK : installation propre — boot vierge + E2E simulation vert ({len(scenes)} clips).")
+        print(f"OK : installation propre — boot vierge + E2E simulation vert ({segments} audio).")
         return 0
     finally:
         proc.terminate()

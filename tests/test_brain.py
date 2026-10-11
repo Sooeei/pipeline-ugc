@@ -17,68 +17,40 @@ def _cfg():
 
 
 def test_verbatim_ok_true():
-    scenes = [
-        {"script": "Bonjour tout le monde."},
-        {"script": "Ça va bien aujourd'hui ?"},
+    shots = [
+        {"dialogue": "Bonjour tout le monde."},
+        {"dialogue": "Ça va bien aujourd'hui ?"},
     ]
-    assert brain.verbatim_ok("Bonjour tout le monde. Ça va bien aujourd'hui ?", scenes)
+    assert brain.dialogue_verbatim_ok("Bonjour tout le monde. Ça va bien aujourd'hui ?", shots)
 
 
 def test_verbatim_ok_ignores_whitespace_only():
-    scenes = [{"script": "un   deux"}, {"script": "trois"}]
-    assert brain.verbatim_ok("un deux trois", scenes)
+    shots = [{"dialogue": "un   deux"}, {"dialogue": "trois"}]
+    assert brain.dialogue_verbatim_ok("un deux trois", shots)
 
 
 def test_verbatim_ok_false_when_text_changed():
-    scenes = [{"script": "Bonjour le monde."}]  # mot supprimé
-    assert not brain.verbatim_ok("Bonjour tout le monde.", scenes)
-
-
-def test_generate_scenes_dry_run_reconstitutes_verbatim():
-    result = brain.generate_scenes(_cfg(), SCRIPT, "ton sincère", "avatar", "maquilleuse_50")
-    assert result["avatar"] == "maquilleuse_50"
-    scenes = result["scenes"]
-    assert len(scenes) == 3  # 3 phrases -> 3 scènes (hook isolé)
-    # garde-fou : concaténation == script d'origine
-    assert brain.verbatim_ok(SCRIPT, scenes)
-    for i, s in enumerate(scenes, 1):
-        assert s["n"] == i
-        assert s["motion_prompt"]  # motion prompt présent
-
-
-def test_style_not_available_raises():
-    with pytest.raises(brain.BrainError):
-        brain.generate_scenes(_cfg(), SCRIPT, "", "objet_vivant", "av")
-
-
-def test_empty_script_raises():
-    with pytest.raises(brain.BrainError):
-        brain.generate_scenes(_cfg(), "   ", "", "avatar", "av")
-
-
-def test_simulate_single_sentence_no_terminal_punct():
-    scenes = brain._simulate_scenes("juste une ligne sans ponctuation finale")
-    assert len(scenes) == 1
-    assert brain.verbatim_ok("juste une ligne sans ponctuation finale", scenes)
+    shots = [{"dialogue": "Bonjour le monde."}]  # mot supprimé
+    assert not brain.dialogue_verbatim_ok("Bonjour tout le monde.", shots)
 
 
 def test_verbatim_accepts_glued_punctuation_boundary():
     # Le modèle coupe là où il n'y avait pas d'espace : doit être accepté.
     original = "Prix: 9.99$.Commande maintenant."
-    scenes = [{"script": "Prix: 9.99$."}, {"script": "Commande maintenant."}]
-    assert brain.verbatim_ok(original, scenes)
+    shots = [{"dialogue": "Prix: 9.99$."}, {"dialogue": "Commande maintenant."}]
+    assert brain.dialogue_verbatim_ok(original, shots)
 
 
 def test_verbatim_still_rejects_real_alteration_at_boundary():
     original = "les cils fragiles"
     # mots fusionnés (altération réelle) -> rejeté
-    assert not brain.verbatim_ok(original, [{"script": "lescils fragiles"}])
+    assert not brain.dialogue_verbatim_ok(original, [{"dialogue": "lescils fragiles"}])
 
 
 def test_script_too_long_raises():
     long_script = "Phrase. " * 4000  # > 20000 caractères
     with pytest.raises(brain.BrainError):
-        brain.generate_scenes(_cfg(), long_script, "", "avatar", "av")
+        brain.generate_shooting_plan(_cfg(), "Lunia", "ambiance", long_script)
 
 
 def test_anthropic_check_simulation():

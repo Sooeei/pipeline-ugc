@@ -25,7 +25,7 @@ def test_friendly_anthropic_generic_when_unknown():
 
 def test_pipeline_user_error_provider_passthrough():
     # Un message fournisseur est DÉJÀ clair → conservé tel quel.
-    friendly = "Clé HeyGen refusée — vérifie-la dans Réglages."
+    friendly = "Clé Gradium refusée — vérifie-la dans Réglages."
     assert pipeline._user_error_message(ProviderError(friendly)) == friendly
 
 

@@ -1,3 +1,5 @@
+import pytest
+
 from app import db
 
 
@@ -9,17 +11,8 @@ def test_settings_roundtrip():
     assert db.get_setting("k") == "v2"
 
 
-def test_avatars_crud():
-    rid = db.add_avatar("label1", "AV_1")
-    assert db.avatar_id_for_label("label1") == "AV_1"
-    assert len(db.list_avatars()) == 1
-    db.delete_avatar(rid)
-    assert db.list_avatars() == []
-    assert db.avatar_id_for_label("label1") is None
-
-
 def test_ads_and_clips():
-    ad_id = db.create_ad("pub", "label1", "[]")
+    ad_id = db.create_ad("pub", "", "[]", kind="objet")
     c1 = db.create_clip(ad_id, 1, "texte 1", "motion 1")
     db.update_clip(c1, status="pret", mp4_path="x.mp4")
     ads = db.list_ads_with_clips()
@@ -30,7 +23,7 @@ def test_ads_and_clips():
 
 
 def test_reset_clips_pending_bulk():
-    ad_id = db.create_ad("pub", "label1", "[]")
+    ad_id = db.create_ad("pub", "", "[]", kind="objet")
     c1 = db.create_clip(ad_id, 1, "t1", "m1")
     c2 = db.create_clip(ad_id, 2, "t2", "m2")
     c3 = db.create_clip(ad_id, 3, "t3", "m3")
@@ -53,12 +46,31 @@ def test_activity():
     assert rows[0]["message"] == "coucou"
 
 
-def test_ad_kind_defaults_avatar_and_objet():
-    a1 = db.create_ad("pub avatar", "label1", "[]")
+def test_ad_kind_is_required_and_stored():
+    """`kind` est obligatoire (par mot-clé) à la création d'une pub ; le DDL, lui, est inchangé
+    (défaut historique de la colonne conservé pour les bases existantes)."""
+    with pytest.raises(TypeError):
+        db.create_ad("pub sans kind", "", "[]")                 # kind absent → refus
+    with pytest.raises(TypeError):
+        db.create_ad("pub", "", "[]", "objet")                  # kind positionnel → refus
+    with pytest.raises(ValueError):
+        db.create_ad("pub kind vide", "", "[]", kind="")
+    assert db.list_ads_with_clips() == []                       # rien n'a été créé
+    a1 = db.create_ad("pub audio", "", "[]", kind="audio")
     a2 = db.create_ad("pub objet", "", "[]", kind="objet")
-    assert db.get_ad(a1)["kind"] == "avatar"          # défaut rétro-compatible
+    assert db.get_ad(a1)["kind"] == "audio"
     assert db.get_ad(a2)["kind"] == "objet"
     assert db.get_ad(999999) is None
+    # DDL inchangé : une ligne insérée sans kind (ancienne base) garde le défaut de la colonne.
+    con = db.connect()
+    try:
+        cur = con.execute(
+            "INSERT INTO ads(name, avatar_label, created_at, scenes_json) VALUES('vieux','x',1,'[]')")
+        con.commit()
+        old_id = int(cur.lastrowid)
+    finally:
+        con.close()
+    assert db.get_ad(old_id)["kind"] == "avatar"
 
 
 def test_clip_prompt_image_and_get_clip():
@@ -106,6 +118,6 @@ def test_migration_adds_missing_columns_on_old_db():
     db.init_db()  # doit ajouter kind (ads) + prompt_image/image_path (clips)
 
     ad = db.list_ads_with_clips()[0]
-    assert ad["kind"] == "avatar"                 # défaut appliqué aux lignes existantes
+    assert ad["kind"] == "avatar"                 # défaut du DDL (inchangé) sur les lignes existantes
     cid = db.create_clip(ad["id"], 1, "", "m", prompt_image="p")  # nouvelles colonnes utilisables
     assert db.get_clip(cid)["prompt_image"] == "p"

@@ -793,7 +793,7 @@ def api_retouch(clip_id: int, body: RetouchIn) -> dict[str, Any]:
                    "message": f"Plan {n} : retouche prête (v{res.get('v')})."})
         return {"ok": 1, "echec": 0, "v": res.get("v"), "image_url": res.get("image_url")}
 
-    job = jobs.manager.start(cfg, int(clip["ad_id"]), str(ad.get("name") or ""), [{"n": n}], "",
+    job = jobs.manager.start(cfg, int(clip["ad_id"]), str(ad.get("name") or ""), [{"n": n}],
                              output_mode="retouche", only_clip_id=clip_id, runner=_run)
     return {"ok": True, "job_id": job.id, "clip_id": clip_id,
             "dry_run": False if local else cfg.dry_run}

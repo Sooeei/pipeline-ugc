@@ -1,5 +1,7 @@
 # Rapport — Phase 1 : Audit & optimisation (avant packaging .exe)
 
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
+
 > Objectif : nettoyer, dédupliquer et fiabiliser le code **sans changer le comportement
 > observable**, suite de tests verte après chaque jalon. Filet de sécurité git en place
 > (commit initial `258a143`). Réalisé le 2026-07-19.
@@ -18,9 +20,9 @@ Bilan diff : **13 fichiers, +418 / −355 lignes**. Un commit par jalon (rollbac
 ---
 
 ## J1.1 — Nettoyage code mort & artefacts (`a84d1d1`)
-- `config.example.py` + `config.py` : retrait de **8 champs jamais lus** par
-  `bootstrap.seed_from_config_if_empty` (`GRADIUM_BASE_URL`, `DEFAULT_AVATAR`, `HEYGEN_ENGINE`
-  [moteur retiré], `VIDEO_WIDTH/HEIGHT`, `ENHANCE_MOTION`, `OUTPUT_DIR/WORK_DIR`) → ne plus
+- `config.example.py` + `config.py` : retrait de **7 champs jamais lus** par
+  `bootstrap.seed_from_config_if_empty` (`GRADIUM_BASE_URL`, `DEFAULT_AVATAR`,
+  `VIDEO_WIDTH/HEIGHT`, `ENHANCE_MOTION`, `OUTPUT_DIR/WORK_DIR`) → ne plus
   afficher de réglages sans effet à l'utilisateur.
 - `media.fix_wav_file` supprimé (aucun appelant runtime ; le vrai chemin est `fix_wav_bytes`) + son test.
 - `main._media_url_any` (alias pass-through) inliné dans `_media_url`.

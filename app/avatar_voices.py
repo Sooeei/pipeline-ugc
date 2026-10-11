@@ -256,7 +256,7 @@ def _start_job(cfg: ProviderConfig, ad: dict[str, Any], targets: list[dict[str, 
     from . import jobs
 
     scenes = [{"n": int(c["scene_n"])} for c in targets]
-    return jobs.manager.start(cfg, int(ad["id"]), str(ad["name"]), scenes, "",
+    return jobs.manager.start(cfg, int(ad["id"]), str(ad["name"]), scenes,
                               output_mode="avatar_voices", only_clip_id=only_clip_id)
 
 

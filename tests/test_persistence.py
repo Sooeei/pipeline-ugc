@@ -25,7 +25,7 @@ def test_keys_persist_across_restart():
     with TestClient(app) as c1:
         r = c1.post("/api/settings", json={
             "gradium_api_key": "GD_REAL",
-            "heygen_api_key": "HG_REAL",
+            "openrouter_api_key": "OR_REAL",
             "anthropic_api_key": "ANT_REAL",
             "dry_run": True,
         })
@@ -35,13 +35,13 @@ def test_keys_persist_across_restart():
     with TestClient(app) as c2:
         s = c2.get("/api/settings").json()
         assert s["gradium_api_key_set"] is True
-        assert s["heygen_api_key_set"] is True
+        assert s["openrouter_api_key_set"] is True
         assert s["anthropic_api_key_set"] is True
 
     # 3) Les clés sont toujours EXPLOITABLES (valeurs réelles en base, non vidées).
     cfg = load_provider_config()
     assert cfg.gradium_api_key == "GD_REAL"
-    assert cfg.heygen_api_key == "HG_REAL"
+    assert cfg.openrouter_api_key == "OR_REAL"
     assert cfg.anthropic_api_key == "ANT_REAL"
 
 
@@ -74,4 +74,3 @@ def test_seed_ignores_placeholder_keys():
     # sinon l'UI afficherait « clé enregistrée » pour une clé factice.
     bootstrap.seed_from_config_if_empty()
     assert db.get_setting("gradium_api_key") == ""
-    assert db.get_setting("heygen_api_key") == ""

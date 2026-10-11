@@ -571,7 +571,7 @@ def test_use_as_plan_image_errors(c, fake, monkeypatch):
     assert c.post(f"/api/local/gens/{vid}/use-as-plan-image", json={"clip_id": cid}).status_code == 400
     pending = db.local_gen_add(kind="image", status="en_cours", prompt="p", seed=1)
     assert c.post(f"/api/local/gens/{pending}/use-as-plan-image", json={"clip_id": cid}).status_code == 400
-    _ad2, cid2 = _plan("avatar")       # Avatar HeyGen : pas d'image de plan
+    _ad2, cid2 = _plan("audio")        # pub audio (voix off) : pas d'image de plan
     assert c.post(f"/api/local/gens/{gid}/use-as-plan-image", json={"clip_id": cid2}).status_code == 400
     assert c.post(f"/api/local/gens/{gid}/use-as-plan-image", json={"clip_id": 999999}).status_code == 404
     assert c.post("/api/local/gens/999999/use-as-plan-image", json={"clip_id": cid}).status_code == 404

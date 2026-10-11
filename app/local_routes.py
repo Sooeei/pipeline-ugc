@@ -275,7 +275,7 @@ def _enqueue(gen_id: int, kind: str) -> dict[str, Any]:
 
     cfg = load_provider_config()
     with _cond:
-        job = jobs.manager.start(cfg, 0, "Local", [{"n": 1}], "",
+        job = jobs.manager.start(cfg, 0, "Local", [{"n": 1}],
                                  output_mode=f"local_{kind}", runner=_runner)
         holder["job_id"] = job.id
         cancel_ev = threading.Event()

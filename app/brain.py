@@ -1,8 +1,7 @@
-"""Cerveau IA : découpe un script UGC en scènes (script + motion prompt) via Claude.
+"""Cerveau IA : écrit les plans de tournage (Objet animé, Mashup, Avatar IA) via Claude.
 
 Contraintes fortes :
 - Le texte du script n'est JAMAIS modifié (garde-fou verbatim programmatique ci-dessous).
-- Sortie STRICTEMENT le JSON {"ad","avatar","scenes":[{"n","script","motion_prompt"}]}.
 - MODE SIMULATION (dry_run) : découpage local par phrases, 0 token, 0 crédit.
 """
 
@@ -17,58 +16,6 @@ from typing import Any
 
 from . import claude_code, config_app, cost, omni_timing, prompt_profiles, providers
 from .providers import ProviderConfig
-
-# --- System prompt (collé tel quel, ne pas reformuler) ---
-SYSTEM_PROMPT = """\
-Tu découpes un script de pub UGC (avatar face caméra) en scènes pour une génération IA.
-RÈGLES ABSOLUES :
-- Ne modifie JAMAIS le texte du script : verbatim, mot pour mot. La concaténation du
-  champ "script" de toutes les scènes, dans l'ordre, doit reconstituer EXACTEMENT le
-  script d'origine (mêmes mots, même ponctuation, même orthographe — y compris les
-  tournures québécoises et ce qui ressemble à des fautes). N'ajoute, n'enlève, ne corrige
-  rien.
-- Découpe le script en scènes par UNITÉ DE SENS, pas par phrase. Une scène = un plan =
-  une idée qui se tient. Regroupe dans la MÊME scène plusieurs phrases courtes qui
-  développent la même idée ou le même moment (ex. poser son autorité, décrire un
-  problème, énumérer un bénéfice). Ne crée une nouvelle scène QUE quand l'idée, le sujet
-  ou l'intention change vraiment. Vise des scènes de ~1 à 3 phrases quand elles vont
-  ensemble ; évite les scènes d'une seule phrase courte sauf pour le hook ou un moment
-  fort isolé. Le hook (la première phrase d'accroche) reste sa propre scène. Garde
-  l'ordre du script.
-
-  EXEMPLE (à suivre) — ces 3 phrases forment UNE SEULE scène car c'est une seule idée
-  (installer sa crédibilité) :
-  « Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer
-  tous les jours. Pis des clientes qui mettent de l'huile de ricin soir après soir en
-  attendant un miracle, j'en ai vu plus que tu penses. »
-  NE PAS les éclater en 3 scènes.
-- Pour chaque scène, écris un motion prompt HeyGen EN ANGLAIS, format
-  [partie du corps] + [action] + [émotion/intensité], UN geste + UNE expression maximum,
-  court. Objectif : un vrai acteur UGC, naturel, jamais robotique. Règles impératives :
-  • FACE CAMÉRA, TOUJOURS. L'avatar reste en permanence face à la caméra, corps ET visage
-    orientés vers l'objectif, regard sur la caméra dans TOUTES les scènes, sans exception.
-    N'écris JAMAIS de profil, trois-quarts, vue de côté, rotation, ni « turn », « look away »,
-    « to the side », « over the shoulder », « glance away », ni aucun regard/orientation
-    hors caméra — même si le script évoque quelqu'un ou quelque chose d'autre.
-  • PAS DE GESTES DE COMPTAGE SUR LES DOIGTS. N'utilise JAMAIS « hold up one/two/three
-    fingers », « count on fingers », « raise a/one finger » ni aucun geste de comptage
-    (les mains IA les rendent mal). Pour une énumération (premièrement / deuxièmement…),
-    reste sur l'expression du visage, un léger hochement ou une posture ouverte.
-  • MAINS SOBRES. Privilégie les gestes de tête, de regard, d'épaules et l'expression du
-    visage. Les gestes de mains marqués (pointer, paume ouverte) sont RARES, seulement
-    quand ça sert vraiment l'emphase, et espacés. Beaucoup de scènes restent en simple
-    expression + micro-mouvement. Tous les gestes se font de face. L'avatar ne
-    sur-gesticule JAMAIS.
-  • MICRO-MOUVEMENTS VARIÉS (réalisme acteur UGC). Change de micro-comportement à CHAQUE
-    scène au lieu de répéter le même. Répertoire subtil (à alterner) : léger mouvement de
-    tête, petit transfert du poids du corps, épaules qui se détendent, sourcil qui bouge
-    légèrement, respiration visible, courte pause naturelle, micro-inclinaison de la tête.
-    N'écris PAS le clignement des yeux (déjà généré automatiquement par HeyGen ; l'écrire
-    produit des clignements forcés peu naturels).
-- Sers-toi du brief pour le ton/la persona, mais n'injecte JAMAIS le brief dans le champ
-  "script".
-- Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises.
-"""
 
 MAX_SCRIPT_CHARS = 20000  # garde d'entrée : au-delà, on demande de découper la pub
 
@@ -344,46 +291,6 @@ def anthropic_check(cfg: ProviderConfig) -> dict[str, Any]:
         return {"ok": False, "message": "Anthropic : erreur inconnue — réessaie."}
     # Message clair et actionnable (réseau → « réessaie » ; sinon clé/crédits) ; détail → app.log.
     return {"ok": False, "message": _friendly_anthropic(last)}
-
-
-# ============================================================ API publique
-def generate_scenes(
-    cfg: ProviderConfig,
-    script: str,
-    brief: str,
-    style: str,
-    avatar_label: str,
-) -> dict[str, Any]:
-    """Retourne {"ad","avatar","scenes":[...]} ou lève BrainError.
-
-    Ce cerveau ne gère que le style « avatar » ; « Objet animé », « Mashup » et « Voix off »
-    ont leurs propres parcours (generate_shooting_plan / generate_mashup_plan / voix)."""
-    if style != "avatar":
-        raise BrainError(f"Style « {style} » pas encore disponible (bientôt).")
-    if not script.strip():
-        raise BrainError("Script vide.")
-    if len(script) > MAX_SCRIPT_CHARS:
-        raise BrainError(
-            f"Script trop long ({len(script)} caractères, max {MAX_SCRIPT_CHARS}). "
-            "Découpe-le en plusieurs pubs."
-        )
-
-    if cfg.dry_run:
-        scenes = _simulate_scenes(script)
-    else:
-        scenes = _generate_with_retry(cfg, script, brief, avatar_label)
-
-    # On écarte d'éventuelles scènes au script vide (n'affecte pas le verbatim).
-    scenes = [s for s in scenes if str(s.get("script", "")).strip()]
-    scenes = _renumber(scenes)
-    # Garde-fou final (défense en profondeur, même en simulation) : les scripts des scènes
-    # deviennent les tranches EXACTES du script original (points de coupe du modèle) ; refus si
-    # le texte a réellement été modifié.
-    aligned = _realign_shot_dialogues(script, scenes, key="script")
-    if aligned is None:
-        raise BrainVerbatimError("découpage refusé (texte altéré)")
-
-    return {"ad": _slug(script), "avatar": avatar_label, "scenes": aligned}
 
 
 # ==================================================== OBJET ANIMÉ (plan de tournage)
@@ -4307,17 +4214,12 @@ def realign_to_script(script: str, dialogues: list[str]) -> list[str] | None:
 def _realign_shot_dialogues(
     script: str, shots: list[dict[str, Any]], key: str = "dialogue",
 ) -> list[dict[str, Any]] | None:
-    """Plans/scènes dont le champ `key` (dialogue objet/avatar IA, script avatar HeyGen) est
+    """Plans/scènes dont le champ `key` (dialogue objet / Avatar IA) est
     remplacé par la tranche EXACTE du script (voir realign_to_script). None si l'alignement échoue."""
     aligned = realign_to_script(script, [str(s.get(key, "")) for s in shots])
     if aligned is None:
         return None
     return [{**s, key: a} for s, a in zip(shots, aligned, strict=True)]
-
-
-def verbatim_ok(original: str, scenes: list[dict[str, Any]]) -> bool:
-    """Avatar : la concat des `script` des scènes == script d'origine (mot pour mot)."""
-    return _parts_reconstruct(original, [str(s.get("script", "")) for s in scenes])
 
 
 def dialogue_verbatim_ok(script: str, shots: list[dict[str, Any]]) -> bool:
@@ -4326,63 +4228,6 @@ def dialogue_verbatim_ok(script: str, shots: list[dict[str, Any]]) -> bool:
 
 
 # ============================================================ APPEL CLAUDE (réel)
-def _generate_with_retry(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str,
-    max_attempts: int = _BRAIN_MAX_ATTEMPTS,
-) -> list[dict[str, Any]]:
-    if not _brain_ready(cfg):
-        raise BrainError("Clé Anthropic manquante (Réglages).")
-    last_err = ""
-    last_verbatim = False  # dernier échec = texte altéré (≠ surcharge/JSON) ?
-    for attempt in range(_attempts(cfg, max_attempts)):  # 1 essai + relances (529, réseau, JSON tronqué)
-        if attempt > 0:
-            _brain_backoff_sleep(attempt - 1)
-        try:
-            scenes = _call_claude(cfg, script, brief, avatar_label, attempt=attempt)
-        except _BrainRetryable as exc:  # JSON illisible/incomplet ou réponse vide → on relance
-            last_err, last_verbatim = str(exc), False
-            continue
-        except Exception as exc:  # réseau / 529 overloaded / 5xx : relance ; auth/400 : stop
-            if _is_transient_brain_error(exc):
-                last_err, last_verbatim = str(exc), False
-                continue
-            raise BrainProviderError(_friendly_anthropic(exc)) from exc
-        # Typographie « aplatie » par le modèle = OK (on découpe le script ORIGINAL à ses points
-        # de coupe) ; un vrai mot changé → alignement impossible → on relance.
-        kept = [s for s in scenes if str(s.get("script", "")).strip()]
-        aligned = _realign_shot_dialogues(script, kept, key="script") if kept else None
-        if aligned:
-            return aligned
-        last_err, last_verbatim = "texte altéré par le modèle", True
-    if last_verbatim:
-        raise BrainVerbatimError(f"découpage refusé ({last_err})")
-    raise BrainProviderError(_OVERLOADED_MESSAGE)
-
-
-def _call_claude(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str, attempt: int = 0
-) -> list[dict[str, Any]]:
-    correction = ""
-    if attempt > 0:
-        correction = (
-            "\n\n[RAPPEL] Ta sortie précédente était invalide (texte modifié ou JSON "
-            "incorrect). Recopie le SCRIPT EXACTEMENT, mot pour mot, sans rien changer, "
-            "et réponds UNIQUEMENT avec le JSON."
-        )
-    user = (
-        f"STYLE: avatar\nAVATAR (label): {avatar_label}\n\n"
-        f"BRIEF (ton/persona/contexte, ne pas mettre dans script):\n{brief}\n\n"
-        f"SCRIPT (verbatim, à découper) :\n{script}{correction}"
-    )
-    # Le JSON de sortie contient tout le script (réparti) + motion prompts + structure :
-    # on dimensionne max_tokens sur la taille du script (chars ≥ tokens attendus).
-    max_tokens = min(16000, max(4000, len(script)))
-    return _call_claude_json(
-        cfg, system=SYSTEM_PROMPT, user=user, max_tokens=max_tokens,
-        result_key="scenes", empty_msg="réponse du modèle sans scènes exploitables",
-    )
-
-
 _FENCE_RE = re.compile(r"```(?:json)?", re.IGNORECASE)
 
 
@@ -4461,15 +4306,6 @@ def _record_anthropic(resp: Any) -> None:
 
 
 # ============================================================ SIMULATION (dry_run)
-_CANNED_MOTIONS = [
-    "Sincere expression; leans in gently toward the camera.",
-    "Confident and composed; one hand rises with an open palm to emphasize.",
-    "Warm, knowing expression; a soft, slow nod, eyes on camera.",
-    "Thoughtful expression; hands settle, calm and still.",
-    "Reassuring expression; open palms, warm and open posture.",
-]
-
-
 # --- Gabarits VISUELS canned pour l'objet animé (0 token) : (prompt_image, prompt_motion). Le
 # --- DIALOGUE n'est PAS canned : c'est un SEGMENT VERBATIM du script (cf. _simulate_shooting_plan).
 _CANNED_OBJET = [
@@ -4658,37 +4494,7 @@ def _renumber_shots(
     return out
 
 
-def _simulate_scenes(script: str) -> list[dict[str, Any]]:
-    """Découpe locale par phrases en PRÉSERVANT le texte (garde-fou verbatim garanti)."""
-    parts = re.split(r"(?<=[.!?…])\s+", script.strip())
-    scenes: list[dict[str, Any]] = []
-    for i, part in enumerate(p for p in parts if p.strip()):
-        scenes.append(
-            {
-                "n": i + 1,
-                "script": part,
-                "motion_prompt": _CANNED_MOTIONS[i % len(_CANNED_MOTIONS)],
-            }
-        )
-    if not scenes:  # script sans ponctuation de fin → une seule scène
-        scenes = [{"n": 1, "script": script.strip(), "motion_prompt": _CANNED_MOTIONS[0]}]
-    return scenes
-
-
 # ============================================================ util
-def _renumber(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
-    for i, s in enumerate(scenes, 1):
-        out.append(
-            {
-                "n": i,
-                "script": str(s.get("script", "")),
-                "motion_prompt": str(s.get("motion_prompt", "")),
-            }
-        )
-    return out
-
-
 def _slug(script: str) -> str:
     words = _normalize_ws(script).lower().split()[:4]
     base = "_".join(words) or "pub"

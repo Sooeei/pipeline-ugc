@@ -1,5 +1,7 @@
 # DOSSIER TECHNIQUE — Pipeline UGC
 
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
+
 > Dossier destiné à une IA **sans accès au code**. Généré en lecture seule à partir du dépôt `création de vidéo ia` (branche `main`, dernier commit `3a7fa19`). Aucun fichier de l'application n'a été modifié. Aucune valeur de clé API n'est reproduite.
 
 ## Sommaire
@@ -22,7 +24,7 @@ Fichiers suivis par git : **49**.
 |---|---|---|
 | `.claude/settings.json` | 5 | Réglage Claude Code du dépôt (isolation des worktrees) — sans effet sur l'app. |
 | `.gitignore` | 34 | Exclusions git : config.py (secrets), data/, médias, caches, build/ et dist/ PyInstaller. |
-| `API_CAPABILITIES.md` | 42 | Constats vérifiés en live sur les API HeyGen/Gradium/OpenRouter (vignettes, voix, limites de réfs). |
+| `API_CAPABILITIES.md` | 42 | Constats vérifiés en live sur les API Gradium/OpenRouter (voix, limites de réfs). |
 | `ARCHITECTURE.md` | 525 | Ancien audit d'architecture (antérieur au Mashup — partiellement périmé). |
 | `AUDIT.md` | 223 | Audit fonctionnel/technique lecture seule (cartographie, faiblesses R1–R14). |
 | `BUILD_LOG.md` | 484 | Journal de construction historique de l'app (jalons successifs). |
@@ -43,13 +45,13 @@ Fichiers suivis par git : **49**.
 | `app/jobs.py` | 162 | Jobs de fond en threads + suivi de progression par scène (état en mémoire). |
 | `app/main.py` | 1906 | Application FastAPI (toutes les routes), modèles Pydantic, démarrage serveur + fenêtre. |
 | `app/media.py` | 222 | Faux médias de simulation (PNG/MP4/WAV/MP3), réparation WAV, conversion WAV→MP3 ffmpeg. |
-| `app/pipeline.py` | 780 | Orchestration des 5 flux (avatar 2 phases, voix seules, objet, mashup, voix off). |
-| `app/providers.py` | 1043 | Appels aux API externes (Gradium, HeyGen, OpenRouter, xAI) + ProviderConfig + erreurs lisibles. |
+| `app/pipeline.py` | 780 | Orchestration des flux (objet, mashup, voix off). |
+| `app/providers.py` | 1043 | Appels aux API externes (Gradium, OpenRouter, xAI) + ProviderConfig + erreurs lisibles. |
 | `app/settings_service.py` | 39 | Construit le ProviderConfig à partir de la table settings. |
 | `app/static/app.js` | 2875 | Front complet en JS vanilla : écrans, appels API, polling, galeries, graphiques. |
 | `app/static/index.html` | 566 | Squelette HTML de l'UI (menu, 5 écrans, 4 flux Nouvelle pub, modale, toast). |
 | `app/static/style.css` | 414 | Feuille de style de l'UI (thème, cartes, galeries, graphique, modale). |
-| `config.example.py` | 32 | Modèle de config.py (clés, voix, avatars) importé une seule fois au 1er lancement. |
+| `config.example.py` | 32 | Modèle de config.py (clés, voix) importé une seule fois au 1er lancement. |
 | `icon.ico` | binaire (10429 octets) | Icône de l'application / de l'exe (binaire). |
 | `launcher.py` | 9 | Point d'entrée PyInstaller : appelle app.main.run(). |
 | `pyproject.toml` | 21 | Config ruff / mypy (py314) / pytest. |
@@ -172,8 +174,8 @@ else:
 Gestionnaire `@asynccontextmanager async def lifespan(_: FastAPI)`. Il exécute, dans cet ordre, avant de rendre la main (`yield`) :
 
 1. `config_app.ensure_dirs()` : crée `DATA_DIR`, `MEDIA_DIR`, `OBJET_DIR` (mémoïsé sur le trio de chemins, `config_app.py:447-459`).
-2. `db.init_db()` : exécute `_SCHEMA` (tables `settings`, `avatars`, `voices`, `ads`, `clips`, `ref_images`, `activity`, `cost_events`, `cost_archives`, `voice_meta`) puis les migrations additives `_MIGRATIONS` (`ALTER TABLE ... ADD COLUMN` si la colonne manque : `ads.kind`, `clips.prompt_image`, `clips.image_path`, `clips.duration_s INTEGER DEFAULT 5`, `clips.refs_needed`, `clips.is_anchor INTEGER DEFAULT 0`, `ref_images.kind TEXT DEFAULT ''`, `cost_events.archive_id`) (`db.py:15-133`).
-3. `bootstrap.seed_from_config_if_empty()` (`bootstrap.py:30-84`) : rappelle `db.init_db()`. Si `dry_run` est absent, il l'écrit (`"1"` car `DEFAULT_DRY_RUN = True`). Si le flag `seeded == "1"`, il s'arrête. Si la base contient déjà `gradium_api_key`, `heygen_api_key` ou `anthropic_api_key`, il pose `seeded=1` et s'arrête. Sinon il charge `BASE_DIR/config.py` s'il existe (import dynamique, erreurs ignorées). Il importe alors `GRADIUM_API_KEY`, `HEYGEN_API_KEY`, `ANTHROPIC_API_KEY` (une valeur contenant "xxxx" est ignorée), `GRADIUM_VOICE_ID`, `GRADIUM_MODEL`, `HEYGEN_VOICE_ID`, `BRAIN_MODEL` et `AVATARS` (seulement si la table avatars est vide). Il pose ensuite `seeded=1` et journalise l'activité `systeme`.
+2. `db.init_db()` : exécute `_SCHEMA` (tables `settings`, `voices`, `ads`, `clips`, `ref_images`, `activity`, `cost_events`, `cost_archives`, `voice_meta`) puis les migrations additives `_MIGRATIONS` (`ALTER TABLE ... ADD COLUMN` si la colonne manque : `ads.kind`, `clips.prompt_image`, `clips.image_path`, `clips.duration_s INTEGER DEFAULT 5`, `clips.refs_needed`, `clips.is_anchor INTEGER DEFAULT 0`, `ref_images.kind TEXT DEFAULT ''`, `cost_events.archive_id`) (`db.py:15-133`).
+3. `bootstrap.seed_from_config_if_empty()` (`bootstrap.py:30-84`) : rappelle `db.init_db()`. Si `dry_run` est absent, il l'écrit (`"1"` car `DEFAULT_DRY_RUN = True`). Si le flag `seeded == "1"`, il s'arrête. Si la base contient déjà `gradium_api_key` ou `anthropic_api_key`, il pose `seeded=1` et s'arrête. Sinon il charge `BASE_DIR/config.py` s'il existe (import dynamique, erreurs ignorées). Il importe alors `GRADIUM_API_KEY`, `ANTHROPIC_API_KEY` (une valeur contenant "xxxx" est ignorée), `GRADIUM_VOICE_ID`, `GRADIUM_MODEL` et `BRAIN_MODEL`. Il pose ensuite `seeded=1` et journalise l'activité `systeme`.
 4. `bootstrap.migrate_voice_to_list()` (`bootstrap.py:87-104`) : rappelle `db.init_db()`. Migration unique pilotée par le flag `voice_migrated`. Si la table voices est vide et que l'ancien réglage `gradium_voice_id` est renseigné, il ajoute la voix `"Ma voix"`. Il pose ensuite `voice_migrated=1`.
 
 Après le `yield`, rien n'est exécuté (pas de nettoyage).
@@ -199,7 +201,7 @@ But : forcer pywebview / Chrome `--app` à relire le JS et le CSS après une mis
 ### 1.6 Format des erreurs
 
 - `HTTPException(code, "message")` produit une réponse JSON `{"detail": "message"}` avec le code indiqué.
-- Erreur de validation FastAPI/Pydantic : **422** `{"detail": [ {type, loc, msg, input, ...}, ... ]}`. Causes possibles : JSON invalide, type incompatible (par ex. `spend_cap_usd: "abc"`), champ requis absent (`AvatarIn.label`, `AvatarIn.avatar_id`, `VoiceIn.label`, `VoiceIn.voice_id`, Form `shots_json`), paramètre de chemin non entier (`row_id`, `ad_id`, `clip_id`, `archive_id`), paramètre de requête mal typé (`refresh`, `archive_id`). Toute route qui prend un modèle Pydantic sans valeur par défaut exige un corps : **un POST sans corps JSON renvoie 422** (« Field required »), même si tous les champs du modèle ont des défauts.
+- Erreur de validation FastAPI/Pydantic : **422** `{"detail": [ {type, loc, msg, input, ...}, ... ]}`. Causes possibles : JSON invalide, type incompatible (par ex. `spend_cap_usd: "abc"`), champ requis absent (`VoiceIn.label`, `VoiceIn.voice_id`, Form `shots_json`), paramètre de chemin non entier (`row_id`, `ad_id`, `clip_id`, `archive_id`), paramètre de requête mal typé (`refresh`, `archive_id`). Toute route qui prend un modèle Pydantic sans valeur par défaut exige un corps : **un POST sans corps JSON renvoie 422** (« Field required »), même si tous les champs du modèle ont des défauts.
 - **402** : produit uniquement par `_check_spend_cap` (voir §4).
 - **500** : exception non interceptée. Quelques cas sont repérés au §7.
 
@@ -212,12 +214,12 @@ But : forcer pywebview / Chrome `--app` à relire le JS et le CSS après une mis
 Commande exécutée : `UGC_DATA_DIR=<tmp>`, `UGC_NO_OPEN=1`, puis `from app.main import app; app.routes`. Résultat : **65 entrées dans `app.routes`**, réparties ainsi :
 
 - 4 routes automatiques FastAPI : `GET/HEAD /openapi.json`, `GET/HEAD /docs`, `GET/HEAD /docs/oauth2-redirect`, `GET/HEAD /redoc`.
-- **59 `APIRoute` applicatives**, détaillées ci-dessous.
+- **59 `APIRoute` applicatives** au commit `3a7fa19`, dont 52 détaillées ci-dessous (les 7 routes du flux d'avatar d'origine — n° 7 à 9 et 18 à 21 — ne figurent plus dans ce document ; la numérotation d'origine est conservée).
 - 2 `Mount` : `/media` (name `media`) et `/static` (name `static`).
 
 Middleware effectif : `[Middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])]`.
 
-Liste des 59 routes applicatives, dans l'ordre d'enregistrement (numéro, méthode, chemin, nom de la fonction) :
+Liste des routes applicatives conservées, dans l'ordre d'enregistrement (numéro, méthode, chemin, nom de la fonction) :
 
 | # | Méthode | Chemin | Fonction | Ligne |
 |---|---|---|---|---|
@@ -227,9 +229,6 @@ Liste des 59 routes applicatives, dans l'ordre d'enregistrement (numéro, métho
 | 4 | GET | / | index | 76 |
 | 5 | GET | /api/settings | get_settings | 95 |
 | 6 | POST | /api/settings | save_settings | 153 |
-| 7 | POST | /api/avatars | add_avatar | 229 |
-| 8 | DELETE | /api/avatars/{row_id} | del_avatar | 236 |
-| 9 | GET | /api/heygen/avatars | heygen_avatars | 241 |
 | 10 | GET | /api/gradium/voices | gradium_voices | 290 |
 | 11 | POST | /api/gradium/voices/{uid}/sample | gradium_voice_sample | 338 |
 | 12 | POST | /api/gradium/voices/{uid}/label | gradium_voice_label | 359 |
@@ -238,10 +237,6 @@ Liste des 59 routes applicatives, dans l'ordre d'enregistrement (numéro, métho
 | 15 | DELETE | /api/voices/{row_id} | del_voice | 408 |
 | 16 | POST | /api/test-connection | test_connection | 413 |
 | 17 | GET | /api/dashboard | dashboard | 433 |
-| 18 | POST | /api/brain/generate-scenes | brain_generate | 445 |
-| 19 | POST | /api/estimate | estimate | 462 |
-| 20 | POST | /api/generate | generate | 466 |
-| 21 | POST | /api/generate/retry/{ad_id} | generate_retry | 524 |
 | 22 | GET | /api/jobs/{job_id} | job_status | 556 |
 | 23 | POST | /api/objet/plan | objet_plan | 564 |
 | 24 | POST | /api/objet/estimate | objet_estimate | 581 |
@@ -285,12 +280,10 @@ Conventions pour la suite : `cfg` = `load_provider_config()` (`settings_service.
 
 Tous les jobs sont lancés par `jobs.manager.start(...)` (`jobs.py:92-155`). Cette fonction crée un `Job` en mémoire (id = `uuid4().hex[:12]`) et démarre un thread démon `job-<id>`. Selon `output_mode`, le thread appelle :
 
-- `"voix_seules"` → `pipeline.generate_voices_only`
 - `"voix_off"` → `pipeline.generate_voiceover`
 - `"objet_images"` → `pipeline.generate_objet_images` (avec `ref_paths` et `character_ref`)
 - `"objet_animate"` → `pipeline.animate_objet_clips`
 - `"mashup_animate"` → `pipeline.animate_mashup_clips` (avec `only_clip_id`)
-- toute autre valeur (dont `"video"`) → `pipeline.generate_ad` (avec `is_retry`)
 
 État final du job : `"termine"` si `summary["echec"] == 0`, sinon `"partiel"`. Si une exception remonte : état `"echec"` avec `{"message": _job_error_message(exc)}`, et `db.set_ad_status(ad_id, "echec")`. Les jobs vivent **en mémoire uniquement** (dictionnaire `JobManager._jobs`) : ils disparaissent au redémarrage.
 
@@ -322,11 +315,9 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
 #### 5. GET /api/settings (95-151)
 - Source : `s = db.get_all_settings()`.
 - Réponse (clés exactes, **aucune clé API en clair**) :
-  - `gradium_api_key_set`, `heygen_api_key_set`, `openrouter_api_key_set`, `xai_api_key_set`, `anthropic_api_key_set` : `bool(s.get(<clé>,"").strip())`.
+  - `gradium_api_key_set`, `openrouter_api_key_set`, `xai_api_key_set`, `anthropic_api_key_set` : `bool(s.get(<clé>,"").strip())`.
   - `gradium_model` : `s.get("gradium_model", DEFAULT_GRADIUM_MODEL="default")`.
-  - `heygen_voice_id` : `s.get("heygen_voice_id","")`.
   - `brain_model` : défaut `DEFAULT_BRAIN_MODEL="claude-sonnet-5"`.
-  - `cost_mode` : défaut `"premium"`.
   - `objet_image_model` : défaut `"nano_banana_2"`. Liste `objet_image_models` : `[{"key","label"}]` construite depuis `OBJET_IMAGE_MODELS`. Clés possibles : `nano_banana_2` → `google/gemini-3.1-flash-image`, `nano_banana_legacy` → `google/gemini-2.5-flash-image`.
   - `objet_video_model` : défaut `"grok_imagine"`. Liste `objet_video_models` : clé unique `grok_imagine` → modèle `grok-imagine-video-1.5`.
   - `mashup_video_model` : la valeur en base **uniquement si** elle figure dans `MASHUP_VIDEO_MODELS`, sinon `"kling_pro"`. Liste `mashup_video_models` : `kling_pro` (`kwaivgi/kling-v3.0-pro`), `kling_std` (`kwaivgi/kling-v3.0-std`), `veo_fast` (`google/veo-3.1-fast`), `veo_lite` (`google/veo-3.1-lite`), `seedance` (`bytedance/seedance-2.0`).
@@ -338,7 +329,6 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
   - `audio_formats` : `[{"key":"mp3","label":"MP3 (léger, recommandé)"}, {"key":"wav","label":"WAV (non compressé)"}]`.
   - `spend_cap_usd` : `_spend_cap_usd()` (float, défaut 25.0).
   - `dry_run` : `s.get("dry_run","1") == "1"`.
-  - `avatars` : `db.list_avatars()`, soit `[{"id","label","avatar_id"}]`.
   - `voices` : `db.list_voices()`, soit `[{"id","label","voice_id"}]`.
 - Seul `mashup_video_model` est validé contre sa liste en lecture. Les autres valeurs sont renvoyées telles qu'en base.
 
@@ -346,35 +336,19 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
 - Corps : `SettingsIn` (tous les champs au §3).
 - Logique pas à pas :
   1. `gradium_api_key` : écrit `body.gradium_api_key.strip()` seulement si le résultat est non vide (champ vide = garder la clé actuelle).
-  2. `heygen_api_key` : même règle (`.strip()`).
-  3. `openrouter_api_key` : `prov._clean_key(...)`, qui retire les espaces et les caractères invisibles `﻿ \xa0 ​ ‌ ‍ ⁠` (`providers.py:612-617`). Écrit seulement si non vide.
-  4. `xai_api_key` : `_clean_key`, même règle.
-  5. `anthropic_api_key` : `.strip()`, même règle.
-  6. `print("[REGLAGES] reçu: ...")` : journal de diagnostic (stdout → app.log sous pythonw). Pour chaque clé, il écrit seulement « présent » ou « (vide) », puis « écrit: openrouter=OUI/NON (gardé) xai=OUI/NON (gardé) » et « DB après: openrouter_set=<bool> xai_set=<bool> ». **Aucune valeur ni préfixe de clé.**
-  7. `gradium_model` ← `body.gradium_model or "default"`.
-  8. `heygen_voice_id` ← `body.heygen_voice_id` (y compris une chaîne vide).
-  9. `brain_model` ← `body.brain_model or "claude-sonnet-5"`.
-  10. `cost_mode` ← valeur si elle est dans `COST_MODES` (`premium`, `classique`), sinon `"premium"`.
-  11. `objet_image_model`, `objet_video_model`, `mashup_video_model`, `objet_voice_style`, `objet_voice_pace`, `objet_style` : chaque valeur est validée contre son dictionnaire, avec repli sur le défaut.
-  12. `audio_format` ← `normalize_audio_format(body.audio_format)` (`"mp3"` par défaut).
-  13. `spend_cap_usd` : écrit seulement si `body.spend_cap_usd is not None`, sous la forme `str(max(0.0, float(...)))`.
-  14. `dry_run` ← `"1"` si `body.dry_run`, sinon `"0"`. **Attention** : le défaut du modèle est `True`, donc un POST qui omet `dry_run` repasse en simulation.
-  15. `db.log_activity("reglages", "Réglages enregistrés.")`.
+  2. `openrouter_api_key` : `prov._clean_key(...)`, qui retire les espaces et les caractères invisibles `﻿ \xa0 ​ ‌ ‍ ⁠` (`providers.py:612-617`). Écrit seulement si non vide.
+  3. `xai_api_key` : `_clean_key`, même règle.
+  4. `anthropic_api_key` : `.strip()`, même règle.
+  5. `print("[REGLAGES] reçu: ...")` : journal de diagnostic (stdout → app.log sous pythonw). Pour chaque clé, il écrit seulement « présent » ou « (vide) », puis « écrit: openrouter=OUI/NON (gardé) xai=OUI/NON (gardé) » et « DB après: openrouter_set=<bool> xai_set=<bool> ». **Aucune valeur ni préfixe de clé.**
+  6. `gradium_model` ← `body.gradium_model or "default"`.
+  7. `brain_model` ← `body.brain_model or "claude-sonnet-5"`.
+  8. `objet_image_model`, `objet_video_model`, `mashup_video_model`, `objet_voice_style`, `objet_voice_pace`, `objet_style` : chaque valeur est validée contre son dictionnaire, avec repli sur le défaut.
+  9. `audio_format` ← `normalize_audio_format(body.audio_format)` (`"mp3"` par défaut).
+  10. `spend_cap_usd` : écrit seulement si `body.spend_cap_usd is not None`, sous la forme `str(max(0.0, float(...)))`.
+  11. `dry_run` ← `"1"` si `body.dry_run`, sinon `"0"`. **Attention** : le défaut du modèle est `True`, donc un POST qui omet `dry_run` repasse en simulation.
+  12. `db.log_activity("reglages", "Réglages enregistrés.")`.
 - Réponse : `{"ok": True}`.
 - Erreurs : 422 seulement (types). La voix Gradium n'est pas gérée ici (voir `/api/voices`).
-
-#### 7. POST /api/avatars (229-234)
-- Corps : `AvatarIn {label: str (requis), avatar_id: str (requis)}`.
-- Contrôle : si `label.strip()` ou `avatar_id.strip()` est vide → **400 "Label et avatar_id requis."**
-- Effet : `db.add_avatar(label.strip(), avatar_id.strip())`.
-- Réponse : `{"ok": True, "id": new_id, "avatars": db.list_avatars()}`.
-- Erreurs : 400, 422.
-
-#### 8. DELETE /api/avatars/{row_id} (236-239)
-- Chemin : `row_id: int`.
-- Effet : `db.delete_avatar(row_id)` (`DELETE ... WHERE id=?`, sans erreur si la ligne n'existe pas).
-- Réponse : `{"ok": True, "avatars": db.list_avatars()}`.
-- Erreurs : 422 si `row_id` n'est pas un entier.
 
 #### 14. POST /api/voices (401-406)
 - Corps : `VoiceIn {label: str (requis), voice_id: str (requis)}`.
@@ -388,20 +362,7 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
 
 ---
 
-### 2.3 Sélecteurs HeyGen / Gradium et aperçu de style
-
-#### 9. GET /api/heygen/avatars (241-287)
-- Requête : `refresh: bool = False`.
-- Cache : `config_app.DATA_DIR / "heygen_avatars.json"`.
-- Logique :
-  1. `_read_cache()` : lit le JSON, force `data["cached"] = True` et renvoie `dict(data)`, ou `None` en cas de `ValueError`/`OSError`.
-  2. Si `not refresh` et que le cache existe → renvoie le cache (aucun appel réseau).
-  3. Sinon, appel de `prov.heygen_list_avatars_full(cfg)` (`providers.py:550-587`) :
-     - en simulation : `{"ok": True, "simulation": True, "avatars": [], "talking_photos": [], "message": "Simulation : liste HeyGen indisponible (aucune clé requise)."}` ;
-     - en réel : `GET https://api.heygen.com/v2/avatars` (en-tête `x-api-key`, timeout 180, via `_request_with_retries`). Chaque item contient `avatar_id, name, gender, preview_image_url, preview_video_url, premium, type, default_voice_id, is_photo`.
-  4. Si `res.ok` et que ce n'est pas une simulation : construit `payload = {"ok": True, "simulation": False, "avatars", "talking_photos", "fetched_at": time.time(), "count": len(avatars)+len(talking_photos)}`, l'écrit dans le cache (`_json`, UTF-8, `OSError` ignorée) après `ensure_dirs()`, puis renvoie `payload` avec `"cached": False` (la clé `cached` est ajoutée **après** l'écriture et n'est donc pas stockée).
-  5. Échec réseau ou simulation : si un cache existe → le renvoie avec `hit["note"] = res.get("message","")`. Sinon → `{**res, "cached": False}`.
-- Erreurs : aucune HTTPException. Les erreurs HeyGen reviennent dans le JSON (`ok: False, message`).
+### 2.3 Sélecteur Gradium et aperçu de style
 
 #### 10. GET /api/gradium/voices (290-336)
 - Requête : `refresh: bool = False`.
@@ -458,14 +419,13 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
 - Corps : aucun.
 - Appels séquentiels :
   - `prov.gradium_check(cfg)` : `voice_get(voice_uid=cfg.gradium_voice_id)`, 3 tentatives sur hoquet réseau ;
-  - `prov.heygen_list_avatars(cfg)` : `GET /v2/avatars`, renvoie `{ok, simulation, avatars:[{avatar_id,name}]}` ;
   - `prov.nano_banana_check(cfg)` : `GET https://openrouter.ai/api/v1/key` ;
   - `prov.grok_check(cfg)` : `GET https://api.x.ai/v1/models` ;
   - `prov.kling_check(cfg)` : `GET https://openrouter.ai/api/v1/key`, avec la même clé OpenRouter ;
   - `brain.anthropic_check(cfg)` : `client.models.retrieve(model)`, 3 tentatives.
 
   En simulation, chaque vérification renvoie `{"ok": True, "simulation": True, "message": ...}` sans réseau.
-- Réponse : `{"dry_run", "gradium", "heygen", "nano_banana", "grok", "kling", "anthropic"}`. Chaque valeur (sauf `dry_run`) est le dict du fournisseur, de la forme `{ok, simulation?, message, ...}`.
+- Réponse : `{"dry_run", "gradium", "nano_banana", "grok", "kling", "anthropic"}`. Chaque valeur (sauf `dry_run`) est le dict du fournisseur, de la forme `{ok, simulation?, message, ...}`.
 - Erreurs : aucune HTTPException. Les checks interceptent leurs propres exceptions.
 
 ---
@@ -473,69 +433,14 @@ Voir §1.5. Réponse `HTMLResponse` avec l'en-tête `Cache-Control: no-store, mu
 ### 2.5 Tableau de bord
 
 #### 17. GET /api/dashboard (433-442)
-- Réponse : `{"dry_run": cfg.dry_run, "gradium_credits": prov.gradium_credits(cfg), "heygen_quota": prov.heygen_quota(cfg), "total_videos": db.count_clips("pret"), "activity": db.recent_activity(15)}`.
+- Réponse : `{"dry_run": cfg.dry_run, "gradium_credits": prov.gradium_credits(cfg), "total_videos": db.count_clips("pret"), "activity": db.recent_activity(15)}`.
   - `gradium_credits` : en simulation `{"simulation": True, "credits": "—"}` ; en réel, résultat brut de `client.credits()` du SDK Gradium. **En cas d'échec, lève `ProviderError`** (`providers.py:340-346`), non intercepté ici, ce qui donne un 500 (voir §7).
-  - `heygen_quota` : en simulation `{"simulation": True, "remaining": "—"}` ; en réel `GET /v2/user/remaining_quota`, puis `{"ok": True, "simulation": False, "remaining": data}` ou `{"ok": False, "message"}`.
-  - `total_videos` : nombre de clips au statut `pret`, **toutes catégories confondues** (avatar, objet, mashup).
+  - `total_videos` : nombre de clips au statut `pret`, **toutes catégories confondues** (objet, mashup).
   - `activity` : `[{"ts","kind","message"}]`, du plus récent au plus ancien, limité à 15.
 
 ---
 
-### 2.6 Cerveau (avatar) et génération avatar / voix seules
-
-#### 18. POST /api/brain/generate-scenes (445-459)
-- Corps : `BrainIn {script: str = "", brief: str = "", style: str = "avatar", avatar_label: str = ""}`.
-- Appel : `brain.generate_scenes(cfg, script, brief, style, avatar_label)` (`brain.py:302-335`) :
-  - `style != "avatar"` → `BrainError("Style « {style} » pas encore disponible (bientôt).")` ;
-  - script vide → `BrainError("Script vide.")` ;
-  - `len(script) > MAX_SCRIPT_CHARS (20000)` → `BrainError("Script trop long (N caractères, max 20000). Découpe-le en plusieurs pubs.")` ;
-  - simulation → `_simulate_scenes` ; réel → `_generate_with_retry` (Claude) ;
-  - filtre les scènes au script vide, `_renumber`, puis garde-fou `verbatim_ok`. En cas d'échec : `BrainVerbatimError("découpage refusé (texte altéré)")`.
-  - Retour : `{"ad": _slug(script), "avatar": avatar_label, "scenes": [...]}`.
-- Exceptions : `brain.BrainProviderError` → **502 str(exc)** (réseau, auth, 5xx). Ce `except` est placé **avant** `BrainError`, car `BrainProviderError` hérite de `BrainError`. `brain.BrainError` (dont `BrainVerbatimError`) → **400 str(exc)**.
-- Ajouts à la réponse : `result["estimate"] = cost.estimate(result["scenes"])` (mode par défaut `premium`) et `result["dry_run"] = cfg.dry_run`.
-- Effet : `db.log_activity("cerveau", f"Découpage : {n} scènes.")`.
-- Réponse : `{"ad", "avatar", "scenes", "estimate", "dry_run"}`. `estimate` a la forme `{"scenes", "words", "seconds", "minutes", "mode", "credits_estimes", "credits_par_mode", "taux_par_mode"}` (`cost.py:26-42`, 2,5 mots/s ; premium 4.0 crédits/s, classique 1.5 crédits/s).
-
-#### 19. POST /api/estimate (462-464)
-- Corps : `ScenesIn {scenes: list[dict] = [], mode: str = ""}`.
-- Réponse : `cost.estimate(body.scenes, body.mode or "premium")`. Un mode inconnu retombe sur premium dans `cost.estimate`. Mêmes clés que ci-dessus.
-
-#### 20. POST /api/generate (466-522)
-- Corps : `GenerateIn {ad_name="pub", avatar_label="", voice_label="", cost_mode="", scenes=[], confirm=False}`.
-- Contrôles, dans l'ordre :
-  1. `scenes` vide → **400 "Aucune scène fournie."**
-  2. `_validate_scenes(scenes)` (voir §4). Erreurs 400 possibles :
-     - « Scène #i : champ « script » manquant. »
-     - « Scène #i : le numéro « n » doit être un entier (reçu : …). »
-     - « Numéro de scène en double : n=N. Chaque scène doit avoir un numéro unique (sinon les clips s'écraseraient). »
-  3. `voix_seules = body.cost_mode == "voix_seules"`.
-  4. `avatar_id = db.avatar_id_for_label(avatar_label)` si un label est fourni, sinon `None`. Si ce n'est pas du voix seules et que `avatar_id` est absent ou commence par `"AVATAR_ID"` (placeholder) → **400 f"Avatar « {avatar_label} » non configuré (renseigne un avatar_id valide dans Réglages)."**
-  5. Si `voice_label` est fourni : `db.voice_id_for_label`. Si la voix est trouvée → `cfg.gradium_voice_id = resolved`. Sinon, on garde la voix par défaut (1re de la liste).
-  6. Si ce n'est pas du voix seules et que `cost_mode` est dans `COST_MODES` → `cfg.cost_mode = body.cost_mode`. Le mode modifie le payload HeyGen (moteur `avatar_v`/`avatar_iv`, motion, résolution).
-  7. En mode réel sans `cfg.gradium_voice_id` → **400 "Aucune voix Gradium configurée (ajoutes-en une dans Réglages)."**
-  8. Si ce n'est pas du voix seules, en mode réel et sans `confirm` → **400 "Confirmation requise avant un vrai run (crédits)."** Le mode voix seules n'exige aucune confirmation.
-- **Pas de `_check_spend_cap`** sur cette route.
-- Effets :
-  - `ad_id = db.create_ad(ad_name, avatar_label, _json(scenes), kind="audio" si voix seules sinon "avatar")`, avec le statut initial `en_cours` ;
-  - `jobs.manager.start(cfg, ad_id, ad_name, scenes, avatar_id or "", output_mode="voix_seules" si voix seules sinon "video", avatar_label=avatar_label)`.
-    - En `"video"` : `pipeline.generate_ad` (`pipeline.py:173-215`). Phase 1 : voix Gradium en WAV, 2 en parallèle (`GRADIUM_MAX_PARALLEL=2`), 3 tentatives, clip → `voix_pret`. Phase 2 : upload audio HeyGen, création et rendu de la vidéo, 3 en parallèle (`HEYGEN_MAX_PARALLEL=3`), clip → `pret`. Fichiers dans `MEDIA_DIR/ad_{id}/{n}.wav|.mp4`. Coûts : `record_gradium_tts` et `record_heygen_clip` (en réel). Statut de la pub : `termine`, `partiel` ou `echec`.
-    - En `"voix_seules"` : `pipeline.generate_voices_only` (`pipeline.py:307-353`). TTS Gradium au format `audio_format` dans `DATA_DIR/voix/<nom>[_id]/{n}.mp3|wav`, plus `recap.html`. Clip → `voix_pret`. Statut de la pub : `voix_seules`. Ouvre le dossier dans l'Explorateur (sauf si `UGC_NO_OPEN=1`).
-- Réponse : `{"ok": True, "job_id", "ad_id", "dry_run", "voix_seules"}`.
-
-#### 21. POST /api/generate/retry/{ad_id} (524-554)
-- Chemin : `ad_id: int`. Corps : `RetryIn {confirm: bool = False}`.
-- Contrôles :
-  - pub absente → **404 "Pub introuvable."** ;
-  - `kind != "avatar"` → **400 "La relance des échoués concerne les pubs avatar."** ;
-  - aucun clip `echec` → **400 "Aucune scène en échec à relancer."** ;
-  - `avatar_label = ad.avatar_label`. Avatar introuvable ou placeholder → **400 f"Avatar « {avatar_label} » non configuré (Réglages)."** ;
-  - en réel sans voix → **400 "Aucune voix Gradium configurée (Réglages)."** ;
-  - en réel sans confirmation → **400 "Confirmation requise avant un vrai run (crédits)."**
-- Scènes reconstruites à partir des clips en échec : `{"n": scene_n, "script", "motion_prompt": c.get("motion_prompt",""), "clip_id": id}`. La présence de `clip_id` fait réutiliser le clip existant dans `_voice_one_scene` (pas de doublon).
-- Job : `jobs.manager.start(cfg, ad_id, ad["name"], scenes, avatar_id, output_mode="video", avatar_label=avatar_label, is_retry=True)`. Le journal d'activité écrit « Relance … ».
-- Réponse : `{"ok": True, "job_id", "ad_id", "retry": len(scenes)}`.
-- Pas de `_check_spend_cap`.
+### 2.6 Suivi des jobs
 
 #### 22. GET /api/jobs/{job_id} (556-561)
 - Chemin : `job_id: str`.
@@ -726,7 +631,7 @@ Identique à l'objet (`_set_clip_validation`).
 - Contrôles, dans l'ordre :
   - `script.strip()` vide → **400 "Script vide."** ;
   - `_check_voiceover_len` → 400 « Script trop long … » ;
-  - résolution de `voice_label` → `cfg.gradium_voice_id` (même logique que `/api/generate`) ;
+  - résolution de `voice_label` → `cfg.gradium_voice_id` (si la voix est trouvée ; sinon la voix par défaut, 1re de la liste, est gardée) ;
   - en réel sans voix → **400 "Aucune voix Gradium configurée (Réglages)."** ;
   - `segments = split_voiceover(script)` vide → **400 "Script vide après découpe."** ;
   - `pipeline.voiceover_verbatim_ok(script, segments)` faux, c'est-à-dire que le contenu non blanc diffère → **400 "Découpe voix off refusée (texte altéré)."**
@@ -758,7 +663,7 @@ Identique à l'objet (`_set_clip_validation`).
 - Réponse : `FileResponse(image_path, media_type="image/png", filename=f"{nom_pub ou 'image'}_{scene_n}.png")`.
 
 #### 50. GET /api/library/voices (987-1010)
-- Ne garde que les pubs `kind == "audio"` (voix seules et voix off).
+- Ne garde que les pubs `kind == "audio"` (voix off).
 - Chaque clip : `{"clip_id", "scene_n", "audio_url": f"/api/clips/{id}/audio" si wav_path sinon None, "script", "status", "error"}`.
 - Toutes les pubs audio sont renvoyées, même sans clip.
 - Réponse : `{"ads": [{"id", "name", "created_at", "status", "clips"}]}`.
@@ -793,7 +698,7 @@ Identique à l'objet (`_set_clip_validation`).
 
 #### 52. GET /api/costs (1027-1032)
 - `report = cost.costs_report()` (`cost.py:275-318`), sur les coûts actifs (`archive_id IS NULL`) :
-  - `services` : `[{"service", "label", "units" (texte), "usd", "credits"}]`, dans l'ordre openrouter, grok, kling, heygen, gradium, anthropic ;
+  - `services` : `[{"service", "label", "units" (texte), "usd", "credits"}]`, dans l'ordre openrouter, grok, kling, gradium, anthropic ;
   - `by_ad` : `[{"ad_id", "name", "kind", "usd", "credits"}]` ;
   - `totals` : `{"usd", "credits", "events"}` ;
   - `usd_to_eur` : 0.92 ;
@@ -827,7 +732,7 @@ Identique à l'objet (`_set_clip_validation`).
 
 ### 2.12 Montages statiques
 
-- `/media` → `StaticFiles(directory=MEDIA_DIR)` = `DATA_DIR/media`. Ce dossier contient `ad_{id}/` (wav et mp4 avatar), `objet/<nom>_<id>/` (images `{n}.png`, vidéos `{n}.mp4`, `refs/ref_{i}.*`), `voice_samples/`, `style_previews/`. Tout ce qui s'y trouve est servi sans filtre, y compris les photos de référence uploadées.
+- `/media` → `StaticFiles(directory=MEDIA_DIR)` = `DATA_DIR/media`. Ce dossier contient `objet/<nom>_<id>/` (images `{n}.png`, vidéos `{n}.mp4`, `refs/ref_{i}.*`), `voice_samples/`, `style_previews/`. Tout ce qui s'y trouve est servi sans filtre, y compris les photos de référence uploadées.
 - `/static` → `StaticFiles(directory=STATIC_DIR)` : `app.js`, `index.html`, `style.css`.
 
 ---
@@ -838,8 +743,6 @@ Identique à l'objet (`_set_clip_validation`).
 |---|---|---|---|---|
 | POST /api/gradium/voices/{uid}/sample | oui (réel) | Gradium | non | (pas de job) |
 | POST /api/objet/style-preview | oui (réel) | OpenRouter | non | (pas de job) |
-| POST /api/generate | oui (réel, sauf voix seules) | aucune clé ; voix Gradium requise en réel | non | `video` ou `voix_seules` |
-| POST /api/generate/retry/{ad_id} | oui (réel) | aucune clé ; voix requise | non | `video` (is_retry=True) |
 | POST /api/objet/generate-images | oui (réel) | OpenRouter | non | `objet_images` |
 | POST /api/objet/regenerate-image/{id} | oui (réel) | **aucune** | non | `objet_images` |
 | POST /api/objet/animate/{ad_id} | oui (réel) | xAI | **oui (usd_total)** | `objet_animate` |
@@ -862,14 +765,11 @@ En mode simulation (`dry_run`), aucun de ces contrôles de confirmation, de clé
 # ------------------------------------------------------------------ modèles
 class SettingsIn(BaseModel):
     gradium_api_key: str = ""
-    heygen_api_key: str = ""
     openrouter_api_key: str = ""
     xai_api_key: str = ""
     gradium_model: str = ""
-    heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = ""
-    cost_mode: str = ""
     objet_image_model: str = ""
     objet_video_model: str = ""
     mashup_video_model: str = ""
@@ -879,42 +779,12 @@ class SettingsIn(BaseModel):
     audio_format: str = ""   # format de sortie des voix : "mp3" (défaut) | "wav"
     spend_cap_usd: float | None = None   # plafond de dépense ($) ; None = ne pas changer
     dry_run: bool = True
-    # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices (comme les avatars).
-
-
-class RetryIn(BaseModel):
-    confirm: bool = False
-
-
-class BrainIn(BaseModel):
-    script: str = ""
-    brief: str = ""
-    style: str = "avatar"
-    avatar_label: str = ""
-
-
-class AvatarIn(BaseModel):
-    label: str
-    avatar_id: str
+    # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices.
 
 
 class VoiceIn(BaseModel):
     label: str
     voice_id: str
-
-
-class ScenesIn(BaseModel):
-    scenes: list[dict[str, Any]] = []
-    mode: str = ""
-
-
-class GenerateIn(BaseModel):
-    ad_name: str = "pub"
-    avatar_label: str = ""
-    voice_label: str = ""
-    cost_mode: str = ""
-    scenes: list[dict[str, Any]] = []
-    confirm: bool = False
 
 
 class VoiceoverIn(BaseModel):
@@ -1007,12 +877,7 @@ Valeurs des constantes par défaut utilisées :
 
 Utilisation des modèles par route :
 - `SettingsIn` → POST /api/settings
-- `RetryIn` → retry
-- `BrainIn` → generate-scenes
-- `AvatarIn` → POST /api/avatars
 - `VoiceIn` → POST /api/voices
-- `ScenesIn` → /api/estimate
-- `GenerateIn` → /api/generate
 - `VoiceoverIn` → voiceover preview et generate
 - `ObjetPlanIn` → objet/plan
 - `ObjetEstimateIn` → objet/estimate
@@ -1033,16 +898,6 @@ Utilisation des modèles par route :
 ---
 
 ## 4. Fonctions utilitaires et constantes de main.py
-
-### `_validate_scenes(scenes)` (1280-1302)
-Valide et **modifie en place** chaque scène (index `i` à partir de 1) :
-1. `"script"` absent ou vide après strip → 400 « Scène #i : champ « script » manquant. »
-2. `n` à `None` ou `""` → `s["n"] = i`.
-3. `int(s["n"])`. En cas de `ValueError`/`TypeError` → 400 « Scène #i : le numéro « n » doit être un entier (reçu : {repr}). »
-4. `s["n"] = n` (converti en entier).
-5. `n` déjà vu → 400 « Numéro de scène en double : n=N. Chaque scène doit avoir un numéro unique (sinon les clips s'écraseraient). »
-
-Aucun effet en base.
 
 ### `_media_url(mp4_path)` (1305-1314)
 - `None` ou vide → `None`.
@@ -1250,12 +1105,11 @@ Tous sous `DATA_DIR`. Par défaut, `DATA_DIR = %LOCALAPPDATA%\PipelineUGC\data`,
 
 | Cache | Chemin | Écrit par | Contenu | Rafraîchissement / repli |
 |---|---|---|---|---|
-| Avatars HeyGen | `DATA_DIR/heygen_avatars.json` | GET /api/heygen/avatars (276) | `{"ok": true, "simulation": false, "avatars", "talking_photos", "fetched_at", "count"}` (sans `cached`) | Servi tel quel si `refresh=false`. `refresh=true` rappelle HeyGen ; en cas de succès réel, le cache est réécrit. En simulation ou en cas d'échec, l'ancien cache est servi avec `note`. Jamais écrit en simulation. Pas d'expiration automatique. |
-| Voix Gradium | `DATA_DIR/gradium_voices.json` | GET /api/gradium/voices (328) | `{"voices": [...]}` | Même logique. Les métadonnées utilisateur (`voice_meta`) sont fusionnées **à chaque lecture**, jamais stockées dans le cache. |
+| Voix Gradium | `DATA_DIR/gradium_voices.json` | GET /api/gradium/voices (328) | `{"voices": [...]}` | Servi tel quel si `refresh=false`. `refresh=true` rappelle Gradium ; en cas de succès réel, le cache est réécrit. En simulation ou en cas d'échec, l'ancien cache est servi avec `note`. Jamais écrit en simulation. Pas d'expiration automatique. Les métadonnées utilisateur (`voice_meta`) sont fusionnées **à chaque lecture**, jamais stockées dans le cache. |
 | Échantillons de voix | `MEDIA_DIR/voice_samples/<uid_sûr>.<mp3\|wav>` | POST /api/gradium/voices/{uid}/sample | Fichier audio. Le chemin est stocké dans `voice_meta.sample_path` | Réutilisé tant que `sample_path` existe sur disque. Aucun paramètre de rafraîchissement : il faut supprimer le fichier pour régénérer. Servi par `/media/voice_samples/...`. |
 | Aperçus de style | `MEDIA_DIR/style_previews/<style>.png` | POST /api/objet/style-preview | Image PNG | Réutilisé si le fichier existe et `refresh=false`. `refresh=true` régénère (confirmation requise en réel). |
 
-Les deux caches JSON sont écrits avec `_json` (`ensure_ascii=False`) en UTF-8. Les erreurs d'écriture (`OSError`) sont ignorées sans message.
+Le cache JSON est écrit avec `_json` (`ensure_ascii=False`) en UTF-8. Les erreurs d'écriture (`OSError`) sont ignorées sans message.
 
 ---
 
@@ -1269,32 +1123,31 @@ Les deux caches JSON sont écrits avec `_json` (`ensure_ascii=False`) en UTF-8. 
 6. **`refs_needed` perdu à la génération des images** (608-616 et 772-781). `_parse_shots` et `_parse_mashup_shots` (1365-1371, 1401-1407) ne recopient que `n`, `prompt_image`, `prompt_motion` et `dialogue` ou `duration_s`. `s.get("refs_needed")` vaut donc toujours `None` : le clip est créé avec `refs_needed=""`, alors que le cerveau fournit `refs_needed` (`brain.py:495`, `1269` : `["produit"]` par défaut ; `909-911` pour le mashup) et que l'UI envoie `shots_json` avec ces plans (`app.js:1273`, `2526`). En pratique, `_norm_refs_needed("")` renvoie `None`, soit « toutes les réfs » (au plus 3) pour chaque plan. De plus, `_ad_shots_response` affiche `refs_needed: []` (`or []`, 1498), que l'UI interprète comme « plan neutre », alors que le backend enverra toutes les réfs. Tant que l'utilisateur n'a pas cliqué sur un chip (POST /api/clips/{id}/refs), l'affichage et le comportement sont incohérents.
 7. **`_run_consistency` régénère aussi les plans déjà validés ou animés** (1620-1623) : aucun filtre sur le statut. Tous les autres plans qui ont un prompt repassent `en_attente`, puis `image_pret`, et perdent leur validation. Leur `mp4_path` reste en base, mais leur statut n'est plus `pret`. Pas de `_check_spend_cap` non plus, alors que cette route peut générer jusqu'à 39 images.
 8. **L'ancre peut être posée sur un plan non validé** (660-666 : seule la présence d'`image_path` est vérifiée), mais `_consistency_ref` ne cherche l'ancre que parmi les plans `valide` (1660-1666). Une ancre sur un plan `image_pret` est ignorée sans avertissement.
-9. **Relance avatar (`generate_retry`) : voix et mode potentiellement différents de la génération initiale** (528-553). La voix choisie à l'origine (`voice_label`) n'est ni stockée ni réappliquée : `cfg.gradium_voice_id` reste la 1re voix de la liste (`settings_service.py:13`). De même, `cfg.cost_mode` reste le réglage global et non le `cost_mode` choisi dans `/api/generate` (495-496). Les scènes relancées peuvent donc avoir une autre voix ou un autre moteur HeyGen que les autres.
-10. **Pas de plafond de dépense sur la génération avatar HeyGen** (`/api/generate`, `/api/generate/retry`), ni sur generate-images, consistency, style-preview ou voiceover. Le plafond ne protège que l'animation Grok/Kling et la reprise.
-11. **`/api/voiceover/generate` ne demande aucune confirmation en mode réel** (890-922), alors que `/api/gradium/voices/{uid}/sample` en exige une pour un seul court TTS (346-347).
-12. **Dashboard : 500 possible en mode réel.** `prov.gradium_credits` lève `ProviderError` en cas d'échec (`providers.py:340-346`) et `dashboard()` ne l'intercepte pas (438) : toute la route échoue, alors que `heygen_quota` renvoie `{ok: False}`.
-13. **Échantillon de voix : exceptions non `ProviderError` non interceptées** (352-355). Seule `ProviderError` devient un 502. Or `_gradium_sample_real` peut lever une exception du SDK Gradium, ou `RuntimeError(FFMPEG_MISSING_MSG)` si ffmpeg manque en mp3 (`media.py:100-101`) : on obtient alors un 500. `objet_style_preview` intercepte, lui, toutes les exceptions (394-396).
-14. **Caches de simulation réutilisés en mode réel.** En simulation, `/sample` écrit un fichier de silence de 2 s et l'enregistre dans `voice_meta.sample_path` (353-356). Passé en réel, ce silence est resservi comme « cached » (344-345), sans moyen de le rafraîchir via l'API. De même, `/objet/style-preview` en simulation écrit une image placeholder dans `style_previews/<style>.png`, resservie en réel tant que `refresh=false` (375-376).
-15. **GET /api/clips/{id}/image ne vérifie pas l'existence du fichier** (978), contrairement à `/audio` (1015) et `/download` (1086). Un `image_path` qui pointe vers un fichier supprimé provoque une erreur lors de l'envoi par `FileResponse` (500 au lieu de 404). Le `media_type` est toujours `image/png`.
-16. **Codes d'erreur incohérents pour « pub introuvable »** : 404 dans `generate_retry` (531), `_ad_shots_response` (1485) et `download_ad_zip` (1098) ; **400** dans `objet_animate` (675), `mashup_animate` (830), `_resume_ad` (1554) et `_run_consistency` (1614).
-17. **`objet_set_dialogue` réutilise `_check_voiceover_len`** (712). Le message d'erreur dit « Découpe-le en plusieurs voix off. », hors contexte pour un dialogue d'objet. Le type du clip et de la pub n'est pas vérifié.
-18. **`save_settings` : nettoyage de clés inégal** (156-168). OpenRouter et xAI passent par `_clean_key` (caractères invisibles retirés). Gradium, HeyGen et Anthropic n'ont qu'un `.strip()`, donc un espace insécable ou un BOM collé reste dans la clé. `dry_run` vaut `True` par défaut dans `SettingsIn` (1156) : un client qui omet le champ réactive la simulation.
-19. **`_parse_shot_list` : un élément qui n'est pas un dict provoque un 500** (`s.get` → `AttributeError`, 1347). Un `n` égal à 0 est remplacé par l'index (`int(s.get("n") or i)`, 1352).
-20. **`objet_generate_images` / `mashup_generate_images` : l'ordre des contrôles** fait que le JSON est parsé avant la vérification de confirmation et de clé (594-600, 761-765). La pub et tous les clips sont créés en base avant le démarrage du job. Si `_save_ref_images` échoue (erreur disque), la pub reste orpheline au statut `en_cours`.
-21. **`_resume_ad` traite une seule phase par appel** (1562-1582). S'il existe à la fois des échecs d'image et des échecs d'animation, seuls les échecs d'image sont repris. Il faut rappeler la route pour réanimer. En phase animation mashup, l'estimation utilise la durée par défaut (6 s) et non les `duration_s` des clips (1596), contrairement à `mashup_animate` (853-855).
-22. **`_set_clip_validation(valide=False)` sur un plan déjà animé (`pret`)** le repasse en `image_pret` (1652-1653). Le plan disparaît alors des critères `_has_video` de la bibliothèque (931) alors que son mp4 existe toujours.
-23. **`/api/dashboard` `total_videos`** compte tous les clips `pret` (objet, mashup, avatar) : ce ne sont pas uniquement des vidéos avatar (440).
-24. **Jobs non persistants** : `jobs.manager` est un dictionnaire en mémoire (`jobs.py:87-90`). Après un redémarrage, `/api/jobs/{id}` renvoie 404 et une pub restée `en_cours` le reste indéfiniment.
-25. **Routes de documentation FastAPI exposées** (`/docs`, `/redoc`, `/openapi.json`), car `create_app` ne les désactive pas (47). Leur accès reste limité à localhost par `TrustedHostMiddleware`.
-26. **`/media` sert tout `MEDIA_DIR`**, y compris les photos de référence uploadées (`objet/*/refs/`). Les voix (`DATA_DIR/voix`, `DATA_DIR/voix_off`) sont hors de ce dossier et ne sont accessibles que via `/api/clips/{id}/audio`.
-27. **`download_ad_zip` construit le ZIP entièrement en mémoire** (1110-1125, `BytesIO` puis `getvalue()`). Pour une pub de 40 clips vidéo, tout le contenu est chargé en RAM.
-28. **Démarrage** : `_log_launch_error` écrase `launch.log` à chaque erreur (1890), donc seule la dernière est conservée. En mode `UGC_NO_WINDOW=1`, `PORT_FILE` n'est jamais effacé (1773-1777). `_pick_free_port` libère le port avant qu'uvicorn ne le reprenne, ce qui laisse une petite fenêtre de course (1695-1701).
+9. **Pas de plafond de dépense** sur generate-images, consistency, style-preview ou voiceover. Le plafond ne protège que l'animation Grok/Kling et la reprise.
+10. **`/api/voiceover/generate` ne demande aucune confirmation en mode réel** (890-922), alors que `/api/gradium/voices/{uid}/sample` en exige une pour un seul court TTS (346-347).
+11. **Dashboard : 500 possible en mode réel.** `prov.gradium_credits` lève `ProviderError` en cas d'échec (`providers.py:340-346`) et `dashboard()` ne l'intercepte pas (438) : toute la route échoue.
+12. **Échantillon de voix : exceptions non `ProviderError` non interceptées** (352-355). Seule `ProviderError` devient un 502. Or `_gradium_sample_real` peut lever une exception du SDK Gradium, ou `RuntimeError(FFMPEG_MISSING_MSG)` si ffmpeg manque en mp3 (`media.py:100-101`) : on obtient alors un 500. `objet_style_preview` intercepte, lui, toutes les exceptions (394-396).
+13. **Caches de simulation réutilisés en mode réel.** En simulation, `/sample` écrit un fichier de silence de 2 s et l'enregistre dans `voice_meta.sample_path` (353-356). Passé en réel, ce silence est resservi comme « cached » (344-345), sans moyen de le rafraîchir via l'API. De même, `/objet/style-preview` en simulation écrit une image placeholder dans `style_previews/<style>.png`, resservie en réel tant que `refresh=false` (375-376).
+14. **GET /api/clips/{id}/image ne vérifie pas l'existence du fichier** (978), contrairement à `/audio` (1015) et `/download` (1086). Un `image_path` qui pointe vers un fichier supprimé provoque une erreur lors de l'envoi par `FileResponse` (500 au lieu de 404). Le `media_type` est toujours `image/png`.
+15. **Codes d'erreur incohérents pour « pub introuvable »** : 404 dans `_ad_shots_response` (1485) et `download_ad_zip` (1098) ; **400** dans `objet_animate` (675), `mashup_animate` (830), `_resume_ad` (1554) et `_run_consistency` (1614).
+16. **`objet_set_dialogue` réutilise `_check_voiceover_len`** (712). Le message d'erreur dit « Découpe-le en plusieurs voix off. », hors contexte pour un dialogue d'objet. Le type du clip et de la pub n'est pas vérifié.
+17. **`save_settings` : nettoyage de clés inégal** (156-168). OpenRouter et xAI passent par `_clean_key` (caractères invisibles retirés). Gradium et Anthropic n'ont qu'un `.strip()`, donc un espace insécable ou un BOM collé reste dans la clé. `dry_run` vaut `True` par défaut dans `SettingsIn` (1156) : un client qui omet le champ réactive la simulation.
+18. **`_parse_shot_list` : un élément qui n'est pas un dict provoque un 500** (`s.get` → `AttributeError`, 1347). Un `n` égal à 0 est remplacé par l'index (`int(s.get("n") or i)`, 1352).
+19. **`objet_generate_images` / `mashup_generate_images` : l'ordre des contrôles** fait que le JSON est parsé avant la vérification de confirmation et de clé (594-600, 761-765). La pub et tous les clips sont créés en base avant le démarrage du job. Si `_save_ref_images` échoue (erreur disque), la pub reste orpheline au statut `en_cours`.
+20. **`_resume_ad` traite une seule phase par appel** (1562-1582). S'il existe à la fois des échecs d'image et des échecs d'animation, seuls les échecs d'image sont repris. Il faut rappeler la route pour réanimer. En phase animation mashup, l'estimation utilise la durée par défaut (6 s) et non les `duration_s` des clips (1596), contrairement à `mashup_animate` (853-855).
+21. **`_set_clip_validation(valide=False)` sur un plan déjà animé (`pret`)** le repasse en `image_pret` (1652-1653). Le plan disparaît alors des critères `_has_video` de la bibliothèque (931) alors que son mp4 existe toujours.
+22. **`/api/dashboard` `total_videos`** compte tous les clips `pret`, toutes catégories confondues (440).
+23. **Jobs non persistants** : `jobs.manager` est un dictionnaire en mémoire (`jobs.py:87-90`). Après un redémarrage, `/api/jobs/{id}` renvoie 404 et une pub restée `en_cours` le reste indéfiniment.
+24. **Routes de documentation FastAPI exposées** (`/docs`, `/redoc`, `/openapi.json`), car `create_app` ne les désactive pas (47). Leur accès reste limité à localhost par `TrustedHostMiddleware`.
+25. **`/media` sert tout `MEDIA_DIR`**, y compris les photos de référence uploadées (`objet/*/refs/`). Les voix (`DATA_DIR/voix`, `DATA_DIR/voix_off`) sont hors de ce dossier et ne sont accessibles que via `/api/clips/{id}/audio`.
+26. **`download_ad_zip` construit le ZIP entièrement en mémoire** (1110-1125, `BytesIO` puis `getvalue()`). Pour une pub de 40 clips vidéo, tout le contenu est chargé en RAM.
+27. **Démarrage** : `_log_launch_error` écrase `launch.log` à chaque erreur (1890), donc seule la dernière est conservée. En mode `UGC_NO_WINDOW=1`, `PORT_FILE` n'est jamais effacé (1773-1777). `_pick_free_port` libère le port avant qu'uvicorn ne le reprenne, ce qui laisse une petite fenêtre de course (1695-1701).
 
 ---
 
 # PARTIE 2 — CERVEAU & PROMPTS (brain.py + providers.py)
 
-> Dossier destiné à une IA **sans accès au code**. Tous les textes entre `~~~~~` ont été **extraits par script** (import de `app.brain`, `app.providers`, `app.pipeline`, `app.config_app` + `inspect`/`ast` sur `app/main.py`) : ils sont **caractère pour caractère** identiques au source. Les exemples « rendus » ont été produits en appelant les VRAIES fonctions du code avec l'appel réseau remplacé par une capture (aucun appel Anthropic/OpenRouter/xAI/HeyGen/Gradium effectué).
+> Dossier destiné à une IA **sans accès au code**. Tous les textes entre `~~~~~` ont été **extraits par script** (import de `app.brain`, `app.providers`, `app.pipeline`, `app.config_app` + `inspect`/`ast` sur `app/main.py`) : ils sont **caractère pour caractère** identiques au source. Les exemples « rendus » ont été produits en appelant les VRAIES fonctions du code avec l'appel réseau remplacé par une capture (aucun appel Anthropic/OpenRouter/xAI/Gradium effectué).
 >
 > Chemins relatifs à la racine du projet `création de vidéo ia/`. Références au format `fichier:ligne`.
 > Environnement d'extraction : Python 3.14.3, SDK `anthropic` 0.116.0.
@@ -1303,7 +1156,7 @@ Sommaire : A. Appel Claude · B. Prompts système · C. Prompts utilisateur · D
 
 ## A. Appel Claude (Anthropic)
 
-### A.1 `_call_claude_json` — point d'appel UNIQUE des 3 cerveaux (avatar, objet auto/manuel, mashup)
+### A.1 `_call_claude_json` — point d'appel UNIQUE des cerveaux (objet auto/manuel, mashup)
 
 Source : `app/brain.py:590-615`
 
@@ -1433,123 +1286,6 @@ def is_network_hiccup(exc: BaseException | None) -> bool:
 ## B. Prompts système (texte intégral)
 
 Rappel : les prompts système sont envoyés dans le paramètre `system` de `messages.create`.
-
-### B.SYSTEM_PROMPT — `SYSTEM_PROMPT`
-
-Source : `app/brain.py:19-68`
-
-~~~~~python
-SYSTEM_PROMPT = """\
-Tu découpes un script de pub UGC (avatar face caméra) en scènes pour une génération IA.
-RÈGLES ABSOLUES :
-- Ne modifie JAMAIS le texte du script : verbatim, mot pour mot. La concaténation du
-  champ "script" de toutes les scènes, dans l'ordre, doit reconstituer EXACTEMENT le
-  script d'origine (mêmes mots, même ponctuation, même orthographe — y compris les
-  tournures québécoises et ce qui ressemble à des fautes). N'ajoute, n'enlève, ne corrige
-  rien.
-- Découpe le script en scènes par UNITÉ DE SENS, pas par phrase. Une scène = un plan =
-  une idée qui se tient. Regroupe dans la MÊME scène plusieurs phrases courtes qui
-  développent la même idée ou le même moment (ex. poser son autorité, décrire un
-  problème, énumérer un bénéfice). Ne crée une nouvelle scène QUE quand l'idée, le sujet
-  ou l'intention change vraiment. Vise des scènes de ~1 à 3 phrases quand elles vont
-  ensemble ; évite les scènes d'une seule phrase courte sauf pour le hook ou un moment
-  fort isolé. Le hook (la première phrase d'accroche) reste sa propre scène. Garde
-  l'ordre du script.
-
-  EXEMPLE (à suivre) — ces 3 phrases forment UNE SEULE scène car c'est une seule idée
-  (installer sa crédibilité) :
-  « Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer
-  tous les jours. Pis des clientes qui mettent de l'huile de ricin soir après soir en
-  attendant un miracle, j'en ai vu plus que tu penses. »
-  NE PAS les éclater en 3 scènes.
-- Pour chaque scène, écris un motion prompt HeyGen EN ANGLAIS, format
-  [partie du corps] + [action] + [émotion/intensité], UN geste + UNE expression maximum,
-  court. Objectif : un vrai acteur UGC, naturel, jamais robotique. Règles impératives :
-  • FACE CAMÉRA, TOUJOURS. L'avatar reste en permanence face à la caméra, corps ET visage
-    orientés vers l'objectif, regard sur la caméra dans TOUTES les scènes, sans exception.
-    N'écris JAMAIS de profil, trois-quarts, vue de côté, rotation, ni « turn », « look away »,
-    « to the side », « over the shoulder », « glance away », ni aucun regard/orientation
-    hors caméra — même si le script évoque quelqu'un ou quelque chose d'autre.
-  • PAS DE GESTES DE COMPTAGE SUR LES DOIGTS. N'utilise JAMAIS « hold up one/two/three
-    fingers », « count on fingers », « raise a/one finger » ni aucun geste de comptage
-    (les mains IA les rendent mal). Pour une énumération (premièrement / deuxièmement…),
-    reste sur l'expression du visage, un léger hochement ou une posture ouverte.
-  • MAINS SOBRES. Privilégie les gestes de tête, de regard, d'épaules et l'expression du
-    visage. Les gestes de mains marqués (pointer, paume ouverte) sont RARES, seulement
-    quand ça sert vraiment l'emphase, et espacés. Beaucoup de scènes restent en simple
-    expression + micro-mouvement. Tous les gestes se font de face. L'avatar ne
-    sur-gesticule JAMAIS.
-  • MICRO-MOUVEMENTS VARIÉS (réalisme acteur UGC). Change de micro-comportement à CHAQUE
-    scène au lieu de répéter le même. Répertoire subtil (à alterner) : léger mouvement de
-    tête, petit transfert du poids du corps, épaules qui se détendent, sourcil qui bouge
-    légèrement, respiration visible, courte pause naturelle, micro-inclinaison de la tête.
-    N'écris PAS le clignement des yeux (déjà généré automatiquement par HeyGen ; l'écrire
-    produit des clignements forcés peu naturels).
-- Sers-toi du brief pour le ton/la persona, mais n'injecte JAMAIS le brief dans le champ
-  "script".
-- Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises.
-"""
-~~~~~
-*(longueur exacte : 3550 caractères ; saut de ligne final : non)*
-
-Valeur Python (après évaluation de la chaîne `"""\` : le `\` initial supprime le 1er saut de ligne) :
-
-~~~~~text
-Tu découpes un script de pub UGC (avatar face caméra) en scènes pour une génération IA.
-RÈGLES ABSOLUES :
-- Ne modifie JAMAIS le texte du script : verbatim, mot pour mot. La concaténation du
-  champ "script" de toutes les scènes, dans l'ordre, doit reconstituer EXACTEMENT le
-  script d'origine (mêmes mots, même ponctuation, même orthographe — y compris les
-  tournures québécoises et ce qui ressemble à des fautes). N'ajoute, n'enlève, ne corrige
-  rien.
-- Découpe le script en scènes par UNITÉ DE SENS, pas par phrase. Une scène = un plan =
-  une idée qui se tient. Regroupe dans la MÊME scène plusieurs phrases courtes qui
-  développent la même idée ou le même moment (ex. poser son autorité, décrire un
-  problème, énumérer un bénéfice). Ne crée une nouvelle scène QUE quand l'idée, le sujet
-  ou l'intention change vraiment. Vise des scènes de ~1 à 3 phrases quand elles vont
-  ensemble ; évite les scènes d'une seule phrase courte sauf pour le hook ou un moment
-  fort isolé. Le hook (la première phrase d'accroche) reste sa propre scène. Garde
-  l'ordre du script.
-
-  EXEMPLE (à suivre) — ces 3 phrases forment UNE SEULE scène car c'est une seule idée
-  (installer sa crédibilité) :
-  « Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer
-  tous les jours. Pis des clientes qui mettent de l'huile de ricin soir après soir en
-  attendant un miracle, j'en ai vu plus que tu penses. »
-  NE PAS les éclater en 3 scènes.
-- Pour chaque scène, écris un motion prompt HeyGen EN ANGLAIS, format
-  [partie du corps] + [action] + [émotion/intensité], UN geste + UNE expression maximum,
-  court. Objectif : un vrai acteur UGC, naturel, jamais robotique. Règles impératives :
-  • FACE CAMÉRA, TOUJOURS. L'avatar reste en permanence face à la caméra, corps ET visage
-    orientés vers l'objectif, regard sur la caméra dans TOUTES les scènes, sans exception.
-    N'écris JAMAIS de profil, trois-quarts, vue de côté, rotation, ni « turn », « look away »,
-    « to the side », « over the shoulder », « glance away », ni aucun regard/orientation
-    hors caméra — même si le script évoque quelqu'un ou quelque chose d'autre.
-  • PAS DE GESTES DE COMPTAGE SUR LES DOIGTS. N'utilise JAMAIS « hold up one/two/three
-    fingers », « count on fingers », « raise a/one finger » ni aucun geste de comptage
-    (les mains IA les rendent mal). Pour une énumération (premièrement / deuxièmement…),
-    reste sur l'expression du visage, un léger hochement ou une posture ouverte.
-  • MAINS SOBRES. Privilégie les gestes de tête, de regard, d'épaules et l'expression du
-    visage. Les gestes de mains marqués (pointer, paume ouverte) sont RARES, seulement
-    quand ça sert vraiment l'emphase, et espacés. Beaucoup de scènes restent en simple
-    expression + micro-mouvement. Tous les gestes se font de face. L'avatar ne
-    sur-gesticule JAMAIS.
-  • MICRO-MOUVEMENTS VARIÉS (réalisme acteur UGC). Change de micro-comportement à CHAQUE
-    scène au lieu de répéter le même. Répertoire subtil (à alterner) : léger mouvement de
-    tête, petit transfert du poids du corps, épaules qui se détendent, sourcil qui bouge
-    légèrement, respiration visible, courte pause naturelle, micro-inclinaison de la tête.
-    N'écris PAS le clignement des yeux (déjà généré automatiquement par HeyGen ; l'écrire
-    produit des clignements forcés peu naturels).
-- Sers-toi du brief pour le ton/la persona, mais n'injecte JAMAIS le brief dans le champ
-  "script".
-- Réponds UNIQUEMENT avec le JSON, sans texte autour, sans balises.
-~~~~~
-*(longueur exacte : 3526 caractères ; saut de ligne final : OUI (le texte se termine par un saut de ligne \n, non affiché dans le bloc))*
-
-- Occurrences de `{{STYLE}}` : **0**.
-- Motifs de `_BRAND_REPLACEMENTS` présents dans le texte brut : aucun.
-
-> Ce prompt n'est PAS passé par `_with_style` ni `_replace_brands` : il est envoyé tel quel.
 
 ### B.OBJET_SYSTEM_PROMPT — `OBJET_SYSTEM_PROMPT`
 
@@ -2530,10 +2266,6 @@ Réponds UNIQUEMENT avec le JSON : {"shots":[{"n":1,"prompt_image":"...","prompt
 
 | Variable | Champ UI (`app/static/app.js`) | Endpoint (`app/main.py`) / modèle Pydantic | Chaîne d'appel |
 |---|---|---|---|
-| `script` (avatar) | `#scriptText` (`.value.trim()`) | `POST /api/brain/generate-scenes` · `BrainIn.script` | `brain_generate` → `generate_scenes` → `_generate_with_retry` → `_call_claude` |
-| `brief` | `#briefText` (`.trim()`) | idem · `BrainIn.brief` | idem |
-| `avatar_label` | `#avatarSelect` (label de l'avatar) | idem · `BrainIn.avatar_label` | idem |
-| `style` (avatar) | `selectedStyle` (doit valoir `avatar`, sinon BrainError) | idem · `BrainIn.style` (défaut `avatar`) | contrôle dans `generate_scenes` (pas injecté tel quel : le user contient la constante `STYLE: avatar`) |
 | `product_name` | `#objProduct` (`.trim()`, FACULTATIF) | `POST /api/objet/plan` · `ObjetPlanIn.product_name` | `objet_plan` → `generate_shooting_plan` → `_generate_plan_with_retry`/`_one_plan_batch_with_retry` → `_call_claude_plan` (auto) ou `_generate_manual_plan` → `_manual_shots` → `_manual_visuals_with_retry` → `_call_claude_manual_visuals` (manuel) |
 | `ambiance` | `#objAmbiance` (`.trim()`) | idem · `ObjetPlanIn.ambiance` | idem |
 | `persona` | `#objPersona` (`.trim()`) | idem · `ObjetPlanIn.persona` | idem |
@@ -2547,88 +2279,11 @@ Réponds UNIQUEMENT avec le JSON : {"shots":[{"n":1,"prompt_image":"...","prompt
 | `count` | `#mashCount` (`parseInt` ou 0) | idem · `MashupPlanIn.count` | 0 = Claude décide ; > `BRAIN_SHOTS_PER_BATCH` → lots + `part_hint` |
 | `attempt` | — (interne) | — | indice de la boucle de retry (0 = 1er essai) |
 
-Sources UI : `app/static/app.js:658-682` (avatar), `app/static/app.js:1201-1225` (objet), `app/static/app.js:2463-2485` (mashup). Endpoints : `app/main.py:446`, `app/main.py:565`, `app/main.py:728`. Modèles Pydantic : `app/main.py:1164`, `app/main.py:1201`, `app/main.py:1213`.
+Sources UI : `app/static/app.js:1201-1225` (objet), `app/static/app.js:2463-2485` (mashup). Endpoints : `app/main.py:565`, `app/main.py:728`. Modèles Pydantic : `app/main.py:1201`, `app/main.py:1213`.
 
 Note : aucune variable utilisateur (produit, ambiance, persona, brief, style mashup) n'est filtrée par `_replace_brands` avant l'envoi à Claude — seul le prompt SYSTÈME objet l'est.
 
-### C.1 Avatar — `_call_claude`
-
-Source : `app/brain.py:983-1004`
-
-~~~~~python
-def _call_claude(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str, attempt: int = 0
-) -> list[dict[str, Any]]:
-    correction = ""
-    if attempt > 0:
-        correction = (
-            "\n\n[RAPPEL] Ta sortie précédente était invalide (texte modifié ou JSON "
-            "incorrect). Recopie le SCRIPT EXACTEMENT, mot pour mot, sans rien changer, "
-            "et réponds UNIQUEMENT avec le JSON."
-        )
-    user = (
-        f"STYLE: avatar\nAVATAR (label): {avatar_label}\n\n"
-        f"BRIEF (ton/persona/contexte, ne pas mettre dans script):\n{brief}\n\n"
-        f"SCRIPT (verbatim, à découper) :\n{script}{correction}"
-    )
-    # Le JSON de sortie contient tout le script (réparti) + motion prompts + structure :
-    # on dimensionne max_tokens sur la taille du script (chars ≥ tokens attendus).
-    max_tokens = min(16000, max(4000, len(script)))
-    return _call_claude_json(
-        cfg, system=SYSTEM_PROMPT, user=user, max_tokens=max_tokens,
-        result_key="scenes", empty_msg="réponse du modèle sans scènes exploitables",
-    )
-~~~~~
-*(longueur exacte : 1070 caractères ; saut de ligne final : non)*
-
-Texte de correction ajouté quand `attempt > 0` (valeur exacte de `correction`, extraite par différence des deux rendus ; collée à la fin, après le script) :
-
-~~~~~text
-
-
-[RAPPEL] Ta sortie précédente était invalide (texte modifié ou JSON incorrect). Recopie le SCRIPT EXACTEMENT, mot pour mot, sans rien changer, et réponds UNIQUEMENT avec le JSON.
-~~~~~
-*(longueur exacte : 180 caractères ; saut de ligne final : non)*
-
-Exemple rendu (valeurs : script="Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer tous les jours. Tu veux des cils plus longs ? Essaie ce sérum.", brief='Maquilleuse québécoise, ton complice et rassurant.', avatar_label='Julie cuisine') :
-
-**attempt=0** — `model='claude-sonnet-5'`, `max_tokens=4000`, `result_key='scenes'`, system = `SYSTEM_PROMPT` (B)
-
-Contenu EXACT du message `user` :
-
-~~~~~text
-STYLE: avatar
-AVATAR (label): Julie cuisine
-
-BRIEF (ton/persona/contexte, ne pas mettre dans script):
-Maquilleuse québécoise, ton complice et rassurant.
-
-SCRIPT (verbatim, à découper) :
-Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer tous les jours. Tu veux des cils plus longs ? Essaie ce sérum.
-~~~~~
-*(longueur exacte : 331 caractères ; saut de ligne final : non)*
-
-**attempt=1** — `model='claude-sonnet-5'`, `max_tokens=4000`, `result_key='scenes'`, system = `SYSTEM_PROMPT` (B)
-
-Contenu EXACT du message `user` :
-
-~~~~~text
-STYLE: avatar
-AVATAR (label): Julie cuisine
-
-BRIEF (ton/persona/contexte, ne pas mettre dans script):
-Maquilleuse québécoise, ton complice et rassurant.
-
-SCRIPT (verbatim, à découper) :
-Ça fait des années que je maquille des femmes. Des cils fragiles, j'en vois passer tous les jours. Tu veux des cils plus longs ? Essaie ce sérum.
-
-[RAPPEL] Ta sortie précédente était invalide (texte modifié ou JSON incorrect). Recopie le SCRIPT EXACTEMENT, mot pour mot, sans rien changer, et réponds UNIQUEMENT avec le JSON.
-~~~~~
-*(longueur exacte : 511 caractères ; saut de ligne final : non)*
-
-Format de sortie attendu (d'après le SYSTEM_PROMPT et le parsing) : `{"ad":…, "avatar":…, "scenes":[{"n":…, "script":"…", "motion_prompt":"…"}]}` ; seule la clé `scenes` est lue (`ad`/`avatar` sont recalculés : `_slug(script)` et `avatar_label`).
-
-### C.2 Objet vivant (auto) — `_call_claude_plan`
+### C.1 Objet vivant (auto) — `_call_claude_plan`
 
 Source : `app/brain.py:695-722`
 
@@ -2725,7 +2380,7 @@ Salut toi ! Moi c'est Lunia. Et mon job, c'est d'aider tes cils à paraître plu
 ~~~~~
 *(longueur exacte : 714 caractères ; saut de ligne final : non)*
 
-### C.3 Objet vivant (manuel) — `_call_claude_manual_visuals`
+### C.2 Objet vivant (manuel) — `_call_claude_manual_visuals`
 
 Source : `app/brain.py:618-640`
 
@@ -2807,7 +2462,7 @@ PLANS (dialogues DÉJÀ définis, NE PAS les changer) :
 
 Note : en mode manuel, Claude ne renvoie que `prompt_image` + `prompt_motion` (+ éventuellement `refs_needed`) ; le `dialogue` est TOUJOURS forcé au segment utilisateur (`_manual_shots`).
 
-### C.4 Mashup — `_call_claude_mashup`
+### C.3 Mashup — `_call_claude_mashup`
 
 Source : `app/brain.py:862-878`
 
@@ -3001,8 +2656,6 @@ def _check_voiceover_len(script: str) -> None:
 *(longueur exacte : 389 caractères ; saut de ligne final : non)*
 
 Constante : `GRADIUM_MAX_CHARS = 1500` (`app/config_app.py:41`). Message si altération : `Découpe voix off refusée (texte altéré).` (HTTP 400).
-
-(Le mode « Voix seules » de l'avatar, lui, réutilise le découpage `generate_scenes` → donc le prompt avatar C.1.)
 
 ## E. Logique autour des appels
 
@@ -3225,43 +2878,6 @@ def _brain_backoff_sleep(retry_index: int) -> None:
 *(longueur exacte : 266 caractères ; saut de ligne final : non)*
 
 Séquence : essai 0 immédiat ; avant l'essai 1 → 2 s ; essai 2 → 5 s ; essai 3 → 10 s (4 essais au total, ~17 s d'attente cumulée hors durée des appels et hors retries internes du SDK).
-
-#### Avatar — `_generate_with_retry`
-
-Source : `app/brain.py:954-980`
-
-~~~~~python
-def _generate_with_retry(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str,
-    max_attempts: int = _BRAIN_MAX_ATTEMPTS,
-) -> list[dict[str, Any]]:
-    if not cfg.anthropic_api_key:
-        raise BrainError("Clé Anthropic manquante (Réglages).")
-    last_err = ""
-    last_verbatim = False  # dernier échec = texte altéré (≠ surcharge/JSON) ?
-    for attempt in range(max_attempts):  # 1 essai + relances (529, réseau, JSON tronqué)
-        if attempt > 0:
-            _brain_backoff_sleep(attempt - 1)
-        try:
-            scenes = _call_claude(cfg, script, brief, avatar_label, attempt=attempt)
-        except _BrainRetryable as exc:  # JSON illisible/incomplet ou réponse vide → on relance
-            last_err, last_verbatim = str(exc), False
-            continue
-        except Exception as exc:  # réseau / 529 overloaded / 5xx : relance ; auth/400 : stop
-            if _is_transient_brain_error(exc):
-                last_err, last_verbatim = str(exc), False
-                continue
-            raise BrainProviderError(_friendly_anthropic(exc)) from exc
-        if verbatim_ok(script, scenes):
-            return scenes
-        last_err, last_verbatim = "texte altéré par le modèle", True
-    if last_verbatim:
-        raise BrainVerbatimError(f"découpage refusé ({last_err})")
-    raise BrainProviderError(_OVERLOADED_MESSAGE)
-~~~~~
-*(longueur exacte : 1360 caractères ; saut de ligne final : non)*
-
-Épuisement : si le DERNIER échec était une altération du texte → `BrainVerbatimError("découpage refusé (texte altéré par le modèle)")` (400) ; sinon (JSON/surcharge/réseau) → `BrainProviderError("L'IA est momentanément surchargée, réessaie dans quelques minutes.")` (502). Erreur non transitoire (401/403/400…) → arrêt immédiat, `BrainProviderError(_friendly_anthropic(exc))`.
 
 #### Objet auto — `_generate_plan_with_retry` + `_one_plan_batch_with_retry`
 
@@ -3489,46 +3105,6 @@ def _batches(items: list[Any], size: int) -> list[list[Any]]:
 
 ### E.5 Fonctions publiques (orchestration + messages BrainError exacts)
 
-Source : `app/brain.py:302-335`
-
-~~~~~python
-def generate_scenes(
-    cfg: ProviderConfig,
-    script: str,
-    brief: str,
-    style: str,
-    avatar_label: str,
-) -> dict[str, Any]:
-    """Retourne {"ad","avatar","scenes":[...]} ou lève BrainError.
-
-    Ce cerveau ne gère que le style « avatar » ; « Objet animé », « Mashup » et « Voix off »
-    ont leurs propres parcours (generate_shooting_plan / generate_mashup_plan / voix)."""
-    if style != "avatar":
-        raise BrainError(f"Style « {style} » pas encore disponible (bientôt).")
-    if not script.strip():
-        raise BrainError("Script vide.")
-    if len(script) > MAX_SCRIPT_CHARS:
-        raise BrainError(
-            f"Script trop long ({len(script)} caractères, max {MAX_SCRIPT_CHARS}). "
-            "Découpe-le en plusieurs pubs."
-        )
-
-    if cfg.dry_run:
-        scenes = _simulate_scenes(script)
-    else:
-        scenes = _generate_with_retry(cfg, script, brief, avatar_label)
-
-    # On écarte d'éventuelles scènes au script vide (n'affecte pas le verbatim).
-    scenes = [s for s in scenes if str(s.get("script", "")).strip()]
-    scenes = _renumber(scenes)
-    # Garde-fou final (défense en profondeur, même en simulation) :
-    if not verbatim_ok(script, scenes):
-        raise BrainVerbatimError("découpage refusé (texte altéré)")
-
-    return {"ad": _slug(script), "avatar": avatar_label, "scenes": scenes}
-~~~~~
-*(longueur exacte : 1346 caractères ; saut de ligne final : non)*
-
 Source : `app/brain.py:339-398`
 
 ~~~~~python
@@ -3694,15 +3270,6 @@ def _parts_reconstruct(original: str, parts: list[str]) -> bool:
 ~~~~~
 *(longueur exacte : 656 caractères ; saut de ligne final : non)*
 
-Source : `app/brain.py:943-945`
-
-~~~~~python
-def verbatim_ok(original: str, scenes: list[dict[str, Any]]) -> bool:
-    """Avatar : la concat des `script` des scènes == script d'origine (mot pour mot)."""
-    return _parts_reconstruct(original, [str(s.get("script", "")) for s in scenes])
-~~~~~
-*(longueur exacte : 242 caractères ; saut de ligne final : non)*
-
 Source : `app/brain.py:948-950`
 
 ~~~~~python
@@ -3817,23 +3384,6 @@ def _renumber_shots(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 ~~~~~
 *(longueur exacte : 875 caractères ; saut de ligne final : non)*
 
-Source : `app/brain.py:1292-1302`
-
-~~~~~python
-def _renumber(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
-    for i, s in enumerate(scenes, 1):
-        out.append(
-            {
-                "n": i,
-                "script": str(s.get("script", "")),
-                "motion_prompt": str(s.get("motion_prompt", "")),
-            }
-        )
-    return out
-~~~~~
-*(longueur exacte : 334 caractères ; saut de ligne final : non)*
-
 Source : `app/config_app.py:63-76`
 
 ~~~~~python
@@ -3882,51 +3432,6 @@ def _record_anthropic(resp: Any) -> None:
 *(longueur exacte : 380 caractères ; saut de ligne final : non)*
 
 ## F. Simulation (dry_run) & contexte
-
-Source : `app/brain.py:1274-1288`
-
-~~~~~python
-def _simulate_scenes(script: str) -> list[dict[str, Any]]:
-    """Découpe locale par phrases en PRÉSERVANT le texte (garde-fou verbatim garanti)."""
-    parts = re.split(r"(?<=[.!?…])\s+", script.strip())
-    scenes: list[dict[str, Any]] = []
-    for i, part in enumerate(p for p in parts if p.strip()):
-        scenes.append(
-            {
-                "n": i + 1,
-                "script": part,
-                "motion_prompt": _CANNED_MOTIONS[i % len(_CANNED_MOTIONS)],
-            }
-        )
-    if not scenes:  # script sans ponctuation de fin → une seule scène
-        scenes = [{"n": 1, "script": script.strip(), "motion_prompt": _CANNED_MOTIONS[0]}]
-    return scenes
-~~~~~
-*(longueur exacte : 680 caractères ; saut de ligne final : non)*
-
-Source : `app/brain.py:1085-1091`
-
-~~~~~python
-_CANNED_MOTIONS = [
-    "Sincere expression; leans in gently toward the camera.",
-    "Confident and composed; one hand rises with an open palm to emphasize.",
-    "Warm, knowing expression; a soft, slow nod, eyes on camera.",
-    "Thoughtful expression; hands settle, calm and still.",
-    "Reassuring expression; open palms, warm and open posture.",
-]
-~~~~~
-*(longueur exacte : 353 caractères ; saut de ligne final : non)*
-
-Valeurs Python :
-
-~~~~~text
-[0] Sincere expression; leans in gently toward the camera.
-[1] Confident and composed; one hand rises with an open palm to emphasize.
-[2] Warm, knowing expression; a soft, slow nod, eyes on camera.
-[3] Thoughtful expression; hands settle, calm and still.
-[4] Reassuring expression; open palms, warm and open posture.
-~~~~~
-*(longueur exacte : 316 caractères ; saut de ligne final : non)*
 
 Source : `app/brain.py:1096-1128`
 
@@ -4408,7 +3913,7 @@ def _with_style(system_prompt: str, cfg: ProviderConfig) -> str:
 
 **Où c'est appliqué (vérifié par grep : seules occurrences dans `app/`)** :
 
-- `_with_style` (donc `_replace_brands`) : prompts SYSTÈME objet auto (`app/brain.py:719`) et manuel (`app/brain.py:638`). PAS sur `SYSTEM_PROMPT` (avatar) ni `MASHUP_SYSTEM_PROMPT`.
+- `_with_style` (donc `_replace_brands`) : prompts SYSTÈME objet auto (`app/brain.py:719`) et manuel (`app/brain.py:638`). PAS sur `MASHUP_SYSTEM_PROMPT`.
 - `scrub_brand_names` : `prompt_image` ET `prompt_motion` de CHAQUE plan objet dans `_renumber_shots` (`app/brain.py:1262-1263`) — modes auto, manuel (y compris gabarits canned) et simulation ; et le prompt de l'aperçu de style (`app/main.py:382`).
 - **PAS** sur le `dialogue` (verbatim), **PAS** sur les plans **Mashup** (`generate_mashup_plan` ne scrubbe rien, ni Claude ni manuel), **PAS** sur les messages `user` envoyés à Claude, **PAS** sur un `prompt_image` édité à la main puis régénéré (`_regenerate_image`, `app/main.py:1527-1531`), **PAS** sur les prompts reçus dans `shots_json` à `/api/objet/generate-images` (l'UI peut les avoir modifiés), **PAS** sur les préfixes `_CHARACTER_CONSISTENCY`/`_MASHUP_CONSISTENCY`, **PAS** sur le prompt Grok (dialogue).
 
@@ -5556,196 +5061,7 @@ def animate_mashup_clips(
 ~~~~~
 *(longueur exacte : 2345 caractères ; saut de ligne final : non)*
 
-### H.6 HeyGen (avatar)
-
-Source : `app/providers.py:30-33`
-
-~~~~~python
-HEYGEN_FIELDS = {
-    "audio_field": "audio_asset_id",   # confirmé accepté par /v3/videos
-    "motion_field": "motion_prompt",   # confirmé accepté
-}
-~~~~~
-*(longueur exacte : 150 caractères ; saut de ligne final : non)*
-
-Source : `app/config_app.py:122-137`
-
-~~~~~python
-COST_MODES: dict[str, CostMode] = {
-    "premium": {
-        "label": "Premium",
-        "engine": "avatar_v",     # Avatar V
-        "motion": True,           # motion prompt custom activé
-        "resolution": "1080p",    # pleine résolution
-        "credits_per_sec": 4.0,   # observé : Avatar V + motion + 1080p ≈ 4 cr/s
-    },
-    "classique": {
-        "label": "Classique",
-        "engine": "avatar_iv",    # Avatar IV
-        "motion": False,          # pas de motion prompt → gestes auto HeyGen
-        "resolution": "720p",     # 720p (moins cher que le défaut 1080p)
-        "credits_per_sec": 1.5,   # Avatar IV, sans motion, 720p ≈ 1,5 cr/s
-    },
-}
-~~~~~
-*(longueur exacte : 663 caractères ; saut de ligne final : non)*
-
-Source : `app/providers.py:427-453`
-
-~~~~~python
-def _create_video_payload(
-    cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str
-) -> dict:
-    """Payload POST /v3/videos (type avatar). Champs CONFIRMÉS acceptés par HeyGen
-    (schéma strict) : title (PAS video_title), aspect_ratio "9:16" (PAS dimension),
-    audio_asset_id + motion_prompt top-level, engine {type}.
-
-    Le MODE COÛT change réellement le payload :
-    - Premium  : engine "avatar_v" + motion_prompt présent.
-    - Classique: engine "avatar_iv" + motion_prompt OMIS (gestes auto).
-    (enhance_custom_motion_prompt n'est jamais envoyé : rejeté par HeyGen.)
-    """
-    mode = config_app.COST_MODES.get(cfg.cost_mode, config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
-    payload: dict = {
-        "type": "avatar",
-        "avatar_id": avatar_id,
-        "engine": {"type": mode["engine"]},
-        HEYGEN_FIELDS["audio_field"]: audio_asset_id,
-        "title": title,
-    }
-    if mode["motion"] and motion_prompt:
-        payload[HEYGEN_FIELDS["motion_field"]] = motion_prompt
-    payload["resolution"] = mode["resolution"]  # 720p (Classique) / 1080p (Premium)
-    payload["aspect_ratio"] = "9:16"             # confirmé : PAS "dimension" {width,height}
-    if cfg.heygen_voice_id:
-        payload["voice_id"] = cfg.heygen_voice_id
-    return payload
-~~~~~
-*(longueur exacte : 1315 caractères ; saut de ligne final : non)*
-
-Payload rendu — `cost_mode='premium'`, `heygen_voice_id=''` :
-
-~~~~~json
-{
-  "type": "avatar",
-  "avatar_id": "avatar_abc",
-  "engine": {
-    "type": "avatar_v"
-  },
-  "audio_asset_id": "asset_xyz",
-  "title": "pub_01",
-  "motion_prompt": "Warm, knowing expression; a soft, slow nod, eyes on camera.",
-  "resolution": "1080p",
-  "aspect_ratio": "9:16"
-}
-~~~~~
-*(longueur exacte : 280 caractères ; saut de ligne final : non)*
-
-Payload rendu — `cost_mode='premium'`, `heygen_voice_id='heygen_voice_123'` :
-
-~~~~~json
-{
-  "type": "avatar",
-  "avatar_id": "avatar_abc",
-  "engine": {
-    "type": "avatar_v"
-  },
-  "audio_asset_id": "asset_xyz",
-  "title": "pub_01",
-  "motion_prompt": "Warm, knowing expression; a soft, slow nod, eyes on camera.",
-  "resolution": "1080p",
-  "aspect_ratio": "9:16",
-  "voice_id": "heygen_voice_123"
-}
-~~~~~
-*(longueur exacte : 314 caractères ; saut de ligne final : non)*
-
-Payload rendu — `cost_mode='classique'`, `heygen_voice_id=''` :
-
-~~~~~json
-{
-  "type": "avatar",
-  "avatar_id": "avatar_abc",
-  "engine": {
-    "type": "avatar_iv"
-  },
-  "audio_asset_id": "asset_xyz",
-  "title": "pub_01",
-  "resolution": "720p",
-  "aspect_ratio": "9:16"
-}
-~~~~~
-*(longueur exacte : 198 caractères ; saut de ligne final : non)*
-
-Payload rendu — `cost_mode='classique'`, `heygen_voice_id='heygen_voice_123'` :
-
-~~~~~json
-{
-  "type": "avatar",
-  "avatar_id": "avatar_abc",
-  "engine": {
-    "type": "avatar_iv"
-  },
-  "audio_asset_id": "asset_xyz",
-  "title": "pub_01",
-  "resolution": "720p",
-  "aspect_ratio": "9:16",
-  "voice_id": "heygen_voice_123"
-}
-~~~~~
-*(longueur exacte : 232 caractères ; saut de ligne final : non)*
-
-Mode coût inconnu → repli `COST_MODES[DEFAULT_COST_MODE]` = premium. Envoi : `POST https://api.heygen.com/v3/videos`, headers `x-api-key: <clé>`, `Content-Type: application/json`, timeout 120. Titre = `f"{ad_name}_{n:02d}"` (`app/pipeline.py:162`). Polling `GET /v3/videos/{id}` toutes les `POLL_EVERY = 10` s, max `POLL_TIMEOUT = 900` s ; succès `completed`/`success` → `video_url`/`url` ; échec `failed`/`error`.
-
-Source : `app/providers.py:402-424`
-
-~~~~~python
-def heygen_upload_audio(cfg: ProviderConfig, wav_path: str | Path) -> str:
-    """Upload de l'audio → asset_id. Simulation : id factice."""
-    if cfg.dry_run:
-        return "SIMU_ASSET_ID"
-    wav_path = str(wav_path)
-    mime = _audio_mime(wav_path)
-    with open(wav_path, "rb") as f:
-        blob = f.read()
-    r = requests.post(
-        HEYGEN_UPLOAD,
-        headers={"x-api-key": cfg.heygen_api_key, "Content-Type": mime},
-        data=blob,
-        timeout=120,
-    )
-    if r.status_code >= 400:
-        _log_detail(f"HeyGen upload {r.status_code} : {r.text[:400]}")
-        raise ProviderError(_friendly_http("HeyGen", r.status_code))
-    d = r.json().get("data", {})
-    asset_id = d.get("id") or d.get("asset_id")
-    if not asset_id:
-        _log_detail(f"HeyGen upload : asset id absent dans {r.text[:300]}")
-        raise ProviderError("HeyGen n'a pas accepté l'audio — réessaie ; si ça persiste, vérifie ta clé HeyGen (Réglages).")
-    return str(asset_id)
-~~~~~
-*(longueur exacte : 974 caractères ; saut de ligne final : non)*
-
-Source : `app/providers.py:389-399`
-
-~~~~~python
-def _audio_mime(path: str) -> str:
-    """Content-Type EXACT attendu par HeyGen à l'upload.
-
-    HeyGen renifle le contenu : un WAV est détecté comme "audio/x-wav". Envoyer
-    "audio/wav" déclenche un 400 (code 400543 « Content type not match »). On force
-    donc le bon type par extension.
-    """
-    ext = Path(path).suffix.lower()
-    return {".wav": "audio/x-wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}.get(
-        ext, mimetypes.guess_type(path)[0] or "application/octet-stream"
-    )
-~~~~~
-*(longueur exacte : 498 caractères ; saut de ligne final : non)*
-
-L'audio uploadé est la voix Gradium de la scène, forcée en WAV (`gradium_tts(cfg, script, wav, fmt="wav")`, `app/pipeline.py:130`) → Content-Type `audio/x-wav`, corps = octets bruts du fichier.
-
-### H.7 Gradium (voix)
+### H.6 Gradium (voix)
 
 Source : `app/providers.py:240-261`
 
@@ -5798,7 +5114,7 @@ async def _gradium_sample_real(cfg: ProviderConfig, voice_id: str, text: str, ou
 
 Setup envoyé : `{"model_name": cfg.gradium_model or "default", "voice_id": cfg.gradium_voice_id, "output_format": "wav"}` (`DEFAULT_GRADIUM_MODEL = 'default'`) ; le texte est le segment VERBATIM. Toujours WAV côté API, puis réparation d'entête ou conversion MP3 locale (`media.wav_bytes_to_mp3_file`) selon `audio_format` (défaut `mp3`). SDK `gradium.client.GradiumClient(api_key=…)`.
 
-### H.8 Styles
+### H.7 Styles
 
 Source : `app/config_app.py:311-332`
 
@@ -5985,7 +5301,7 @@ def ensure_dirs() -> None:
 ```
 Mémoïsation par trio de chemins : les `mkdir` ne sont tentés qu'une fois par jeu de chemins (évite 3 syscalls par requête SQL). Si les chemins changent (tests qui patchent les constantes), la clé change → recréation. Limite : si un dossier est supprimé pendant l'exécution, il n'est pas recréé (clé déjà mémorisée). `VOICES_DIR` et `VOICEOVER_DIR` ne sont PAS créés ici (créés à la demande par `pipeline._unique_pub_dir`, `pipeline.py:248`).
 
-Appelants d'`ensure_dirs()` : `db.connect` (`db.py:113`), `lifespan` (`main.py:39`), `create_app` avant montage `/media` (`main.py:1131`), caches HeyGen/Gradium (`main.py:275`, `main.py:327`), `_prepare_streams` (`main.py:1877`), `_log_launch_error` (`main.py:1889`).
+Appelants d'`ensure_dirs()` : `db.connect` (`db.py:113`), `lifespan` (`main.py:39`), `create_app` avant montage `/media` (`main.py:1131`), cache Gradium (`main.py:327`), `_prepare_streams` (`main.py:1877`), `_log_launch_error` (`main.py:1889`).
 
 ### 1.5 Initialisation au démarrage
 
@@ -6001,11 +5317,6 @@ Appelants d'`ensure_dirs()` : `db.connect` (`db.py:113`), `lifespan` (`main.py:3
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS avatars (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    label     TEXT NOT NULL,
-    avatar_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS voices (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6115,14 +5426,14 @@ def init_db() -> None:
         con.close()
 ```
 Pas à pas :
-1. `executescript(_SCHEMA)` : crée les 10 tables si absentes (`CREATE TABLE IF NOT EXISTS` ; ne modifie jamais une table existante). NB : `executescript` fait un COMMIT implicite avant exécution.
+1. `executescript(_SCHEMA)` : crée les tables si absentes (`CREATE TABLE IF NOT EXISTS` ; ne modifie jamais une table existante). NB : `executescript` fait un COMMIT implicite avant exécution.
 2. Pour chaque table de `_MIGRATIONS`, lit la liste des colonnes existantes via `PRAGMA table_info(<table>)`.
 3. Pour chaque colonne déclarée absente : `ALTER TABLE <table> ADD COLUMN <nom> <définition>` (migrations purement ADDITIVES ; aucun renommage, suppression, changement de type ou backfill).
 4. `commit()`.
 
 Conséquences :
 - Sur une base NEUVE, `ads.kind`, `clips.prompt_image`, `clips.image_path`, `cost_events.archive_id` existent déjà via `_SCHEMA` (no-op), mais `clips.duration_s`, `clips.refs_needed`, `clips.is_anchor` et `ref_images.kind` ne sont créées QUE par les migrations (elles ne figurent pas dans `_SCHEMA`) → elles sont en fin de table (cid 12-14 pour clips, cid 3 pour ref_images).
-- `ALTER TABLE ... ADD COLUMN kind TEXT NOT NULL DEFAULT 'avatar'` est légal en SQLite car un défaut non NULL est fourni ; les lignes anciennes prennent `'avatar'` (d'où la rétro-compatibilité évoquée `main.py:933-935` : d'anciennes pubs « voix seules » ont `kind='avatar'`, filtrées alors par leur `status`).
+- `ALTER TABLE ... ADD COLUMN kind TEXT NOT NULL DEFAULT 'avatar'` est légal en SQLite car un défaut non NULL est fourni ; les lignes anciennes prennent `'avatar'`.
 - Aucune table de versions de schéma : l'état se déduit de `PRAGMA table_info`.
 - Aucun index secondaire n'est créé (seulement les autoindex des PK TEXT `settings.key` et `voice_meta.uid`). `clips.ad_id`, `cost_events.archive_id`, `cost_events.ad_id` ne sont pas indexés.
 - La table interne `sqlite_sequence` existe (conséquence des `AUTOINCREMENT`).
@@ -6137,13 +5448,6 @@ Légende : NN = NOT NULL (1 = oui). « PK » = clé primaire. Défauts tels que 
 | key | TEXT | 0 (PK) | — | PK (autoindex `sqlite_autoindex_settings_1`) | nom du réglage (liste exhaustive §5) |
 | value | TEXT | 1 | — | — | valeur TOUJOURS en texte (booléens `"1"`/`"0"`, nombres en chaîne) ; clés API en CLAIR |
 
-#### `avatars` (avatars HeyGen enregistrés par l'utilisateur)
-| colonne | type | NN | défaut | PK/FK | description |
-|---|---|---|---|---|---|
-| id | INTEGER | 0 | — | PK AUTOINCREMENT | id de ligne (utilisé par `DELETE /api/avatars/{row_id}`) |
-| label | TEXT | 1 | — | — | libellé affiché ; pas d'unicité (on prend le 1er par `ORDER BY id`) |
-| avatar_id | TEXT | 1 | — | — | identifiant HeyGen de l'avatar |
-
 #### `voices` (voix Gradium de l'utilisateur, gérées par label)
 | colonne | type | NN | défaut | PK/FK | description |
 |---|---|---|---|---|---|
@@ -6156,7 +5460,7 @@ Légende : NN = NOT NULL (1 = oui). « PK » = clé primaire. Défauts tels que 
 |---|---|---|---|---|---|
 | id | INTEGER | 0 | — | PK AUTOINCREMENT | ad_id |
 | name | TEXT | 1 | — | — | nom saisi (sert aussi aux noms de dossiers/ZIP) |
-| avatar_label | TEXT | 0 | NULL | — | label d'avatar (flux avatar / voix seules) ; `""` pour objet, mashup, voix off |
+| avatar_label | TEXT | 0 | NULL | — | label d'avatar ; `""` pour objet, mashup, voix off |
 | created_at | REAL | 1 | — | — | epoch secondes (`time.time()`) |
 | scenes_json | TEXT | 1 | — | — | JSON (ensure_ascii=False) des scènes/plans envoyés à la création ; instantané figé, JAMAIS mis à jour ensuite (les éditions vont dans `clips`) |
 | status | TEXT | 1 | `'en_cours'` | — | statut global (valeurs §4.1) |
@@ -6168,16 +5472,16 @@ Légende : NN = NOT NULL (1 = oui). « PK » = clé primaire. Défauts tels que 
 | id | INTEGER | 0 | — | PK AUTOINCREMENT | clip_id |
 | ad_id | INTEGER | 1 | — | FK → `ads(id)` (NO ACTION) | pub parente (non indexée) |
 | scene_n | INTEGER | 1 | — | — | numéro de scène/plan/segment (1..N) ; tri de toutes les listes |
-| script | TEXT | 1 | — | — | **nom trompeur** : avatar/voix seules = texte parlé de la scène (verbatim) ; voix off = segment de texte ; **objet = DIALOGUE dit par l'objet** (éditable via `/api/objet/dialogue`, `main.py:713`) ; mashup = `""` (aucune voix, `main.py:774`) |
-| motion_prompt | TEXT | 0 | NULL | — | avatar = motion prompt HeyGen ; objet/mashup = `prompt_motion` (prompt d'animation Grok/Kling) ; voix off = `""` |
-| prompt_image | TEXT | 0 | NULL | — | prompt Nano Banana (objet/mashup) ; `""` pour avatar/voix |
+| script | TEXT | 1 | — | — | **nom trompeur** : voix off = segment de texte ; **objet = DIALOGUE dit par l'objet** (éditable via `/api/objet/dialogue`, `main.py:713`) ; mashup = `""` (aucune voix, `main.py:774`) |
+| motion_prompt | TEXT | 0 | NULL | — | objet/mashup = `prompt_motion` (prompt d'animation Grok/Kling) ; voix off = `""` |
+| prompt_image | TEXT | 0 | NULL | — | prompt Nano Banana (objet/mashup) ; `""` pour voix off |
 | image_path | TEXT | 0 | NULL | — | chemin absolu du PNG généré (objet/mashup) ; N'EST PAS effacé en cas d'échec ultérieur |
-| wav_path | TEXT | 0 | NULL | — | **nom trompeur** : chemin de l'audio ; avatar = toujours `.wav` (forcé, `pipeline.py:130`) ; voix seules / voix off = `.mp3` PAR DÉFAUT (ou `.wav` selon `audio_format`) — c'est le chemin réel renvoyé par `gradium_tts` (`providers.py:217`) |
-| mp4_path | TEXT | 0 | NULL | — | chemin absolu du clip vidéo (HeyGen / Grok / Kling) |
+| wav_path | TEXT | 0 | NULL | — | **nom trompeur** : chemin de l'audio ; voix off = `.mp3` PAR DÉFAUT (ou `.wav` selon `audio_format`) — c'est le chemin réel renvoyé par `gradium_tts` (`providers.py:217`) |
+| mp4_path | TEXT | 0 | NULL | — | chemin absolu du clip vidéo (Grok / Kling) |
 | status | TEXT | 1 | `'en_attente'` | — | statut du clip (§4.2) |
 | error | TEXT | 0 | NULL | — | message d'erreur LISIBLE (jamais de trace brute) ; remis à NULL à chaque succès/reset |
 | created_at | REAL | 1 | — | — | epoch |
-| duration_s | INTEGER | 0 | `5` | — | (migration) durée voulue du clip Mashup/Kling ; écrite via `clamp_mashup_seconds` ([3,12], défaut 6) pour mashup (`main.py:778`, `main.py:811`). **Incohérence** : défaut SQL 5 ≠ `KLING_DEFAULT_CLIP_SECONDS` 6. Pour objet/avatar/voix la colonne vaut 5 mais n'est jamais lue (Grok calcule sa durée depuis le dialogue) |
+| duration_s | INTEGER | 0 | `5` | — | (migration) durée voulue du clip Mashup/Kling ; écrite via `clamp_mashup_seconds` ([3,12], défaut 6) pour mashup (`main.py:778`, `main.py:811`). **Incohérence** : défaut SQL 5 ≠ `KLING_DEFAULT_CLIP_SECONDS` 6. Pour objet/voix la colonne vaut 5 mais n'est jamais lue (Grok calcule sa durée depuis le dialogue) |
 | refs_needed | TEXT | 0 | NULL | — | (migration) JSON liste des types de réfs utiles au plan (`visage`/`produit`/`decor`/`style`) ; `""` = non typé ; `"[]"` = plan neutre (aucune réf). Lu via `config_app.normalize_refs_needed` |
 | is_anchor | INTEGER | 0 | `0` | — | (migration) 1 = image de ce plan = ancre de cohérence (une seule par pub, `main.py:662-666`) |
 
@@ -6202,12 +5506,12 @@ Légende : NN = NOT NULL (1 = oui). « PK » = clé primaire. Défauts tels que 
 |---|---|---|---|---|---|
 | id | INTEGER | 0 | — | PK AUTOINCREMENT | |
 | ad_id | INTEGER | 0 | NULL | (pas de FK déclarée) | pub ; NULL pour Anthropic (toujours) et aperçu de style |
-| service | TEXT | 1 | — | — | `openrouter` / `grok` / `kling` / `heygen` / `gradium` / `anthropic` |
+| service | TEXT | 1 | — | — | `openrouter` / `grok` / `kling` / `gradium` / `anthropic` |
 | unit | TEXT | 1 | — | — | `image` / `second` / `credit` / `generation` / `call` |
 | qty | REAL | 1 | `0` | — | quantité dans l'unité (1 image, N secondes, N crédits, 1 génération, 1 appel) |
 | usd | REAL | 1 | `0` | — | coût ESTIMÉ en USD (toujours stocké en USD) |
-| credits | REAL | 1 | `0` | — | crédits HeyGen (seul service qui en renseigne) |
-| detail | TEXT | 0 | NULL | — | modèle (image/kling), mode (heygen), `"video+voix"` (grok), `"<in>+<out> tok"` (anthropic), `""` (gradium) |
+| credits | REAL | 1 | `0` | — | crédits de l'ancien fournisseur (montants passés uniquement) |
+| detail | TEXT | 0 | NULL | — | modèle (image/kling), `"video+voix"` (grok), `"<in>+<out> tok"` (anthropic), `""` (gradium) |
 | created_at | REAL | 1 | — | — | epoch |
 | archive_id | INTEGER | 0 | NULL | (pas de FK déclarée) | NULL = coût ACTIF ; entier = rattaché à `cost_archives.id` |
 
@@ -6234,14 +5538,14 @@ Légende : NN = NOT NULL (1 = oui). « PK » = clé primaire. Défauts tels que 
 ### 2.5 Pièges / noms trompeurs à connaître
 
 - `clips.script` : pour « Objet animé » c'est le DIALOGUE de l'objet (voix + lip-sync générés par Grok), pas un script avatar ; pour Mashup il est vide.
-- `clips.wav_path` : peut contenir un `.mp3` (défaut pour voix seules / voix off). Le téléchargement déduit le type MIME de l'extension réelle (`main.py:1019-1021`).
+- `clips.wav_path` : peut contenir un `.mp3` (défaut pour voix off). Le téléchargement déduit le type MIME de l'extension réelle (`main.py:1019-1021`).
 - `clips.motion_prompt` : pour objet/mashup contient le `prompt_motion` (le JSON d'entrée s'appelle `prompt_motion`, la colonne `motion_prompt`).
 - `clips.duration_s` : défaut SQL 5, alors que le défaut applicatif Mashup est 6 ; inutilisé hors mashup.
-- `clips.status = 'voix_pret'` est l'état FINAL (succès) des flux voix seules / voix off : ces clips ne passent jamais à `pret`.
+- `clips.status = 'voix_pret'` est l'état FINAL (succès) du flux voix off : ces clips ne passent jamais à `pret`.
 - `ads.status` pour Mashup réutilise la valeur `objet_images` (aucun statut spécifique mashup).
 - `ads.scenes_json` est un instantané de création, jamais resynchronisé.
 - `cost_events.ad_id` et `archive_id` n'ont pas de FK.
-- **Tests** : `tests/conftest.py:20-23` vide entre chaque test les tables `("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings", "avatars", "voices", "activity")` — **`voice_meta` est ABSENTE de cette liste de purge** (ses lignes persistent d'un test à l'autre dans la base temporaire de session). `sqlite_sequence` n'est pas purgée non plus (les id continuent de croître).
+- **Tests** : `tests/conftest.py:20-23` vide entre chaque test les tables `("cost_events", "cost_archives", "clips", "ref_images", "ads", "settings", "voices", "activity")` — **`voice_meta` est ABSENTE de cette liste de purge** (ses lignes persistent d'un test à l'autre dans la base temporaire de session). `sqlite_sequence` n'est pas purgée non plus (les id continuent de croître).
 
 ---
 
@@ -6256,15 +5560,7 @@ Toutes ouvrent/ferment leur propre connexion (§1.3).
 | `set_setting(key: str, value: str) -> None` (`db.py:146`) | `INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value` + commit | None (UPSERT) |
 | `get_all_settings() -> dict[str, str]` (`db.py:159`) | `SELECT key, value FROM settings` | `{key: value}` |
 
-### 3.2 Avatars
-| fonction | SQL | retour |
-|---|---|---|
-| `list_avatars() -> list[dict[str, Any]]` (`db.py:169`) | `SELECT id, label, avatar_id FROM avatars ORDER BY id` | liste de dicts `{id,label,avatar_id}` |
-| `add_avatar(label: str, avatar_id: str) -> int` (`db.py:178`) | `INSERT INTO avatars(label, avatar_id) VALUES(?, ?)` + commit | `int(cur.lastrowid or 0)` |
-| `delete_avatar(avatar_row_id: int) -> None` (`db.py:190`) | `DELETE FROM avatars WHERE id=?` + commit | None |
-| `avatar_id_for_label(label: str) -> str \| None` (`db.py:199`) | `SELECT avatar_id FROM avatars WHERE label=? ORDER BY id LIMIT 1` | avatar_id ou None |
-
-### 3.3 Voix
+### 3.2 Voix
 | fonction | SQL | retour |
 |---|---|---|
 | `list_voices() -> list[dict[str, Any]]` (`db.py:211`) | `SELECT id, label, voice_id FROM voices ORDER BY id` | liste `{id,label,voice_id}` |
@@ -6273,7 +5569,7 @@ Toutes ouvrent/ferment leur propre connexion (§1.3).
 | `voice_id_for_label(label: str) -> str \| None` (`db.py:239`) | `SELECT voice_id FROM voices WHERE label=? ORDER BY id LIMIT 1` | voice_id ou None |
 | `first_voice_id() -> str \| None` (`db.py:250`) | `SELECT voice_id FROM voices ORDER BY id LIMIT 1` | voice_id de la plus ancienne voix ou None |
 
-### 3.4 Métadonnées voix (jalon 5)
+### 3.3 Métadonnées voix (jalon 5)
 - Liste blanche (`db.py:260`) : `_VOICE_META_COLS = {"label", "gender", "age", "note", "sample_path"}`
 - `set_voice_meta(uid: str, **fields: Any) -> None` (`db.py:263-279`) : filtre `fields` sur `_VOICE_META_COLS` ; si vide → return (aucune écriture). Sinon, dans la même connexion :
   1. `INSERT OR IGNORE INTO voice_meta(uid, updated_at) VALUES(?, ?)` (uid, time.time())
@@ -6282,7 +5578,7 @@ Toutes ouvrent/ferment leur propre connexion (§1.3).
 - `get_voice_meta(uid: str) -> dict[str, Any] | None` (`db.py:282`) : `SELECT * FROM voice_meta WHERE uid=?` → dict ou None.
 - `voice_meta_map() -> dict[str, dict[str, Any]]` (`db.py:291`) : `SELECT * FROM voice_meta` → `{str(uid): dict(row)}`.
 
-### 3.5 Pubs / clips
+### 3.4 Pubs / clips
 - `create_ad(name: str, avatar_label: str, scenes_json: str, kind: str = "avatar") -> int` (`db.py:302-313`) :
   `INSERT INTO ads(name, avatar_label, created_at, scenes_json, status, kind) VALUES(?, ?, ?, ?, 'en_cours', ?)` (created_at = time.time()) → lastrowid. Le statut `'en_cours'` est littéral dans la requête.
 - `set_ad_status(ad_id: int, status: str) -> None` (`db.py:316`) : `UPDATE ads SET status=? WHERE id=?` + commit. Aucune validation de la valeur.
@@ -6305,12 +5601,12 @@ Toutes ouvrent/ferment leur propre connexion (§1.3).
 - `list_ads_with_clips() -> list[dict[str, Any]]` (`db.py:611-625`) : `SELECT * FROM ads ORDER BY created_at DESC` puis, pour CHAQUE pub, `SELECT * FROM clips WHERE ad_id=? ORDER BY scene_n` (N+1 requêtes sur une même connexion) ; chaque dict pub reçoit une clé `"clips"`.
 - `count_clips(status: str | None = None) -> int` (`db.py:628-637`) : `SELECT COUNT(*) AS n FROM clips WHERE status=?` ou `SELECT COUNT(*) AS n FROM clips`. Appelé avec `"pret"` pour `total_videos` du tableau de bord (`main.py:440`).
 
-### 3.6 Images de référence
+### 3.5 Images de référence
 - `add_ref_image(ad_id: int, path: str, kind: str = "") -> int` (`db.py:361`) : `INSERT INTO ref_images(ad_id, path, kind) VALUES(?, ?, ?)` → lastrowid.
 - `list_ref_images(ad_id: int) -> list[str]` (`db.py:373`) : `SELECT path FROM ref_images WHERE ad_id=? ORDER BY id` → liste de chemins.
 - `list_ref_images_typed(ad_id: int) -> list[dict[str, Any]]` (`db.py:384`) : `SELECT id, path, COALESCE(kind, '') AS kind FROM ref_images WHERE ad_id=? ORDER BY id` → `[{id, path, kind}]`.
 
-### 3.7 Coûts
+### 3.6 Coûts
 - `add_cost_event(service: str, unit: str, qty: float = 0.0, *, usd: float = 0.0, credits: float = 0.0, ad_id: int | None = None, detail: str = "") -> None` (`db.py:437-452`) :
   `INSERT INTO cost_events(ad_id, service, unit, qty, usd, credits, detail, created_at) VALUES(?,?,?,?,?,?,?,?)` avec `float(qty)`, `float(usd)`, `float(credits)`, `time.time()`. `archive_id` reste NULL (actif). Docstring : « La simulation n'appelle jamais ceci. »
 - `_archive_where(archive_id: int | None, col: str = "archive_id") -> tuple[str, tuple[Any, ...]]` (`db.py:457-460`) : None → `("<col> IS NULL", ())` ; entier → `("<col> = ?", (archive_id,))`.
@@ -6332,7 +5628,7 @@ Toutes ouvrent/ferment leur propre connexion (§1.3).
 - `cost_events_raw(archive_id: int | None = None) -> list[dict[str, Any]]` (`db.py:564`) : `SELECT service, unit, qty, usd, credits, created_at FROM cost_events WHERE <where> ORDER BY created_at`.
 - `cost_totals(archive_id: int | None = None) -> dict[str, Any]` (`db.py:579`) : `SELECT COALESCE(SUM(usd),0) AS usd, COALESCE(SUM(credits),0) AS credits, COUNT(*) AS n FROM cost_events WHERE <where>` → `{"usd", "credits", "events"}` (non arrondis).
 
-### 3.8 Activité
+### 3.7 Activité
 - `log_activity(kind: str, message: str) -> None` (`db.py:641`) : `INSERT INTO activity(ts, kind, message) VALUES(?, ?, ?)` (ts = time.time()).
 - `recent_activity(limit: int = 20) -> list[dict[str, Any]]` (`db.py:653`) : `SELECT ts, kind, message FROM activity ORDER BY ts DESC LIMIT ?` (appelé avec 15, `main.py:441`).
 
@@ -6347,10 +5643,8 @@ Aucune fonction de suppression de pub/clip/ref_image/activité/coût n'existe.
 | valeur | écrite par | fichier:ligne |
 |---|---|---|
 | `en_cours` | défaut SQL + littéral dans `create_ad` | `db.py:36`, `db.py:307` |
-| `termine` | `generate_ad` (0 échec) ; `_animate_clips` (ok>0 et ko==0, si `set_status`) | `pipeline.py:211-212` ; `pipeline.py:530` |
-| `partiel` | `generate_ad` (ko>0 et ok>0) | `pipeline.py:211-212` |
-| `echec` | `generate_ad` (ok==0 et ko>0) ; exception non rattrapée dans un job (tous flux) | `pipeline.py:211-212` ; `jobs.py:152` |
-| `voix_seules` | `generate_voices_only` (toujours, même si des voix ont échoué) | `pipeline.py:341` |
+| `termine` | `_animate_clips` (ok>0 et ko==0, si `set_status`) | `pipeline.py:530` |
+| `echec` | exception non rattrapée dans un job (tous flux) | `jobs.py:152` |
 | `voix_off` | `generate_voiceover` (toujours) | `pipeline.py:770` |
 | `objet_images` | `generate_objet_images` (fin de TOUT job image, objet ET mashup) ; `_animate_clips` si pas 100 % de succès | `pipeline.py:425` ; `pipeline.py:530` |
 
@@ -6361,58 +5655,26 @@ Aucun autre littéral n'est passé à `set_ad_status` (grep exhaustif de `app/`)
 | valeur | écrite par | fichier:ligne |
 |---|---|---|
 | `en_attente` | défaut SQL ; `create_clip` ; `_regenerate_image` ; `reset_clips_pending` (reprise image, cohérence) | `db.py:49`, `db.py:342` ; `main.py:1531`, `main.py:1534` ; `db.py:428` (appelé `main.py:1575`, `main.py:1635`) |
-| `voix_pret` | voix avatar prête (phase 1) ; voix seules OK ; voix off OK | `pipeline.py:131` ; `pipeline.py:333` ; `pipeline.py:760` |
-| `pret` | vidéo HeyGen prête ; clip Grok/Kling prêt | `pipeline.py:166` ; `pipeline.py:521` |
+| `voix_pret` | voix off OK | `pipeline.py:760` |
+| `pret` | clip Grok/Kling prêt | `pipeline.py:521` |
 | `echec` | `_emit_clip_failure` (tous flux) | `pipeline.py:63` |
 | `image_pret` | image Nano Banana générée ; dé-validation | `pipeline.py:481` ; `main.py:1652-1653` |
 | `valide` | validation utilisateur d'une image | `main.py:1652-1653` |
 
-Lectures de statut : `main.py:534` (`echec`), `main.py:676` (`valide`), `main.py:838`/`pipeline.py:612` (`valide|echec|pret`), `main.py:845`/`main.py:1585`/`pipeline.py:555`/`pipeline.py:617` (`valide|echec`), `main.py:931` (`pret`), `main.py:1556` (`echec`), `main.py:1662` (`valide`), `main.py:440` (`pret`).
+Lectures de statut : `main.py:676` (`valide`), `main.py:838`/`pipeline.py:612` (`valide|echec|pret`), `main.py:845`/`main.py:1585`/`pipeline.py:555`/`pipeline.py:617` (`valide|echec`), `main.py:931` (`pret`), `main.py:1556` (`echec`), `main.py:1662` (`valide`), `main.py:440` (`pret`).
 
 ### 4.3 `ads.kind`
 
 | valeur | créée par | fichier:ligne |
 |---|---|---|
-| `avatar` | `/api/generate` (vidéo) ; défaut SQL/migration | `main.py:510-513` ; `db.py:37`, `db.py:99` |
-| `audio` | `/api/generate` avec `cost_mode == "voix_seules"` ; `/api/voiceover/generate` | `main.py:512` ; `main.py:914` |
+| `avatar` | défaut SQL/migration | `db.py:37`, `db.py:99` |
+| `audio` | `/api/voiceover/generate` | `main.py:914` |
 | `objet` | `/api/objet/generate-images` | `main.py:602` |
 | `mashup` | `/api/mashup/generate-images` | `main.py:767` |
 
-Usages : Bibliothèque vidéo = kind ∈ {avatar, objet, mashup} ET status ∉ {voix_seules, voix_off} ET (objet/mashup ⇒ au moins un clip `pret` avec mp4) (`main.py:937-942`) ; `/api/photos` = objet/mashup (`main.py:954`) ; `/api/library/voices` = audio (`main.py:993`) ; relance avatar exige `avatar` (`main.py:532`) ; routes objet/mashup vérifient le kind (`main.py:674`, `829`, `1522`, `1553`, `1613`) ; `generate_objet_images` choisit la consigne de cohérence selon `kind == "mashup"` (`pipeline.py:416-417`).
+Usages : Bibliothèque vidéo = kind ∈ {avatar, objet, mashup} ET status ∉ {voix_seules, voix_off} ET (objet/mashup ⇒ au moins un clip `pret` avec mp4) (`main.py:937-942`) ; `/api/photos` = objet/mashup (`main.py:954`) ; `/api/library/voices` = audio (`main.py:993`) ; routes objet/mashup vérifient le kind (`main.py:674`, `829`, `1522`, `1553`, `1613`) ; `generate_objet_images` choisit la consigne de cohérence selon `kind == "mashup"` (`pipeline.py:416-417`).
 
 ### 4.4 Diagrammes de transitions par flux
-
-#### Flux AVATAR (HeyGen) — `output_mode="video"`
-```
-ADS:
- [créée] --create_ad (main.py:510)--> en_cours
- en_cours --generate_ad fin (pipeline.py:211-212)--> termine  (ko == 0)
-                                                 --> partiel  (ko > 0 et ok > 0)
-                                                 --> echec    (ok == 0)
- en_cours --exception job (jobs.py:152)--> echec
- [relance /api/generate/retry (main.py:524-554)] : re-exécute generate_ad sur les SEULS clips echec
-   → statut recalculé sur ce SOUS-ENSEMBLE (pipeline.py:211) : une relance ratée donne "echec"
-     même si d'autres scènes étaient déjà "pret" ; une relance 100 % OK donne "termine".
-
-CLIPS (une scène) :
- [absent] --create_clip dans _voice_one_scene (pipeline.py:123)--> en_attente
- en_attente --voix Gradium OK (pipeline.py:131)--> voix_pret
- en_attente --3 essais voix KO (pipeline.py:142 → pipeline.py:63)--> echec
- voix_pret --HeyGen upload+rendu OK (pipeline.py:166)--> pret
- voix_pret --HeyGen KO (pipeline.py:170 → pipeline.py:63)--> echec
- echec --relance (clip_id réutilisé, pas de reset préalable) : voix régénérée (pipeline.py:131)--> voix_pret --> pret | echec
-```
-Coûts : `record_gradium_tts` à chaque voix OK (`pipeline.py:133`), `record_heygen_clip` à chaque vidéo OK (`pipeline.py:165`).
-
-#### Flux VOIX SEULES — `/api/generate` + `cost_mode="voix_seules"`, `output_mode="voix_seules"`
-```
-ADS : en_cours (main.py:510, kind=audio) --generate_voices_only fin (pipeline.py:341)--> voix_seules (même si échecs)
-      en_cours --exception job (jobs.py:152)--> echec
-CLIPS : [absent] --create_clip (pipeline.py:325)--> en_attente
-        en_attente --TTS OK (pipeline.py:333)--> voix_pret   (état final ; fichier N.mp3 ou N.wav)
-        en_attente --TTS KO (pipeline.py:337 → 63)--> echec
-```
-(pas de retry automatique ici ; 1 seul essai par scène.)
 
 #### Flux VOIX OFF — `/api/voiceover/generate`, `output_mode="voix_off"`
 ```
@@ -6463,11 +5725,10 @@ Coûts : `record_image` (`pipeline.py:480`), `record_kling_clip` (`pipeline.py:6
 ### 4.5 Job en mémoire (`jobs.py`)
 
 - `Job.state` (`jobs.py:37`, commentaire « en_attente | en_cours | termine | echec ») — valeurs réelles : `en_attente` (création), `en_cours` (`jobs.py:112`), `termine` si `summary["echec"] == 0`, `partiel` sinon (`jobs.py:147-149`), `echec` sur exception (`jobs.py:151`). NB : un job où TOUT a échoué (ok=0, ko>0) finit en `partiel`, pas `echec` (seule une exception donne `echec`). `finished_at` posé pour termine/partiel/echec (`jobs.py:64-65`).
-- `Job.phase` (bannière) : `""` | `"voix"` | `"videos"` (émis via `{"job_phase": ...}` par `generate_ad`, `pipeline.py:192`, `pipeline.py:202`).
+- `Job.phase` (bannière) : `""` par défaut ; mise à jour par les événements `{"job_phase": ...}`.
 - Par scène `self.scenes[n]` initialisé `{"phase": "en_attente", "status": "en_attente"}` (`jobs.py:42-44`), puis fusionné (`update`) avec chaque événement.
 - Phases d'événements émises :
-  - avatar : `voix` (`pipeline.py:125`), `voix_ok` (+`voice_ok: True`, `pipeline.py:135`), `upload` (`pipeline.py:159`), `rendu` (`pipeline.py:161`), `pret` (`pipeline.py:167`, +`mp4`), `erreur` (`pipeline.py:64`)
-  - voix seules/voix off : `voix` (`pipeline.py:329`/`756`), `pret` (+`wav`, `pipeline.py:334`/`761`), `erreur`
+  - voix off : `voix` (`pipeline.py:756`), `pret` (+`wav`, `pipeline.py:761`), `erreur`
   - images : `image` (`pipeline.py:475`), `pret` (+`image`, `pipeline.py:482`), `erreur`
   - animation : `animation` (`pipeline.py:519`), `clip` (+`mp4`, `pipeline.py:522`), `erreur`
 - `status` d'événement : `en_cours`, `ok`, `echec` (+ `message` lisible en cas d'échec).
@@ -6486,7 +5747,6 @@ class ProviderConfig:
     """Réglages passés aux fournisseurs (issus de la DB)."""
 
     gradium_api_key: str = ""
-    heygen_api_key: str = ""
     openrouter_api_key: str = ""  # Nano Banana via OpenRouter (images « Objet animé »)
     xai_api_key: str = ""         # Grok Imagine / xAI (animation « Objet animé »)
     objet_image_model: str = config_app.DEFAULT_OBJET_IMAGE_MODEL  # modèle image Nano Banana
@@ -6498,13 +5758,11 @@ class ProviderConfig:
     gradium_voice_id: str = ""
     gradium_model: str = config_app.DEFAULT_GRADIUM_MODEL
     audio_format: str = config_app.DEFAULT_AUDIO_FORMAT   # "mp3" (défaut) | "wav"
-    heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = config_app.DEFAULT_BRAIN_MODEL
-    cost_mode: str = config_app.DEFAULT_COST_MODE
     dry_run: bool = True
 ```
-L'objet est reconstruit à CHAQUE requête (`cfg = load_provider_config()`), puis parfois muté localement (`cfg.gradium_voice_id`, `cfg.cost_mode` dans `main.py:489-496`, `main.py:898-901`) ; ces mutations ne sont jamais réécrites en base.
+L'objet est reconstruit à CHAQUE requête (`cfg = load_provider_config()`), puis parfois muté localement (`cfg.gradium_voice_id` dans `main.py:898-901`) ; ces mutations ne sont jamais réécrites en base.
 
 ### 5.2 `load_provider_config()` (`settings_service.py:9-35`)
 
@@ -6514,7 +5772,6 @@ def load_provider_config() -> ProviderConfig:
     default_voice = db.first_voice_id() or s.get("gradium_voice_id", "")
     return ProviderConfig(
         gradium_api_key=s.get("gradium_api_key", ""),
-        heygen_api_key=s.get("heygen_api_key", ""),
         openrouter_api_key=s.get("openrouter_api_key", ""),
         xai_api_key=s.get("xai_api_key", ""),
         objet_image_model=s.get("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL),
@@ -6528,14 +5785,12 @@ def load_provider_config() -> ProviderConfig:
         audio_format=config_app.normalize_audio_format(
             s.get("audio_format", config_app.DEFAULT_AUDIO_FORMAT)
         ),
-        heygen_voice_id=s.get("heygen_voice_id", ""),
         anthropic_api_key=s.get("anthropic_api_key", ""),
         brain_model=s.get("brain_model", config_app.DEFAULT_BRAIN_MODEL),
-        cost_mode=s.get("cost_mode", config_app.DEFAULT_COST_MODE),
         dry_run=s.get("dry_run", "1") == "1",
     )
 ```
-Seul `audio_format` est normalisé à la lecture ; les autres valeurs sont prises telles quelles (défaut uniquement si la clé est ABSENTE, pas si elle est vide). La validation se fait à l'écriture (`main.py:153-227`) et, pour les modèles, par des `.get(..., défaut)` au point d'usage (`pipeline.py:459-461`, `548-550`, `558-564`, `config_app.mashup_model_cfg`, `cost.record_heygen_clip`).
+Seul `audio_format` est normalisé à la lecture ; les autres valeurs sont prises telles quelles (défaut uniquement si la clé est ABSENTE, pas si elle est vide). La validation se fait à l'écriture (`main.py:153-227`) et, pour les modèles, par des `.get(..., défaut)` au point d'usage (`pipeline.py:459-461`, `548-550`, `558-564`, `config_app.mashup_model_cfg`).
 `is_dry_run()` (`settings_service.py:38-39`) : `db.get_setting("dry_run", "1") == "1"` — **définie mais jamais appelée** dans `app/`.
 
 ### 5.3 Liste EXHAUSTIVE des clés de `settings`
@@ -6545,14 +5800,11 @@ Valeurs de défaut entre guillemets = chaînes exactes ; constantes détaillées
 | clé | champ ProviderConfig | défaut à la lecture | qui l'écrit | qui la lit | validation / normalisation |
 |---|---|---|---|---|---|
 | `gradium_api_key` | `gradium_api_key` | `""` | seed (`bootstrap.py:67`, via `_key`) ; `POST /api/settings` si non vide après `.strip()` (`main.py:156-157`) | `settings_service.py:15` ; `main.py:102` (booléen `_set` seulement) ; `bootstrap.py:48` | `.strip()` ; champ vide = garder ; jamais renvoyée en clair |
-| `heygen_api_key` | `heygen_api_key` | `""` | seed (`bootstrap.py:68`) ; `main.py:158-159` | `settings_service.py:16` ; `main.py:103` ; `bootstrap.py:48` | idem |
 | `openrouter_api_key` | `openrouter_api_key` | `""` | `main.py:161-163` uniquement (non seedée) | `settings_service.py:17` ; `main.py:104`, `main.py:182` (présence pour log) | `prov._clean_key` (strip espaces + caractères invisibles, `providers.py:615-617`) ; vide = garder |
 | `xai_api_key` | `xai_api_key` | `""` | `main.py:164-166` uniquement | `settings_service.py:18` ; `main.py:105`, `main.py:183` | `_clean_key` ; vide = garder |
 | `anthropic_api_key` | `anthropic_api_key` | `""` | seed (`bootstrap.py:70`) ; `main.py:167-168` | `settings_service.py:31` ; `main.py:106` ; `bootstrap.py:48` | `.strip()` ; vide = garder |
 | `gradium_model` | `gradium_model` | `DEFAULT_GRADIUM_MODEL` = `"default"` | seed (`bootstrap.py:72`, défaut `"default"`) ; `main.py:187` (`body.gradium_model or DEFAULT`) | `settings_service.py:26` ; `main.py:107` | vide → défaut |
-| `heygen_voice_id` | `heygen_voice_id` | `""` | seed (`bootstrap.py:73`) ; `main.py:188` (brut, peut être `""`) | `settings_service.py:30` ; `main.py:108` | aucune |
 | `brain_model` | `brain_model` | `DEFAULT_BRAIN_MODEL` = `"claude-sonnet-5"` | seed (`bootstrap.py:74`) ; `main.py:189` (`or DEFAULT`) | `settings_service.py:32` ; `main.py:109` | vide → défaut ; `brain.py:604` refait `cfg.brain_model or DEFAULT` |
-| `cost_mode` | `cost_mode` | `DEFAULT_COST_MODE` = `"premium"` | `main.py:190-191` | `settings_service.py:33` ; `main.py:110` | ∈ `COST_MODES` (`premium`/`classique`) sinon défaut. `/api/generate` peut la surcharger EN MÉMOIRE (`main.py:495-496`) ; `"voix_seules"` est un pseudo-mode de requête, jamais stocké |
 | `objet_image_model` | `objet_image_model` | `"nano_banana_2"` | `main.py:192-196` | `settings_service.py:19` ; `main.py:111` | ∈ `OBJET_IMAGE_MODELS` sinon défaut |
 | `objet_video_model` | `objet_video_model` | `"grok_imagine"` | `main.py:197-201` | `settings_service.py:20` ; `main.py:115` | ∈ `OBJET_VIDEO_MODELS` sinon défaut |
 | `mashup_video_model` | `mashup_video_model` | `"kling_pro"` | `main.py:202-206` | `settings_service.py:21` ; `main.py:119-123` (revalidé à la lecture pour l'UI) | ∈ `MASHUP_VIDEO_MODELS` sinon défaut ; au point d'usage `mashup_model_cfg` retombe sur défaut |
@@ -6569,7 +5821,7 @@ Valeurs de défaut entre guillemets = chaînes exactes ; constantes détaillées
 | `gradium_voice_id` (LEGACY) | alimente `gradium_voice_id` en REPLI | `""` | seed uniquement (`bootstrap.py:71`, sans filtre placeholder) | `settings_service.py:13` (repli si `voices` vide) ; `bootstrap.py:97` | `.strip()` à la migration ; plus écrite par l'UI (voix gérées via `/api/voices`) |
 
 Il n'existe AUCUNE autre clé lue/écrite dans `app/` (grep de `get_setting`/`set_setting`/`get_all_settings` : `main.py`, `bootstrap.py`, `settings_service.py` uniquement ; aucune dans `providers.py`, `brain.py`, `media.py`, `pipeline.py`, `jobs.py`, `cost.py`).
-Champ `ProviderConfig.gradium_voice_id` : `db.first_voice_id()` (plus ancienne ligne de `voices`) sinon clé legacy ; surchargé par requête via `voice_label` (`main.py:489-492`, `main.py:898-901`).
+Champ `ProviderConfig.gradium_voice_id` : `db.first_voice_id()` (plus ancienne ligne de `voices`) sinon clé legacy ; surchargé par requête via `voice_label` (`main.py:898-901`).
 
 ### 5.4 Logique `bootstrap`
 
@@ -6581,16 +5833,15 @@ Chemin `config_app.BASE_DIR / "config.py"` ; absent → None. Chargé par `impor
 2. `existing = db.get_all_settings()`.
 3. Si `"dry_run"` absente → `set_setting("dry_run", "1")` (car `DEFAULT_DRY_RUN = True`). S'exécute à CHAQUE démarrage tant que la clé manque (même après seed).
 4. Si `get_setting("seeded") == "1"` → return False (plus jamais d'import : protège les clés saisies).
-5. Si l'une de `gradium_api_key`, `heygen_api_key`, `anthropic_api_key` est non vide dans `existing` → `seeded="1"`, return False (base d'une version antérieure).
+5. Si l'une de `gradium_api_key`, `anthropic_api_key` est non vide dans `existing` → `seeded="1"`, return False (base d'une version antérieure).
 6. `cfg = _load_config_module()` ; None → `seeded="1"`, return False.
 7. Helpers :
    - `_s(name, default="")` : `getattr(cfg, name, default)` ; None → `""` ; sinon `str(val)`.
    - `_key(name)` : `v = _s(name)` ; retourne `""` si `v` vide OU si `"xxxx"` est contenu dans `v.lower()` (placeholder type `gd_xxxx…` de config.example) ; sinon `v`.
-8. Écritures : `gradium_api_key = _key("GRADIUM_API_KEY")`, `heygen_api_key = _key("HEYGEN_API_KEY")`, `anthropic_api_key = _key("ANTHROPIC_API_KEY")`, `gradium_voice_id = _s("GRADIUM_VOICE_ID")`, `gradium_model = _s("GRADIUM_MODEL", "default")`, `heygen_voice_id = _s("HEYGEN_VOICE_ID")`, `brain_model = _s("BRAIN_MODEL", "claude-sonnet-5")`. (OpenRouter / xAI : jamais seedées.)
-9. `AVATARS = getattr(cfg, "AVATARS", {}) or {}` : si dict ET `list_avatars()` vide → `add_avatar(str(label), str(avatar_id))` pour chaque paire aux deux membres truthy.
-10. `seeded = "1"` ; `log_activity("systeme", "Réglages importés depuis config.py")` ; return True.
+8. Écritures : `gradium_api_key = _key("GRADIUM_API_KEY")`, `anthropic_api_key = _key("ANTHROPIC_API_KEY")`, `gradium_voice_id = _s("GRADIUM_VOICE_ID")`, `gradium_model = _s("GRADIUM_MODEL", "default")`, `brain_model = _s("BRAIN_MODEL", "claude-sonnet-5")`. (OpenRouter / xAI : jamais seedées.)
+9. `seeded = "1"` ; `log_activity("systeme", "Réglages importés depuis config.py")` ; return True.
 
-Pièges : le filtre placeholder `_key` ne s'applique PAS à `GRADIUM_VOICE_ID`, `HEYGEN_VOICE_ID` ni aux `AVATARS` → un config.py resté identique à config.example importe la valeur d'exemple de `GRADIUM_VOICE_ID` (qui deviendra « Ma voix ») et un avatar placeholder dont l'id commence par `AVATAR_ID` ; ce dernier est rejeté à l'usage par `main.py:480` et `main.py:539` (`avatar_id.startswith("AVATAR_ID")`). Le `config.py` présent à la racine (ignoré par git) est identique à `config.example.py`.
+Pièges : le filtre placeholder `_key` ne s'applique PAS à `GRADIUM_VOICE_ID` → un config.py resté identique à config.example importe la valeur d'exemple de `GRADIUM_VOICE_ID` (qui deviendra « Ma voix »). Le `config.py` présent à la racine (ignoré par git) est identique à `config.example.py`.
 
 #### `migrate_voice_to_list() -> bool` (`bootstrap.py:87-104`)
 1. `db.init_db()`.
@@ -6608,13 +5859,10 @@ Rôle global (en-tête `config.example.py:1-9`) : ne sert qu'au TOUT PREMIER dé
 | variable | rôle | importée vers |
 |---|---|---|
 | `GRADIUM_API_KEY` | clé API Gradium (Studio > API Keys) | `gradium_api_key` (via `_key`) |
-| `HEYGEN_API_KEY` | clé API HeyGen (Settings > API) | `heygen_api_key` (via `_key`) |
 | `ANTHROPIC_API_KEY` | clé console Anthropic (cerveau IA / découpage) | `anthropic_api_key` (via `_key`) |
 | `BRAIN_MODEL` | modèle Claude du découpage | `brain_model` |
 | `GRADIUM_VOICE_ID` | id de la voix clonée Gradium | `gradium_voice_id` (legacy) → « Ma voix » |
 | `GRADIUM_MODEL` | modèle TTS Gradium | `gradium_model` |
-| `AVATARS` | dict `"label" -> avatar_id` HeyGen (multi-avatars) | table `avatars` |
-| `HEYGEN_VOICE_ID` | voix HeyGen optionnelle (« parfois requis même avec audio ») | `heygen_voice_id` |
 
 ---
 
@@ -6627,22 +5875,20 @@ Docstring (`config_app.py:1-5`) : aucune clé API ici ; les secrets vivent dans 
 |---|---|---|
 | `BASE_DIR` | `Path(__file__).resolve().parent.parent` | 15 |
 | `DATA_DIR` | `Path(os.environ.get("UGC_DATA_DIR", _default_data_dir()))` ; défaut `(%LOCALAPPDATA% ou %APPDATA% ou ~)/PipelineUGC/data` | 30 |
-| `MEDIA_DIR` | `DATA_DIR / "media"` (monté en `/media`, `main.py:1132`) ; sous-dossiers `ad_<id>/` (avatar, `pipeline.py:109`), `voice_samples/`, `style_previews/` | 31 |
+| `MEDIA_DIR` | `DATA_DIR / "media"` (monté en `/media`, `main.py:1132`) ; sous-dossiers `voice_samples/`, `style_previews/` | 31 |
 | `DB_PATH` | `DATA_DIR / "app.db"` | 32 |
-| `VOICES_DIR` | `DATA_DIR / "voix"` (sortie Voix seules, un sous-dossier par pub) | 34 |
 | `VOICEOVER_DIR` | `DATA_DIR / "voix_off"` | 36 |
 | `OBJET_DIR` | `MEDIA_DIR / "objet"` (objet ET mashup : `<nom sûr>_<ad_id>/`, `pipeline.py:359`) | 38 |
 | `PORT_FILE` | `DATA_DIR / "port"` | 441 |
-Fichiers annexes dans DATA_DIR (définis dans main.py) : `heygen_avatars.json` (`main.py:250`), `gradium_voices.json` (`main.py:297`), `app.log` (`main.py:1878`), `launch.log` (`main.py:1890`), profil `app-window/` (`main.py:1850`).
+Fichiers annexes dans DATA_DIR (définis dans main.py) : `gradium_voices.json` (`main.py:297`), `app.log` (`main.py:1878`), `launch.log` (`main.py:1890`), profil `app-window/` (`main.py:1850`).
 
 ### 6.2 Limites & parallélisme
 | constante | valeur | ligne | rôle |
 |---|---|---|---|
 | `GRADIUM_MAX_CHARS` | `1500` | 41 | taille max d'un segment voix off (`pipeline.py:647`) |
-| `HEYGEN_MAX_PARALLEL` | `3` | 46 | rendus HeyGen simultanés (`pipeline.py:206`) |
 | `GROK_MAX_PARALLEL` | `3` | 47 | animations Grok simultanées (`pipeline.py:584`) |
-| `GRADIUM_MAX_PARALLEL` | `2` | 50 | TTS simultanés phase 1 avatar (`pipeline.py:196`) |
-| `GRADIUM_TTS_RETRIES` | `3` | 51 | essais par voix avatar ; attente `1.5 × (attempt+1)` s entre essais (`pipeline.py:127-141`) |
+| `GRADIUM_MAX_PARALLEL` | `2` | 50 | TTS simultanés |
+| `GRADIUM_TTS_RETRIES` | `3` | 51 | essais par voix |
 | `KLING_MAX_PARALLEL` | `2` | 391 | animations Mashup simultanées (`pipeline.py:639`) |
 | `OBJET_MAX_SHOTS` | `40` | 143 | nb max de plans objet/mashup (`main.py:1342`) |
 | `OBJET_MAX_REF_IMAGES` | `14` | 144 | nb max de photos réf uploadées (`main.py:1425`) |
@@ -6669,32 +5915,10 @@ Fichiers annexes dans DATA_DIR (définis dans main.py) : `heygen_avatars.json` (
 | `DEFAULT_GRADIUM_MODEL` | `"default"` | 102 |
 | `DEFAULT_BRAIN_MODEL` | `"claude-sonnet-5"` (commentaire : ID exact, ne pas suffixer de date) | 107 |
 
-### 6.5 Modes coût HeyGen (`CostMode` TypedDict : label, engine, motion, resolution, credits_per_sec — `config_app.py:114-119`)
-```python
-COST_MODES: dict[str, CostMode] = {
-    "premium": {
-        "label": "Premium",
-        "engine": "avatar_v",     # Avatar V
-        "motion": True,           # motion prompt custom activé
-        "resolution": "1080p",    # pleine résolution
-        "credits_per_sec": 4.0,   # observé : Avatar V + motion + 1080p ≈ 4 cr/s
-    },
-    "classique": {
-        "label": "Classique",
-        "engine": "avatar_iv",    # Avatar IV
-        "motion": False,          # pas de motion prompt → gestes auto HeyGen
-        "resolution": "720p",     # 720p (moins cher que le défaut 1080p)
-        "credits_per_sec": 1.5,   # Avatar IV, sans motion, 720p ≈ 1,5 cr/s
-    },
-}
-DEFAULT_COST_MODE = "premium"
-```
-(`config_app.py:122-138`). NB : le commentaire `config_app.py:112-113` parle de « ~2 crédits/s vs ~4 » pour Classique, alors que la valeur est 1.5 (docstring `cost.py:4` : ≈ 1,5).
-
-### 6.6 Plafond de dépense
+### 6.5 Plafond de dépense
 `SPEND_CAP_USD_DEFAULT = 25.0` (`config_app.py:152`).
 
-### 6.7 Tarifs (estimations, stockage en USD)
+### 6.6 Tarifs (estimations, stockage en USD)
 | constante | valeur | ligne |
 |---|---|---|
 | `COST_USD_PER_IMAGE` | `{"google/gemini-2.5-flash-image": 0.04, "google/gemini-3.1-flash-image": 0.045}` | 156-159 |
@@ -6705,15 +5929,12 @@ DEFAULT_COST_MODE = "premium"
 | `ANTHROPIC_USD_PER_MTOK_IN` | `3.0` | 174 |
 | `ANTHROPIC_USD_PER_MTOK_OUT` | `15.0` | 175 |
 
-### 6.8 Devise / HeyGen
+### 6.7 Devise
 | constante | valeur | valeur numérique calculée | ligne |
 |---|---|---|---|
 | `USD_TO_EUR` | `0.92` (taux FIXE, pas live) | 1 $ = 0,92 € | 169 |
-| `HEYGEN_EUR_PER_CREDIT` | `15.0 / 900.0` | 0.016666666666666666 €/crédit | 171 |
-| `HEYGEN_USD_PER_CREDIT` | `HEYGEN_EUR_PER_CREDIT / USD_TO_EUR` | 0.018115942028985508 $/crédit | 172 |
-Dérivés : 900 crédits = 16,3043 $ ; Premium 4 cr/s = 0,072464 $/s (≈ 4,35 $/min) ; Classique 1,5 cr/s = 0,027174 $/s (≈ 1,63 $/min).
 
-### 6.9 Grok (Objet animé)
+### 6.8 Grok (Objet animé)
 | constante | valeur | ligne |
 |---|---|---|
 | `GROK_DEFAULT_CLIP_SECONDS` | `5` | 176 |
@@ -6727,13 +5948,13 @@ Dérivés : 900 crédits = 16,3043 $ ; Premium 4 cr/s = 0,072464 $/s (≈ 4,35 $
 | `OBJET_VIDEO_MODELS` | `{"grok_imagine": {"label": "Grok Imagine 1.5 (image→vidéo, 720p)", "model": "grok-imagine-video-1.5"}}` | 301-304 |
 | `DEFAULT_OBJET_VIDEO_MODEL` | `"grok_imagine"` | 305 |
 
-### 6.10 Modèles image
+### 6.9 Modèles image
 | constante | valeur | ligne |
 |---|---|---|
 | `OBJET_IMAGE_MODELS` | `nano_banana_2` {label "Nano Banana 2 (défaut) — google/gemini-3.1-flash-image", model "google/gemini-3.1-flash-image"} ; `nano_banana_legacy` {label "Nano Banana legacy (moins cher) — google/gemini-2.5-flash-image", model "google/gemini-2.5-flash-image"} | 281-290 |
 | `DEFAULT_OBJET_IMAGE_MODEL` | `"nano_banana_2"` | 291 |
 
-### 6.11 Kling / Mashup (`MashupModelCfg` : label, model, resolutions, durations, cost_per_second_usd)
+### 6.10 Kling / Mashup (`MashupModelCfg` : label, model, resolutions, durations, cost_per_second_usd)
 | clé | label | slug OpenRouter | résolutions | durées (s) | $/s |
 |---|---|---|---|---|---|
 | `kling_pro` | "Kling v3.0 Pro — 720p (premium, défaut)" | `kwaivgi/kling-v3.0-pro` | ("720p",) | `range(3, 16)` = 3..15 | 0.168 |
@@ -6743,18 +5964,18 @@ Dérivés : 900 crédits = 16,3043 $ ; Premium 4 cr/s = 0,072464 $/s (≈ 4,35 $
 | `seedance` | "Seedance 2.0 — 1080p (cohérence++)" | `bytedance/seedance-2.0` | ("1080p", "720p") | (4, 6, 8, 10) | 0.08 |
 (`config_app.py:367-388`) ; `DEFAULT_MASHUP_VIDEO_MODEL = "kling_pro"` (389) ; `KLING_DEFAULT_CLIP_SECONDS = 6` (392) ; `KLING_MIN_CLIP_SECONDS = 3` (393) ; `KLING_MAX_CLIP_SECONDS = 12` (394).
 
-### 6.12 Styles
+### 6.11 Styles
 - `OBJET_STYLES` (`config_app.py:311-332`) : `3d_anime` (label "3D animé"), `animation_classique` ("Animation classique (2D)"), `anime_japonais` ("Anime japonais"), `peluche_feutrine` ("Peluche / feutrine"), chacun avec un `desc` descriptif sans marque (inséré dans les prompts image). `DEFAULT_OBJET_STYLE = "3d_anime"` (333).
 - `MASHUP_STYLE_SUGGESTIONS` (`config_app.py:344-353`) : 8 puces `{label, value}` : "Ultra-réaliste", "Cinéma nocturne", "Heure dorée", "Studio produit", "Documentaire", "Luxe éditorial", "Vaporwave rétro", "Nature brute" (valeurs = fragments de prompt anglais descriptifs).
 
-### 6.13 Réseau & simulation
+### 6.12 Réseau & simulation
 | constante | valeur | ligne |
 |---|---|---|
 | `DEFAULT_DRY_RUN` | `True` | 433 |
 | `HOST` | `"127.0.0.1"` | 436 |
 | `PORT` | `int(os.environ.get("UGC_PORT", "0"))` (0 = port libre choisi au démarrage) | 440 |
 
-### 6.14 Fonctions utilitaires (formules)
+### 6.13 Fonctions utilitaires (formules)
 - `normalize_image_ratio(ratio)` (58-60) : `r = (ratio or "").strip()` ; `r` si ∈ `IMAGE_RATIOS` sinon `"9:16"`.
 - `normalize_refs_needed(value)` (63-76) : None/`""` → None ; chaîne → `json.loads` (erreur → None) ; liste → `[str(x).strip().lower() for x if str(x).strip()]` ; autre → None. (Distinction importante : None = non typé → toutes les réfs ; `[]` = plan neutre → aucune réf, `pipeline.py:435-455`.)
 - `normalize_audio_format(fmt)` (85-87) : `(fmt or "").strip().lower().lstrip(".")` ∈ {mp3, wav} sinon `"mp3"`.
@@ -6778,40 +5999,7 @@ Dérivés : 900 crédits = 16,3043 $ ; Premium 4 cr/s = 0,072464 $/s (≈ 4,35 $
 
 Principe : les `estimate*` servent à l'UI et au plafond ; les `record_*` écrivent un `cost_events` RÉEL. Règle « jamais en simulation » : chaque appel `record_*` est gardé par `if not cfg.dry_run:` au site d'appel (sauf Anthropic, dont l'appel réseau n'a lieu qu'hors simulation — `brain.py:323`, `367`, `469`, `893`). `db.add_cost_event` lui-même ne vérifie PAS le mode.
 
-### 7.1 Estimation Avatar — `estimate` (`cost.py:17-42`)
-
-```python
-WORDS_PER_SEC = 2.5
-
-
-def _spoken_seconds(scenes: list[dict[str, Any]]) -> tuple[int, float]:
-    total_words = sum(len(str(s.get("script", "")).split()) for s in scenes)
-    seconds = total_words / WORDS_PER_SEC if total_words else 0.0
-    return total_words, seconds
-
-
-def estimate(scenes: list[dict[str, Any]], mode: str = config_app.DEFAULT_COST_MODE) -> dict[str, Any]:
-    total_words, seconds = _spoken_seconds(scenes)
-    modes = config_app.COST_MODES
-    if mode not in modes:
-        mode = config_app.DEFAULT_COST_MODE
-    per_mode = {key: round(seconds * m["credits_per_sec"]) for key, m in modes.items()}
-    rates = {key: m["credits_per_sec"] for key, m in modes.items()}
-    return {
-        "scenes": len(scenes),
-        "words": total_words,
-        "seconds": round(seconds, 1),
-        "minutes": round(seconds / 60.0, 1),
-        "mode": mode,
-        "credits_estimes": per_mode[mode],   # coût du mode sélectionné
-        "credits_par_mode": per_mode,        # {"premium": .., "classique": ..}
-        "taux_par_mode": rates,              # crédits/seconde par mode
-    }
-```
-Maths : W = Σ_scènes |mots(script)| ; T = W / 2,5 s ; crédits(mode) = round(T × cps(mode)) avec cps(premium)=4,0, cps(classique)=1,5. Aucune conversion $ dans l'estimation.
-Appels : `main.py:456` (après découpage, mode par défaut « premium » — ignore le `cost_mode` des réglages), `main.py:464` (`/api/estimate`, `body.mode or "premium"`). Aucun contrôle de plafond pour l'avatar (confirmation simple `main.py:505-506`).
-
-### 7.2 Estimation Mashup — `estimate_mashup` (`cost.py:45-71`)
+### 7.1 Estimation Mashup — `estimate_mashup` (`cost.py:45-71`)
 
 ```python
 def estimate_mashup(
@@ -6841,7 +6029,7 @@ def estimate_mashup(
 Maths : n = max(0, N) ; s = snap(avg, modèle) ; images = round(0,04·n, 2) ; vidéo = round(n·s·r_modèle, 2) ; total = round(images + vidéo, 2). Ex. Kling Pro, 6 s : 0,04 + 6×0,168 = 1,048 $/plan.
 Appels : `main.py:741` (plan), `main.py:749` (`/api/mashup/estimate`), `main.py:855` (animate, avg = round(moyenne des `clamp(duration_s)`)), `main.py:1596` (reprise animation, avg par défaut 6).
 
-### 7.3 Estimation Objet — `estimate_objet` (`cost.py:74-96`)
+### 7.2 Estimation Objet — `estimate_objet` (`cost.py:74-96`)
 
 ```python
 def estimate_objet(
@@ -6865,7 +6053,7 @@ def estimate_objet(
 Maths : images = round(0,04·n, 2) ; vidéo = round(n·5·0,14, 2) = round(0,70·n, 2) ; total = 0,74 $/plan. Aucun appelant ne passe `clip_seconds` → toujours 5 s.
 Appels : `main.py:576` (plan), `main.py:583` (`/api/objet/estimate`), `main.py:683` (animate), `main.py:1567` (reprise images, `usd_images`), `main.py:1591` (reprise animation, `usd_video`).
 
-### 7.4 Comptabilisation (`cost.py:99-145`) — source verbatim
+### 7.3 Comptabilisation (`cost.py:99-145`) — source verbatim
 
 ```python
 def record_image(ad_id: int | None, model: str) -> None:
@@ -6887,13 +6075,6 @@ def record_kling_clip(
     db.add_cost_event("kling", "second", secs, usd=usd, ad_id=ad_id, detail=model)
 
 
-def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:
-    m = config_app.COST_MODES.get(mode, config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
-    credits = max(0.0, float(seconds)) * m["credits_per_sec"]
-    usd = credits * config_app.HEYGEN_USD_PER_CREDIT
-    db.add_cost_event("heygen", "credit", credits, usd=usd, credits=credits, ad_id=ad_id, detail=mode)
-
-
 def record_gradium_tts(ad_id: int | None) -> None:
     db.add_cost_event("gradium", "generation", 1, ad_id=ad_id)
 
@@ -6909,7 +6090,7 @@ def record_anthropic_call(
         "anthropic", "call", 1, usd=usd, ad_id=ad_id, detail=f"{input_tokens}+{output_tokens} tok"
     )
 ```
-(docstrings omises ci-dessus ; `record_kling_clip` : « Priorité au coût EXACT `usage.cost` renvoyé par OpenRouter ; sinon fallback `secondes × taux` (std/pro selon le modèle). JAMAIS en simulation. » ; `record_heygen_clip` : « HeyGen est natif en € (900 crédits = 15 €). On stocke le coût en USD (homogène en base, via USD_TO_EUR) ET les crédits ».)
+(docstrings omises ci-dessus ; `record_kling_clip` : « Priorité au coût EXACT `usage.cost` renvoyé par OpenRouter ; sinon fallback `secondes × taux` (std/pro selon le modèle). JAMAIS en simulation. ».)
 
 Formules et sites d'appel :
 
@@ -6918,11 +6099,10 @@ Formules et sites d'appel :
 | `record_image(ad_id, model)` | `cost.py:101-103` | usd = `COST_USD_PER_IMAGE[model]` sinon 0,04 (gemini-3.1 → 0,045 ; gemini-2.5 → 0,04) | openrouter / image / 1 / model id OpenRouter | `pipeline.py:480` (chaque image OK, garde `not cfg.dry_run`, model = `_objet_image_model_id(cfg)`) ; `main.py:397-398` (aperçu de style, ad_id=None) |
 | `record_grok_clip(ad_id, seconds)` | `cost.py:106-109` | usd = max(0,s)·0,14 + 0,01 (ex. 4 s → 0,57 ; 5 s → 0,71 ; 12 s → 1,69) | grok / second / s / `"video+voix"` | `pipeline.py:579-580` ; s = `clip_seconds_for_dialogue(dialogue, pace.words_per_sec)` |
 | `record_kling_clip(ad_id, seconds, model="kling_std", usd_cost=None)` | `cost.py:112-120` | usd = usd_cost si `usd_cost` truthy et > 0 (valeur `usage.cost` d'OpenRouter, `providers.py:981-986`) ; sinon s·r(model). NB défaut de paramètre `"kling_std"` ≠ défaut app `"kling_pro"` (sans effet : l'appelant passe toujours `model`) | kling / second / s / clé de modèle (`cfg.mashup_video_model`) | `pipeline.py:631-635` ; s = `snap_mashup_duration(c.duration_s, model_key)` |
-| `record_heygen_clip(ad_id, seconds, mode)` | `cost.py:123-129` | crédits = max(0,s)·cps(mode) (mode inconnu → premium) ; usd = crédits · (15/900)/0,92 = crédits × 0,018115942 | heygen / credit / crédits / mode ; colonne `credits` renseignée | `pipeline.py:164-165` ; **s = mots(script)/2,5 (estimation, pas la durée réelle de l'audio/vidéo)**, mode = `cfg.cost_mode` |
-| `record_gradium_tts(ad_id)` | `cost.py:132-133` | usd = 0, credits = 0 (compteur de générations uniquement) | gradium / generation / 1 / `""` | `pipeline.py:132-133` (avatar, par voix OK ; les ré-essais ratés ne sont pas comptés), `pipeline.py:331-332` (voix seules), `pipeline.py:758-759` (voix off). Non appelé pour l'échantillon de voix (`main.py:353`) |
+| `record_gradium_tts(ad_id)` | `cost.py:132-133` | usd = 0, credits = 0 (compteur de générations uniquement) | gradium / generation / 1 / `""` | `pipeline.py:758-759` (voix off). Non appelé pour l'échantillon de voix (`main.py:353`) |
 | `record_anthropic_call(in, out, ad_id=None)` | `cost.py:136-145` | usd = in/10⁶·3,0 + out/10⁶·15,0 | anthropic / call / 1 / `"<in>+<out> tok"` | `brain.py:1073-1081` (`_record_anthropic`, appelé `brain.py:609` après chaque `messages.create` de `_call_claude_json`, y compris les tentatives dont le JSON est ensuite rejeté) ; **ad_id toujours None** (jamais attribué à une pub → absent de `by_ad`) ; exceptions avalées |
 
-### 7.5 Rapports
+### 7.4 Rapports
 
 `_SERVICE_LABELS` / `_SERVICE_ORDER` verbatim (`cost.py:149-157`) :
 ```python
@@ -6930,18 +6110,16 @@ _SERVICE_LABELS = {
     "openrouter": "OpenRouter — images Nano Banana",
     "grok": "Grok / xAI — animation + voix",
     "kling": "Kling (OpenRouter) — animation Mashup",
-    "heygen": "HeyGen — avatar (crédits)",
     "gradium": "Gradium — voix",
     "anthropic": "Anthropic — cerveau",
 }
-_SERVICE_ORDER = ["openrouter", "grok", "kling", "heygen", "gradium", "anthropic"]
+_SERVICE_ORDER = ["openrouter", "grok", "kling", "gradium", "anthropic"]
 ```
 
 `_units_label(svc, units)` (`cost.py:160-179`) — `n(u)` = nb d'événements de l'unité, `q(u)` = somme des qty :
 - openrouter → `"{n('image')} image(s)"`
 - grok → `"{n('second')} clip(s) · {round(q('second'))} s"`
 - kling → idem grok
-- heygen → `"{n('credit')} clip(s) · {round(q('credit'))} crédits"`
 - gradium → `"{n('generation')} génération(s)"`
 - anthropic → `"{n('call')} appel(s)"`
 - autre → `", ".join(f"{int(v.get('n', 0))} {k}" for k, v in units.items())`
@@ -6951,7 +6129,7 @@ _SERVICE_ORDER = ["openrouter", "grok", "kling", "heygen", "gradium", "anthropic
 2. `services` = pour chaque service de `_SERVICE_ORDER` présent : `{service, label, units: _units_label, usd: round(,2), credits: round(,1)}` (un service INCONNU n'apparaît pas dans la liste mais compte dans le total).
 3. `by_ad` = `db.cost_by_ad(archive_id)` → `{ad_id, name (ou "pub #<id>"), kind (ou ""), usd round 2, credits round 1}`.
 4. `totals` = `db.cost_totals` → `{usd round 2, credits round 1, events}`.
-5. + `usd_to_eur: 0.92`, `note` (« Coûts estimés (stockés en USD). Vérifie les montants réels sur chaque plateforme (OpenRouter, xAI/Kling, HeyGen…). HeyGen : 900 crédits = 15 €. »).
+5. + `usd_to_eur: 0.92`, `note` (« Coûts estimés (stockés en USD). Vérifie les montants réels sur chaque plateforme (OpenRouter, xAI/Kling…). »).
 Route : `GET /api/costs` (`main.py:1027-1032`) ajoute `currency`.
 
 Série temporelle :
@@ -6962,7 +6140,6 @@ Série temporelle :
   - month : `cur = year*12 + (month-1)`, i de 5 à 0 → `(f"{yy}-{mm:02d}", f"{mm:02d}/{str(yy)[2:]}")` avec `yy = idx//12`, `mm = idx%12+1`
 - `_event_bucket_key(period, ts)` (`cost.py:217-223`) : `datetime.fromtimestamp(ts)` → day `d.date().isoformat()` ; quarter `f"{d.year}-Q{(d.month-1)//3+1}"` ; sinon `f"{d.year}-{d.month:02d}"`.
 - `costs_timeseries(period="month", archive_id=None, anchor=None)` (`cost.py:226-272`) : période invalide → "month" ; parcourt `db.cost_events_raw(archive_id)` ; ignore usd ≤ 0 (donc Gradium toujours absent) et les événements hors fenêtre ; cumule par service/bucket ; services ordonnés par `_SERVICE_ORDER` puis inconnus ; renvoie `{period, buckets[{key,label}], services[{service,label}], series{svc: [round(v,4)]}, totals_per_bucket [round 4], total_usd round 2, by_service_usd round 2, usd_to_eur, note}`. Route `main.py:1041-1053` : pour une archive, `anchor = datetime.fromtimestamp(ended_at)`.
-  ⚠ Docstring obsolète (`cost.py:233-234`) : « HeyGen est compté en crédits (usd=0) : il n'apparaît pas dans le graphique USD » — faux depuis que `record_heygen_clip` stocke un usd converti ; HeyGen APPARAÎT dans le graphique.
 
 Archives :
 - `archives_list()` (`cost.py:322-336`) : `db.list_cost_archives()` → `{"archives": [{id, label or "", started_at, ended_at, usd round 2, credits round 1, events}]}`. Route `GET /api/costs/archives` (`main.py:1062-1065`).
@@ -6970,7 +6147,7 @@ Archives :
 - Clôture : `POST /api/costs/archive` → `db.archive_cost_events()` sans label (`main.py:1055-1060`).
 - Vue « reprise » par pub : `_ad_overview` (`main.py:1457-1474`) : `cost_real_usd` round 2, `cost_real_credits` round 2, `billed_despite_failure = bool(n_echec and real.usd > 0)`.
 
-### 7.6 Plafond de dépense
+### 7.5 Plafond de dépense
 
 ```python
 def _spend_cap_usd() -> float:
@@ -7000,19 +6177,17 @@ Bases de calcul par route :
 | `_resume_ad` phase images (objet ET mashup) | `main.py:1567-1568` | `estimate_objet(nb echec sans image)["usd_images"]` |
 | `_resume_ad` phase animation objet | `main.py:1591`, `1598` | `estimate_objet(nb valide|echec avec image)["usd_video"]` |
 | `_resume_ad` phase animation mashup | `main.py:1596`, `1598` | `estimate_mashup(nb, model)["usd_video"]` (avg par défaut 6 s, pas les durées réelles) |
-Routes payantes SANS plafond : `/api/generate` (avatar HeyGen), `/api/generate/retry`, `/api/objet|mashup/generate-images`, `/api/*/regenerate-image`, `/api/*/consistency` (régénère potentiellement jusqu'à 39 images), `/api/objet/style-preview`, échantillon voix, voix seules/voix off.
+Routes payantes SANS plafond : `/api/objet|mashup/generate-images`, `/api/*/regenerate-image`, `/api/*/consistency` (régénère potentiellement jusqu'à 39 images), `/api/objet/style-preview`, échantillon voix, voix off.
 
-### 7.7 Écarts repérés entre estimation et coût enregistré
+### 7.6 Écarts repérés entre estimation et coût enregistré
 
-1. **HeyGen** : estimation ET enregistrement par nombre de mots (W/2,5 s), jamais par la durée réelle du WAV/MP4 (`pipeline.py:165`) ; le coût « réel » stocké est donc lui-même une estimation. L'estimation affichée après découpage (`main.py:456`) est toujours en mode premium, même si le réglage est « classique ».
-2. **Grok** : estimé à 5 s fixes par plan (`GROK_DEFAULT_CLIP_SECONDS`) et sans frais d'image d'entrée, alors que l'enregistrement utilise la durée calibrée sur le dialogue ([4 ; 12] s selon le débit 2,0/2,5/3,0 mots/s) + 0,01 $/clip. Un plan à dialogue long (≥ 28 mots au débit naturel) coûte 1,69 $ vs 0,70 $ estimé.
-3. **Images** : estimation à 0,04 $/image (`NANO_BANANA_COST_PER_IMAGE_USD`) alors que le modèle par défaut `nano_banana_2` (gemini-3.1-flash-image) est enregistré à 0,045 $. La note « Gratuit jusqu'à ~500 images/jour » n'est pas prise en compte à l'enregistrement (chaque image réelle est facturée au tarif).
-4. **Plafond Objet / Mashup animate sur `usd_total`** : inclut le coût des images DÉJÀ générées et payées (`main.py:684`, `main.py:856`) → surestime la dépense à venir de 0,04 $/plan. La reprise, elle, utilise `usd_video` seul.
-5. **Mashup** : l'estimation « snappe » la MOYENNE des durées (arrondie) puis multiplie par n, alors que le pipeline snappe CHAQUE clip ; en reprise, la durée est le défaut 6 s. Le coût enregistré privilégie `usage.cost` d'OpenRouter (exact) — il peut différer fortement du taux indicatif. Un `usage.cost` à 0 ou absent → repli s × taux.
-6. **Anthropic** : jamais estimé ; enregistré sans `ad_id` ; les réessais JSON (`_BrainRetryable`) sont chacun enregistrés.
-7. **Gradium** : toujours 0 $ (seul le nombre de générations est tracé).
-8. **Commentaires incohérents** : Classique « ~2 crédits/s » (`config_app.py:112-113`) vs 1,5 ; docstring timeseries HeyGen « usd=0 » (§7.5).
-9. **Statut vs coût** : `_ad_overview.billed_despite_failure` signale les coûts enregistrés sur des pubs ayant des plans en échec ; mais les échecs NE génèrent AUCUN `cost_event` (les `record_*` ne sont appelés qu'après succès), donc un fournisseur qui facture un rendu échoué n'est pas comptabilisé.
+1. **Grok** : estimé à 5 s fixes par plan (`GROK_DEFAULT_CLIP_SECONDS`) et sans frais d'image d'entrée, alors que l'enregistrement utilise la durée calibrée sur le dialogue ([4 ; 12] s selon le débit 2,0/2,5/3,0 mots/s) + 0,01 $/clip. Un plan à dialogue long (≥ 28 mots au débit naturel) coûte 1,69 $ vs 0,70 $ estimé.
+2. **Images** : estimation à 0,04 $/image (`NANO_BANANA_COST_PER_IMAGE_USD`) alors que le modèle par défaut `nano_banana_2` (gemini-3.1-flash-image) est enregistré à 0,045 $. La note « Gratuit jusqu'à ~500 images/jour » n'est pas prise en compte à l'enregistrement (chaque image réelle est facturée au tarif).
+3. **Plafond Objet / Mashup animate sur `usd_total`** : inclut le coût des images DÉJÀ générées et payées (`main.py:684`, `main.py:856`) → surestime la dépense à venir de 0,04 $/plan. La reprise, elle, utilise `usd_video` seul.
+4. **Mashup** : l'estimation « snappe » la MOYENNE des durées (arrondie) puis multiplie par n, alors que le pipeline snappe CHAQUE clip ; en reprise, la durée est le défaut 6 s. Le coût enregistré privilégie `usage.cost` d'OpenRouter (exact) — il peut différer fortement du taux indicatif. Un `usage.cost` à 0 ou absent → repli s × taux.
+5. **Anthropic** : jamais estimé ; enregistré sans `ad_id` ; les réessais JSON (`_BrainRetryable`) sont chacun enregistrés.
+6. **Gradium** : toujours 0 $ (seul le nombre de générations est tracé).
+7. **Statut vs coût** : `_ad_overview.billed_despite_failure` signale les coûts enregistrés sur des pubs ayant des plans en échec ; mais les échecs NE génèrent AUCUN `cost_event` (les `record_*` ne sont appelés qu'après succès), donc un fournisseur qui facture un rendu échoué n'est pas comptabilisé.
 
 ---
 
@@ -7058,7 +6233,7 @@ Constructeur `Job(ad_id: int, ad_name: str, scenes: list[dict])` (`app/jobs.py:3
 | `summary` | `{}` | `:45` |
 | `_lock` | `threading.Lock()` | `:46` |
 
-- `on_update(ev)` (`app/jobs.py:48-57`) : si la clé `"job_phase"` est présente → `self.phase = str(ev["job_phase"])` et retour (bannière de phase avatar) ; sinon `n = int(ev.get("scene", 0))` et, **si `n` est une clé connue de `self.scenes`**, `self.scenes[n].update(ev)` (fusion : les clés précédentes comme `message` restent). Un événement pour un `n` inconnu est **ignoré silencieusement**.
+- `on_update(ev)` (`app/jobs.py:48-57`) : si la clé `"job_phase"` est présente → `self.phase = str(ev["job_phase"])` et retour (bannière de phase) ; sinon `n = int(ev.get("scene", 0))` et, **si `n` est une clé connue de `self.scenes`**, `self.scenes[n].update(ev)` (fusion : les clés précédentes comme `message` restent). Un événement pour un `n` inconnu est **ignoré silencieusement**.
 - `set_state(state, summary=None)` (`app/jobs.py:59-65`) : fixe `state`, remplace `summary` si fourni, et pose `finished_at = time.time()` si `state in ("termine", "partiel", "echec")`.
 - `snapshot()` (`app/jobs.py:67-84`) — renvoyé tel quel par `GET /api/jobs/{job_id}` (`app/main.py:556-561`, 404 `"Job inconnu."` si absent). Clés **exactes** :
   - `id`, `ad_id`, `ad_name`, `state`, `phase`, `total`,
@@ -7082,12 +6257,10 @@ def start(self, cfg: ProviderConfig, ad_id: int, ad_name: str, scenes: list[dict
 
 | `output_mode` | Fonction pipeline appelée (arguments exacts) | Réf. |
 |---|---|---|
-| `"voix_seules"` | `pipeline.generate_voices_only(cfg, ad_id, ad_name, scenes, on_update=job.on_update, avatar_label=avatar_label)` | `app/jobs.py:114-118` |
 | `"voix_off"` | `pipeline.generate_voiceover(cfg, ad_id, ad_name, [str(s["script"]) for s in scenes], full_script=full_script, on_update=job.on_update)` | `:119-124` |
 | `"objet_images"` | `pipeline.generate_objet_images(cfg, ad_id, ad_name, scenes, ref_paths=ref_paths, on_update=job.on_update, character_ref=character_ref)` | `:125-131` |
 | `"objet_animate"` | `pipeline.animate_objet_clips(cfg, ad_id, ad_name, on_update=job.on_update)` | `:132-136` |
 | `"mashup_animate"` | `pipeline.animate_mashup_clips(cfg, ad_id, ad_name, on_update=job.on_update, only_clip_id=only_clip_id)` | `:137-141` |
-| tout autre (défaut `"video"`) | `pipeline.generate_ad(cfg, ad_id, ad_name, scenes, avatar_id, on_update=job.on_update, is_retry=is_retry)` | `:142-146` |
 
 - Fin normale : `job.set_state("termine" if summary.get("echec", 0) == 0 else "partiel", summary)` (`app/jobs.py:147-149`). ⇒ l'état du **job** est `partiel` dès qu'au moins un élément a échoué, même si **tous** ont échoué (l'état `echec` du job est réservé à l'exception globale). Le statut de la **pub** en base est, lui, fixé par le pipeline (cf. §3).
 - Exception globale (`app/jobs.py:150-152`) : `job.set_state("echec", {"message": _job_error_message(exc)})` puis `db.set_ad_status(ad_id, "echec")` — **quel que soit le type de pub** et même si la pub avait des clips déjà prêts (ex. une reprise qui plante globalement fait passer une pub `termine` à `echec`).
@@ -7099,9 +6272,9 @@ def start(self, cfg: ProviderConfig, ad_id: int, ad_name: str, scenes: list[dict
 - **Aucune annulation** : pas de route ni de mécanisme pour stopper un job.
 - **Threads daemon** (`app/jobs.py:154`) : à la fermeture du process, les threads sont tués net, **sans nettoyage**. Effets en base :
   - la pub reste au statut `en_cours` posé par `db.create_ad` (`app/db.py:307`) ;
-  - les clips restent dans leur dernier statut **persisté** : `en_attente` (valeur à la création, `app/db.py:342`, ou après `reset_clips_pending`, `app/db.py:428`), ou `voix_pret` (avatar : voix faite, vidéo non faite, `app/pipeline.py:131`), ou `image_pret`/`valide`. NB : les statuts `en_cours` n'existent **que** dans les événements de progression en mémoire — aucun clip n'est écrit `en_cours` en base.
-  - Ces clips « orphelins » **ne sont pas repris** par les boutons de relance, qui ne sélectionnent que `status == "echec"` : `/api/generate/retry` (`app/main.py:534`), `/api/*/resume` (`app/main.py:1556`). Seuls `animate` / consistency / regenerate peuvent les retoucher (cf. §3).
-  - Un appel fournisseur déjà lancé (rendu HeyGen/Grok/Kling) peut être facturé côté fournisseur sans qu'aucun `record_*` ne soit écrit.
+  - les clips restent dans leur dernier statut **persisté** : `en_attente` (valeur à la création, `app/db.py:342`, ou après `reset_clips_pending`, `app/db.py:428`), ou `image_pret`/`valide`. NB : les statuts `en_cours` n'existent **que** dans les événements de progression en mémoire — aucun clip n'est écrit `en_cours` en base.
+  - Ces clips « orphelins » **ne sont pas repris** par les boutons de relance, qui ne sélectionnent que `status == "echec"` : `/api/*/resume` (`app/main.py:1556`). Seuls `animate` / consistency / regenerate peuvent les retoucher (cf. §3).
+  - Un appel fournisseur déjà lancé (rendu Grok/Kling) peut être facturé côté fournisseur sans qu'aucun `record_*` ne soit écrit.
 
 ---
 
@@ -7116,24 +6289,14 @@ def start(self, cfg: ProviderConfig, ad_id: int, ad_name: str, scenes: list[dict
 | `_run_parallel(items, worker, max_parallel)` | `[]` → `(0, 0)` ; `workers = max(1, min(int(max_parallel or 1), len(items)))` ; `ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gen")` ; `ex.map(lambda it: bool(_safe_worker(worker, it)), items)` ; renvoie `(ok, len(items) - ok)` | `:68-84` |
 | `_safe_worker(worker, item)` | `bool(worker(item))`, toute exception → `False` (filet) | `:87-91` |
 | `_parallel_map(items, worker, max_parallel)` | `[]` → `[]` ; même borne `workers` ; `list(ex.map(worker, items))` → résultats **dans l'ordre** ; **pas de filet** : une exception d'un worker est relevée à l'itération et fait échouer tout le job | `:94-105` |
-| `ad_media_dir(ad_id)` | `config_app.MEDIA_DIR / f"ad_{ad_id}"`, `mkdir(parents=True, exist_ok=True)` | `:108-111` |
 | `_WIN_RESERVED` | `{"CON","PRN","AUX","NUL","COM1".."COM9","LPT1".."LPT9"}` | `:220-224` |
 | `_safe_name(name)` | `re.sub(r'[<>:"/\\|?*\n\r\t]', "_", name).strip().strip(".")[:60]` ; vide → `"pub"` ; si `.upper()` ∈ `_WIN_RESERVED` → `f"_{cleaned}"` | `:227-234` |
 | `_unique_pub_dir(base_dir, ad_id, ad_name)` | `base = _safe_name(ad_name or f"pub_{ad_id}")` ; `d = base_dir / base` ; **si `d` existe déjà** → `base_dir / f"{base}_{ad_id}"` ; `mkdir(parents=True, exist_ok=True)` | `:237-249` |
-| `voices_dir(ad_id, ad_name)` | `_unique_pub_dir(config_app.VOICES_DIR, …)` | `:252-254` |
 | `objet_dir(ad_id, ad_name)` | `config_app.OBJET_DIR / f"{_safe_name(ad_name)}_{ad_id}"` (toujours suffixé par l'id), `mkdir` | `:357-361` |
 | `voiceover_dir(ad_id, ad_name)` | `_unique_pub_dir(config_app.VOICEOVER_DIR, …)` | `:702-704` |
 | `_open_folder(folder)` | retour immédiat si `os.environ.get("UGC_NO_OPEN") == "1"` ; sinon `os.startfile(str(folder))` si disponible (Windows seulement), exceptions avalées | `:294-304` |
 
-### 2.1 `_write_recap(folder, ad_name, avatar_label, scenes, ext="mp3")` (`app/pipeline.py:257-291`)
-Écrit `folder / "recap.html"` (UTF-8) et renvoie le chemin. Contenu :
-- `<!doctype html><html lang="fr">`, `<meta charset="utf-8">`, `<title>{ad_name échappé} — récap voix</title>`, feuille de style inline (police Segoe UI, largeur max 820 px, classes `.hint`, `.scene`, `.wav`, `.lbl`, `.script`, `.motion`) (`:272-282`).
-- `<h1>{ad_name}</h1>` ; `<p>Avatar : <b>{avatar_label ou '—'}</b> · Format 9:16 vertical</p>` (`:283-284`).
-- Encadré `.hint` : « Dans HeyGen, pour CHAQUE scène et dans l'ordre : dépose l'audio **N.{ext}** (à côté de ce fichier) puis colle le **motion prompt N** ci-dessous. » (`:285-286`).
-- Par scène (`:262-271`) : `<h3>Scène {n} <span class="wav">→ audio : {n}.{ext}</span></h3>`, libellé « Script (lu par l'avatar, verbatim) : » + script échappé, libellé « Motion prompt (à coller dans HeyGen) : » + motion échappé ou `—`.
-- Tout est échappé par `html.escape`.
-
-### 2.2 `_write_voiceover_recap(folder, ad_name, full_script, segments, ext="mp3")` (`app/pipeline.py:707-729`)
+### 2.1 `_write_voiceover_recap(folder, ad_name, full_script, segments, ext="mp3")` (`app/pipeline.py:707-729`)
 Écrit `folder / "recap.txt"` (UTF-8, lignes jointes par `\n`) :
 ```
 VOIX OFF — {ad_name}
@@ -7153,121 +6316,9 @@ Script complet (verbatim) :
 
 ---
 
-## 3. Les 5 flux
+## 3. Les 3 flux
 
-### 3.1 Flux AVATAR (Gradium → HeyGen)
-
-**a. Déclencheur** — `POST /api/generate` (`app/main.py:466-522`), corps `GenerateIn` = `{ad_name="pub", avatar_label="", voice_label="", cost_mode="", scenes=[], confirm=False}` (`app/main.py:1186-1192`). Contrôles, dans l'ordre :
-1. `scenes` vide → 400 `"Aucune scène fournie."` (`:470-471`).
-2. `_validate_scenes(scenes)` (`app/main.py:1280-1302`) : chaque scène doit avoir un `script` non vide (400 `"Scène #{i} : champ « script » manquant."`), `n` absent → `i`, `n` non entier → 400, `n` en double → 400 `"Numéro de scène en double : n={n}. …"`. **Aucune limite de longueur par scène** (la limite Gradium `GRADIUM_MAX_CHARS=1500`, `app/config_app.py:41`, n'est appliquée qu'à la voix off).
-3. `voix_seules = body.cost_mode == "voix_seules"` (`:475`) → si vrai, c'est le flux 3.2.
-4. `avatar_id = db.avatar_id_for_label(body.avatar_label)` ; hors voix seules, absent ou commençant par `"AVATAR_ID"` → 400 `"Avatar « … » non configuré (renseigne un avatar_id valide dans Réglages)."` (`:479-485`) — **y compris en simulation**.
-5. `voice_label` → `cfg.gradium_voice_id = db.voice_id_for_label(...)` si résolu (`:489-492`) — **non persisté** avec la pub.
-6. `cost_mode` ∈ `COST_MODES` (`premium`/`classique`) → `cfg.cost_mode` (`:495-496`) — **non persisté** avec la pub.
-7. Réel sans `gradium_voice_id` → 400 `"Aucune voix Gradium configurée (ajoutes-en une dans Réglages)."` (`:499-502`).
-8. Réel sans `confirm` → 400 `"Confirmation requise avant un vrai run (crédits)."` (`:505-506`). Le front envoie toujours `confirm: true` après une modale (`app/static/app.js:853-874`).
-9. `ad_id = db.create_ad(ad_name, avatar_label, json(scenes), kind="avatar")` (`:510-513`) → statut `en_cours`.
-10. `jobs.manager.start(cfg, ad_id, ad_name, scenes, avatar_id, output_mode="video", avatar_label=…)` (`:514-518`). Réponse `{ok, job_id, ad_id, dry_run, voix_seules}`.
-
-**Relance** — `POST /api/generate/retry/{ad_id}` (`app/main.py:524-554`), corps `RetryIn{confirm}` : 404 `"Pub introuvable."` ; `kind != "avatar"` → 400 `"La relance des échoués concerne les pubs avatar."` ; clips `status="echec"` (`db.clips_for_ad(ad_id, status="echec")`) ; aucun → 400 `"Aucune scène en échec à relancer."` ; avatar re-résolu depuis `ad.avatar_label` ; voix/confirm comme ci-dessus. Scènes reconstruites `{"n": scene_n, "script", "motion_prompt", "clip_id": id}` → `start(..., output_mode="video", avatar_label=…, is_retry=True)`. Réponse `{ok, job_id, ad_id, retry: len(scenes)}`. Déclenchée par le bouton « réessayer les échoués » affiché si `summary.echec > 0` (`app/static/app.js:890-914`, `:1023`).
-
-**b. Séquence exacte**
-```
-Front: POST /api/generate  (app.js:865)  → pollJob toutes les 800 ms (app.js:961-1030)
-└─ main.generate (main.py:466) → db.create_ad(kind="avatar") → jobs.manager.start(output_mode="video")
-   └─ thread job-<id> : _run → pipeline.generate_ad (pipeline.py:173)
-      ├─ emit({"job_phase": "voix"})                                   (pipeline.py:192)
-      ├─ PHASE 1 : _parallel_map(scenes, _voice_one_scene, GRADIUM_MAX_PARALLEL=2)  (:193-197)
-      │   └─ _voice_one_scene (pipeline.py:114-143)
-      │       ├─ clip_id = s["clip_id"] (relance) sinon db.create_clip(ad_id, n, script, motion)
-      │       ├─ emit {"scene":n,"phase":"voix","status":"en_cours"}
-      │       └─ boucle attempt in range(max(1, GRADIUM_TTS_RETRIES=3)):
-      │           └─ providers.gradium_tts(cfg, script, <ad_dir>/{n}.wav, fmt="wav")   (providers.py:210)
-      │               ├─ dry_run → media.write_silence_wav(seconds=_spoken_seconds(text, cap=1.2))
-      │               └─ réel → asyncio.run(_gradium_tts_real) (providers.py:240-261)
-      │                   └─ gradium.client.GradiumClient(api_key).tts(setup={"model_name": gradium_model or "default",
-      │                        "voice_id": gradium_voice_id, "output_format": "wav"}, text=text)
-      │                      [SDK `gradium` : URL/méthode/timeout non visibles dans le code]
-      │                   └─ écrit media.fix_wav_bytes(result.raw_data)
-      ├─ ready = [p for p in prepared if p["ok"]] ; voice_ko = len(prepared) - len(ready)   (:198-199)
-      ├─ emit({"job_phase": "videos"})                                  (:202)
-      └─ PHASE 2 : _parallel_map(ready, _render_one_video, HEYGEN_MAX_PARALLEL=3)  (:203-207)
-          └─ _render_one_video (pipeline.py:146-170)
-              ├─ emit phase "upload" → heygen_upload_audio(cfg, wav)          (providers.py:402-424)
-              │    POST https://upload.heygen.com/v1/asset, headers {x-api-key, Content-Type: audio/x-wav},
-              │    data=octets bruts, timeout=120 → data.id | data.asset_id
-              ├─ emit phase "rendu" → heygen_create_video(cfg, avatar_id, asset, motion, f"{ad_name}_{n:02d}")
-              │    POST https://api.heygen.com/v3/videos, json=_create_video_payload(...), timeout=120 → data.video_id | data.id
-              └─ heygen_render_to_file(cfg, vid, <ad_dir>/{n}.mp4, scene_label=f"scene {n}")   (providers.py:482-522)
-                   boucle : GET https://api.heygen.com/v3/videos/{video_id} (timeout=60)
-                     status ∈ {completed, success} → _download(video_url|url) (GET stream, timeout=300, chunks 64 Kio)
-                     status ∈ {failed, error} → ProviderError
-                     > POLL_TIMEOUT=900 s → ProviderError ; sinon sleep(POLL_EVERY=10)
-```
-Payload HeyGen `_create_video_payload` (`app/providers.py:427-453`) : `{"type": "avatar", "avatar_id", "engine": {"type": mode["engine"]}, "audio_asset_id": <asset>, "title", ["motion_prompt" si mode["motion"] et motion non vide], "resolution": mode["resolution"], "aspect_ratio": "9:16", ["voice_id": cfg.heygen_voice_id si non vide]}`. Modes (`app/config_app.py:122-137`) : `premium` = `avatar_v`, motion oui, `1080p`, 4,0 cr/s ; `classique` = `avatar_iv`, motion non, `720p`, 1,5 cr/s. Défaut `premium` (`:138`). Noms de champs centralisés `HEYGEN_FIELDS = {"audio_field": "audio_asset_id", "motion_field": "motion_prompt"}` (`app/providers.py:30-33`). Content-Type upload via `_audio_mime` : `.wav→audio/x-wav`, `.mp3→audio/mpeg`, `.m4a→audio/mp4` (`app/providers.py:389-399`).
-
-**c. Parallélisme** — Phase 1 : `GRADIUM_MAX_PARALLEL = 2` (`app/config_app.py:50`). **Barrière** : la phase 2 ne démarre qu'après la fin de TOUTES les voix (`_parallel_map` attend). Phase 2 : `HEYGEN_MAX_PARALLEL = 3` (`app/config_app.py:46`). Borne effective `min(constante, nb d'items)`, min 1 (`app/pipeline.py:103`).
-
-**d. Retries** — Uniquement sur la voix : `GRADIUM_TTS_RETRIES = 3` (`app/config_app.py:51`), attente `time.sleep(1.5 * (attempt + 1))` entre essais (1,5 s puis 3,0 s ; pas de sleep après le dernier) (`app/pipeline.py:127-141`) ; toute exception déclenche un nouvel essai (pas de distinction clé invalide / réseau). **Aucun retry** sur HeyGen (upload, create, polling, download). Relance manuelle via `/api/generate/retry` : elle rejoue **voix + vidéo** pour chaque clip `echec` (la voix est régénérée même si l'échec était en phase HeyGen, puisque `_voice_one_scene` ne teste pas `wav_path`, `app/pipeline.py:123-131`).
-
-**e. Événements** (clé `scene` = `n`) :
-- `{"job_phase": "voix"}` puis `{"job_phase": "videos"}` (`app/pipeline.py:192`, `:202`) → `Job.phase`.
-- `{"phase": "voix", "status": "en_cours"}` (`:125`) — un seul, pas d'événement par tentative.
-- `{"phase": "voix_ok", "status": "en_cours", "voice_ok": True}` (`:135`).
-- `{"phase": "upload", "status": "en_cours", "voice_ok": True}` (`:159`), `{"phase": "rendu", …}` (`:161`).
-- `{"phase": "pret", "status": "ok", "mp4": str(mp4), "voice_ok": True}` (`:167`).
-- échec : `{"phase": "erreur", "status": "echec", "message": msg}` (+ `"voice_ok": True` en phase 2) (`:142`, `:170`).
-- Le front affiche `Phase 1 — Voix (Gradium, 2 max) : {voices_done}/{total} générées` puis `Phase 2 — Vidéos (HeyGen, en parallèle) · voix {vd}/{total} prêtes` (`app/static/app.js:984-997`).
-
-**f. Écritures en base**
-- `db.create_ad(name, avatar_label, scenes_json, kind="avatar")` (route) → `status='en_cours'` (`app/db.py:302-313`).
-- `db.create_clip(ad_id, n, script, motion)` si pas de `clip_id` (`app/pipeline.py:123`) → `status='en_attente'`, `prompt_image=""`, `refs_needed=""` (`app/db.py:334-348`).
-- `db.update_clip(clip_id, wav_path=str(wav), status="voix_pret", error=None)` (`:131`) ; `db.update_clip(clip_id, mp4_path=str(mp4), status="pret", error=None)` (`:166`) ; échec : `status="echec", error=msg` (`:63`).
-- Coûts (réel uniquement) : `cost.record_gradium_tts(ad_id)` après chaque voix réussie (`:132-133`) → `add_cost_event("gradium", "generation", 1, ad_id=…)` sans montant (`app/cost.py:132-133`) ; `cost.record_heygen_clip(ad_id, len(script.split()) / cost.WORDS_PER_SEC, cfg.cost_mode)` (`:164-165`) → crédits = secondes estimées × `credits_per_sec`, usd = crédits × `HEYGEN_USD_PER_CREDIT` (= 15/900/0,92) (`app/cost.py:123-129`, `app/config_app.py:171-172`). **Durée estimée à 2,5 mots/s**, pas la durée réelle du MP4.
-- `db.set_ad_status(ad_id, status)` avec `status = "termine" if ko == 0 else ("partiel" if ok else "echec")` (`app/pipeline.py:211-212`).
-- `db.log_activity("generation", f"{verb} « {ad_name} » : {ok} ok, {ko} en échec.")`, `verb = "Relance" if is_retry else "Pub"` (`:213-214`).
-- Summary : `{"ok": ok, "echec": ko, "status": status, "ad_id": ad_id}` (`:215`).
-
-**g. Fichiers** — `DATA_DIR/media/ad_{ad_id}/{n}.wav` (voix intermédiaire, **toujours WAV** quel que soit `audio_format`, `app/pipeline.py:129-130`) et `DATA_DIR/media/ad_{ad_id}/{n}.mp4` (`:157`). MP4 réel : 9:16, 1080p (premium) ou 720p (classique). Simulation : WAV silence mono 16 bits 22 050 Hz de 0,6 à 1,2 s ; MP4 placeholder 1080×1920, 1,5 s, filigrane `SIMULATION scene {n}` (`app/providers.py:487-490`). `DATA_DIR` = `%LOCALAPPDATA%\PipelineUGC\data` (repli `%APPDATA%`, puis home), surchargeable par `UGC_DATA_DIR` (`app/config_app.py:18-31`).
-
-**h. Échecs partiels** — une voix ratée : clip `echec`, scène exclue de la phase 2 (`app/pipeline.py:198`) ; une vidéo ratée : clip `echec` avec `voice_ok`. `ko = voice_ko + (len(ready) - ok)` (`:209`). Statut pub `termine` / `partiel` / `echec`. État job `termine` ou `partiel` (`app/jobs.py:147-149`). Bouton de relance si `summary.echec > 0`.
-
-**i. Réfs** — sans objet (aucune image de référence dans ce flux).
-
----
-
-### 3.2 Flux VOIX SEULES (Gradium seul, récap HeyGen manuel)
-
-**a. Déclencheur** — même route `POST /api/generate` avec `cost_mode == "voix_seules"` (`app/main.py:475`). Différences : pas d'exigence d'avatar (`:480`), pas de confirmation (`:505`), mais la voix Gradium reste requise en réel (`:499`). `db.create_ad(..., kind="audio")` (`:510-513`) → exclue de la Bibliothèque vidéo (`app/main.py:937-942`). `start(..., output_mode="voix_seules", avatar_label=…)`.
-
-**b. Séquence**
-```
-main.generate → jobs.manager.start(output_mode="voix_seules")
-└─ pipeline.generate_voices_only (pipeline.py:307-353)
-   ├─ folder = voices_dir(ad_id, ad_name)  → DATA_DIR/voix/<safe_name>[ _<ad_id>]
-   ├─ pour chaque scène, SÉQUENTIELLEMENT (for, :321) :
-   │   ├─ clip_id = db.create_clip(ad_id, n, script, motion)       (hors try)
-   │   ├─ ext = config_app.audio_ext(cfg.audio_format) ; out = folder/{n}.{ext}
-   │   ├─ emit {"phase":"voix","status":"en_cours"}
-   │   └─ audio_path = gradium_tts(cfg, script, out)   (format = cfg.audio_format, défaut mp3)
-   │        réel mp3 : _gradium_tts_real → media.wav_bytes_to_mp3_file(result.raw_data, out)   (ffmpeg)
-   │        réel wav : fix_wav_bytes → écriture
-   │        simu : write_silence_mp3 (ffmpeg, sinon WAV) / write_silence_wav
-   ├─ _write_recap(folder, ad_name, avatar_label, scenes, ext=…)
-   ├─ db.set_ad_status(ad_id, "voix_seules") ; db.log_activity(...)
-   └─ _open_folder(folder)
-```
-**c. Parallélisme** — aucun : boucle séquentielle (`app/pipeline.py:321`).
-**d. Retries** — **aucun** (contrairement à l'avatar, pas de boucle `GRADIUM_TTS_RETRIES`).
-**e. Événements** — `{"phase": "voix", "status": "en_cours"}` (`:329`), `{"phase": "pret", "status": "ok", "wav": audio_path}` (`:334`), échec via `_emit_clip_failure` (`:337`).
-**f. Base** — `create_clip` (`:325`) ; `update_clip(clip_id, wav_path=audio_path, status="voix_pret", error=None)` (`:333`, la colonne `wav_path` reçoit aussi les .mp3) ; `record_gradium_tts` en réel (`:331-332`) ; `set_ad_status(ad_id, "voix_seules")` **même si tout a échoué** (`:341`) ; `log_activity("voix_seules", f"Voix seules « {ad_name} » : {ok} ok, {ko} en échec → {folder}")` (`:342-344`). Summary : `{"ok", "echec", "status": "voix_seules", "folder", "recap", "message"}` avec `message = f"Voix générées (0 crédit API). Va dans HeyGen → avatar {avatar_label or 'ton avatar'} → pour chaque scène, dépose l'audio N + colle le motion prompt N, dans l'ordre."` (`:346-353`).
-**g. Fichiers** — `DATA_DIR/voix/<nom>/{n}.mp3` (MP3 libmp3lame 192 kb/s, sans métadonnées) ou `{n}.wav` (entête réparé) + `recap.html`. `gradium_tts` réaligne l'extension sur le format (`app/providers.py:217`). En simulation sans ffmpeg, le fichier `.mp3` contient en réalité un WAV (`app/media.py:124-125`).
-**h. Échecs partiels** — une scène ratée ne bloque pas (`app/pipeline.py:336-338`). Pas de bouton de reprise dédié (le retry avatar refuse `kind != "avatar"`). Job `partiel` si `ko > 0`. Front : modale « 🎙️ Voix générées (0 crédit API) » (`app/static/app.js:1006-1015`).
-**i. Réfs** — sans objet.
-
----
-
-### 3.3 Flux OBJET ANIMÉ (Claude → Nano Banana → validation → Grok)
+### 3.1 Flux OBJET ANIMÉ (Claude → Nano Banana → validation → Grok)
 
 **a. Déclencheurs et enchaînement multi-requêtes du front**
 1. **Plan** — `POST /api/objet/plan` (`app/main.py:564-579`, front `app/static/app.js:1200-1225`) : `brain.generate_shooting_plan(cfg, product_name, ambiance, script, persona=…, manual=…)` ; `BrainProviderError` → 502, `BrainError` → 400 ; ajoute `estimate = cost.estimate_objet(len(shots))`, `dry_run` ; `log_activity("objet", f"Plan de tournage : {len(shots)} plans.")`. Pas de job. Chaque plan : `{n, prompt_image, prompt_motion, dialogue, refs_needed}` avec `refs_needed` par défaut `["produit"]` (`app/brain.py:1268-1269`, `:490-496`).
@@ -7278,7 +6329,7 @@ main.generate → jobs.manager.start(output_mode="voix_seules")
    - Pour **chaque** plan : `db.create_clip(ad_id, n, dialogue, prompt_motion, prompt_image=…, refs_needed=json(rn) si liste sinon "")` (`app/main.py:609-613`).
    - Job sur **le Plan 1 seulement** : `start(cfg, ad_id, ad_name, job_shots[:1], "", output_mode="objet_images", ref_paths=ref_paths)` (`:622-626`), `character_ref=""` → pas de préfixe de cohérence. Réponse `{ok, job_id, ad_id, dry_run, plans_total, generated_now}`. Les autres plans restent `en_attente`.
 3. **Galerie** — `GET /api/objet/ad/{ad_id}` (`app/main.py:700-703` → `_ad_shots_response`, `:1477-1506`) : par plan `{clip_id, n, prompt_image, prompt_motion, dialogue, image_url, video_url, status, error, refs_needed (normalisé ou []), is_anchor}` + `_ad_overview` (`counts`, `n_echec`, `cost_real_usd`, `cost_real_credits`, `billed_despite_failure`).
-4. **Réglages par plan** (facultatif) : `POST /api/clips/{id}/refs` (`app/main.py:643-651` ; filtre sur `_REF_KINDS`, liste vide = plan neutre), `POST /api/clips/{id}/anchor` (`:653-667` ; image requise ; une seule ancre par pub), `POST /api/objet/dialogue/{id}` (`:705-714` ; longueur ≤ `brain.MAX_SCRIPT_CHARS=20000`), `POST /api/objet/regenerate-image/{id}` (`:632-636` → `_regenerate_image`, cf. §3.3.i).
+4. **Réglages par plan** (facultatif) : `POST /api/clips/{id}/refs` (`app/main.py:643-651` ; filtre sur `_REF_KINDS`, liste vide = plan neutre), `POST /api/clips/{id}/anchor` (`:653-667` ; image requise ; une seule ancre par pub), `POST /api/objet/dialogue/{id}` (`:705-714` ; longueur ≤ `brain.MAX_SCRIPT_CHARS=20000`), `POST /api/objet/regenerate-image/{id}` (`:632-636` → `_regenerate_image`, cf. §3.1.i).
 5. **Validation** — `POST /api/objet/validate/{clip_id}` `{valide}` (`app/main.py:638-640` → `_set_clip_validation`, `:1644-1654`) : image requise pour valider (400 `"Ce plan n'a pas encore d'image à valider."`) ; statut `valide` ou retour à `image_pret`.
 6. **Plans suivants (cohérence)** — `POST /api/objet/consistency/{ad_id}` (`app/main.py:716-724` → `_run_consistency`, `:1605-1641`) :
    - `kind` doit être `objet` (400 `"Pub « Objet animé » introuvable."`) ;
@@ -7383,7 +6434,7 @@ Constantes xAI : `GROK_API_BASE = "https://api.x.ai/v1"`, `GROK_FIELDS` (`create
 
 ---
 
-### 3.4 Flux MASHUP IA (Claude → Nano Banana → validation → Kling/Veo/Seedance via OpenRouter)
+### 3.2 Flux MASHUP IA (Claude → Nano Banana → validation → Kling/Veo/Seedance via OpenRouter)
 
 **a. Déclencheurs / enchaînement front**
 1. `POST /api/mashup/plan` `MashupPlanIn{brief, style, persona, ratio="9:16", manual, count}` (`app/main.py:727-744`) → `brain.generate_mashup_plan` (`app/brain.py:881-920`) ; `estimate = cost.estimate_mashup(len(shots), model=cfg.mashup_video_model)` ; `log_activity("mashup", f"Plan Mashup : {len(shots)} plan(s).")`. Plans `{n, prompt_image, prompt_motion, duration_s (clamp 3–12), [refs_needed]}` — le prompt système Mashup ne demande pas `refs_needed` (`app/brain.py:757-778`), donc en pratique `None` → toutes les réfs.
@@ -7442,7 +6493,7 @@ Modèles (`app/config_app.py:367-389`) : `kling_pro` (`kwaivgi/kling-v3.0-pro`, 
 
 ---
 
-### 3.5 Flux VOIX OFF (Gradium seul, script découpé)
+### 3.3 Flux VOIX OFF (Gradium seul, script découpé)
 
 **a. Déclencheurs** — `POST /api/voiceover/preview` `{script}` (`app/main.py:880-888`) : `_check_voiceover_len` (≤ 20 000 car., 400 `"Script trop long (…) Découpe-le en plusieurs voix off."`), renvoie `{count, total_chars, segments:[{n, chars, text}]}`. `POST /api/voiceover/generate` `VoiceoverIn{ad_name="voix_off", voice_label, script}` (`app/main.py:890-922`) : script vide → 400 `"Script vide."` ; longueur ; `voice_label` → `cfg.gradium_voice_id` ; réel sans voix → 400 `"Aucune voix Gradium configurée (Réglages)."` ; `segments = pipeline.split_voiceover(script)` (vide → 400 `"Script vide après découpe."`) ; `voiceover_verbatim_ok` faux → 400 `"Découpe voix off refusée (texte altéré)."` ; `create_ad(..., kind="audio")` ; `start(cfg, ad_id, ad_name, [{"n": i, "script": s}], "", output_mode="voix_off", full_script=body.script)`. **Pas de confirmation** en réel. Réponse `{ok, job_id, ad_id, segments, dry_run}`.
 
@@ -7457,7 +6508,7 @@ job "voix_off" → pipeline.generate_voiceover(cfg, ad_id, ad_name, segments, fu
 │   ├─ clip_id = db.create_clip(ad_id, i, seg, "")
 │   ├─ out = folder / ("voixoff.{ext}" si single sinon "{i}.{ext}")
 │   ├─ emit {"scene": i, "phase":"voix","status":"en_cours"}
-│   └─ gradium_tts(cfg, seg, out)   (même chaîne que 3.2)
+│   └─ gradium_tts(cfg, seg, out)   (format = cfg.audio_format, défaut mp3 ; réel mp3 : media.wav_bytes_to_mp3_file via ffmpeg ; réel wav : fix_wav_bytes ; simu : silence)
 ├─ _write_voiceover_recap(folder, ad_name, full_script or " ".join(segments), segments, ext)
 ├─ set_ad_status(ad_id, "voix_off") ; log_activity ; _open_folder(folder)
 ```
@@ -7511,40 +6562,33 @@ job "voix_off" → pipeline.generate_voiceover(cfg, ad_id, ad_name, segments, fu
 
 | Fournisseur / fonction | Ce qui est renvoyé / produit | Réf. |
 |---|---|---|
-| **Claude** — découpage avatar `generate_scenes` | `_simulate_scenes` : 1 scène par phrase (split `(?<=[.!?…])\s+`), motion prompts tournants parmi 5 `_CANNED_MOTIONS` ; garde-fou verbatim appliqué | `app/brain.py:323-324`, `:1274-1288`, `:1085-1091` |
 | **Claude** — plan objet auto | `_simulate_shooting_plan` : segments de 3 phrases (`_split_script_ideas`), 5 gabarits `_CANNED_OBJET` (prompt_image/motion) avec produit (`"product"` si vide), ambiance (`"clean commercial mood"` si vide), style ; exclusions « pas de cils / pas d'écriture » appliquées ; puis regroupement, renumérotation, `refs_needed=["produit"]` | `app/brain.py:367-370`, `:1229-1253`, `:1096-1128` |
 | **Claude** — plan objet manuel | pas d'appel Claude en simulation (`if not cfg.dry_run`) → gabarits canned, dialogue = segment utilisateur | `app/brain.py:469-496` |
 | **Claude** — plan Mashup | `_simulate_mashup_shots` : 1 plan par phrase ; si `count` fourni, complète avec `f"{brief} — {angle}"` (6 angles) et tronque ; motion par défaut sobre ; `duration_s` 6 (clamp défaut) — NB : le mode **manuel** Mashup n'appelle jamais Claude, même en réel | `app/brain.py:893-894`, `:809-821`, `:891-892` |
 | **Claude** — test | `{"ok": True, "simulation": True, "message": "Simulation : clé non vérifiée."}` | `app/brain.py:269-270` |
-| **Gradium TTS** | silence de `_spoken_seconds(text, cap=1.2)` = `min(max(0.6, mots/2.5), 1.2)` s : MP3 (ffmpeg, 44,1 kHz mono, 192 kb/s) ou WAV (22 050 Hz mono 16 bits) ; avatar : toujours WAV | `app/providers.py:218-222`, `:1037-1043` |
+| **Gradium TTS** | silence de `_spoken_seconds(text, cap=1.2)` = `min(max(0.6, mots/2.5), 1.2)` s : MP3 (ffmpeg, 44,1 kHz mono, 192 kb/s) ou WAV (22 050 Hz mono 16 bits) | `app/providers.py:218-222`, `:1037-1043` |
 | **Gradium voix** | `{"ok": True, "simulation": True, "voices": [], "message": "Simulation : catalogue Gradium indisponible."}` | `app/providers.py:267-269` |
 | **Gradium crédits** | `{"simulation": True, "credits": "—"}` | `:336-337` |
 | **Gradium check** | `{"ok": True, "simulation": True, "message": "Simulation : clé/voix non vérifiées."}` | `:358-359` |
 | **Gradium échantillon** | silence de 2,0 s (mp3 ou wav selon `audio_format`) | `:310-313` |
-| **HeyGen upload** | `"SIMU_ASSET_ID"` | `:404-405` |
-| **HeyGen create** | `f"SIMU_VIDEO_{title}"` | `:460-461` |
-| **HeyGen render** | `make_placeholder_mp4(out, seconds=1.5, label=f"SIMULATION {scene_label}")` → filigrane `SIMULATION scene {n}` | `:487-490` |
-| **HeyGen avatars** | `{"ok": True, "simulation": True, "avatars": [], "message": "Simulation."}` | `:527-528` |
-| **HeyGen avatars (full)** | `{"ok": True, "simulation": True, "avatars": [], "talking_photos": [], "message": "Simulation : liste HeyGen indisponible (aucune clé requise)."}` | `:556-558` |
-| **HeyGen quota** | `{"simulation": True, "remaining": "—"}` | `:592-593` |
 | **Nano Banana** | `make_placeholder_image(out, label=label or "image", subtitle, index)` → PNG 1080×1920, fond palette, textes « SIMULATION » / nom de pub / « plan {n} » (aperçu de style : « Aperçu style » / libellé du style) | `:647-650`, `app/main.py:388-391` |
 | **Nano Banana check** | `{"ok": True, "simulation": True, "message": "Simulation : cle non verifiee."}` | `:726-727` |
 | **Grok** | `make_placeholder_mp4(out, seconds=2.0, label=f"SIMULATION anim {label} {index + 1}")` (la durée calculée du dialogue est ignorée) | `:781-784` |
 | **Grok check** | `{"ok": True, "simulation": True, "message": "Simulation : clé non vérifiée."}` | `:872-873` |
 | **Kling/Veo/Seedance** | `make_placeholder_mp4(out, seconds=2.0, label=f"SIMULATION mashup {label} {index + 1}")` ; `usage_out` non rempli | `:916-919` |
 | **Kling check** | `{"ok": True, "simulation": True, "message": "Simulation : clé non vérifiée."}` | `:1007-1008` |
-| **Tests de connexion** `/api/test-connection` | agrège les 6 checks ci-dessus + `dry_run` | `app/main.py:413-430` |
+| **Tests de connexion** `/api/test-connection` | agrège les checks ci-dessus + `dry_run` | `app/main.py:413-430` |
 
-- Contrôles route désactivés en simulation : confirmations, clés, voix Gradium, plafond de dépense (`_check_spend_cap` : `not cfg.dry_run`, `app/main.py:1391`). Reste obligatoire même en simulation : avatar_id configuré pour l'avatar (`app/main.py:480`).
-- **Aucun `record_*` en simulation** : tous les appels sont gardés par `if not cfg.dry_run` — `app/pipeline.py:132`, `:164`, `:331`, `:479`, `:579`, `:631`, `:758` et `app/main.py:397` (aperçu de style). `cost.record_anthropic_call` n'est appelé que via `_record_anthropic` dans `_call_claude_json` (`app/brain.py:609`, `:1073-1081`), atteint uniquement hors simulation. Les docstrings de `cost.py` le rappellent (`app/cost.py:100`, `:117`).
-- Simulation **sans ffmpeg** : avatar OK (WAV Python pur) ; MP3 → WAV déguisé ; MP4 → faux fichier de 36 octets illisible ; images PIL OK.
+- Contrôles route désactivés en simulation : confirmations, clés, voix Gradium, plafond de dépense (`_check_spend_cap` : `not cfg.dry_run`, `app/main.py:1391`).
+- **Aucun `record_*` en simulation** : tous les appels sont gardés par `if not cfg.dry_run` — `app/pipeline.py:479`, `:579`, `:631`, `:758` et `app/main.py:397` (aperçu de style). `cost.record_anthropic_call` n'est appelé que via `_record_anthropic` dans `_call_claude_json` (`app/brain.py:609`, `:1073-1081`), atteint uniquement hors simulation. Les docstrings de `cost.py` le rappellent (`app/cost.py:100`, `:117`).
+- Simulation **sans ffmpeg** : MP3 → WAV déguisé ; MP4 → faux fichier de 36 octets illisible ; images PIL OK.
 
 ---
 
 ## 6. Gestion d'erreurs fournisseur (`app/providers.py`)
 
 - **`ProviderError(RuntimeError)`** (`app/providers.py:94-102`) : message destiné à l'écran (toast, colonne `clips.error`, vignette), jamais de trace/code nu/JSON ; détail technique via `_log_detail`.
-- **`_PROVIDER_ACCOUNT`** (`:106-112`) : `HeyGen→HeyGen`, `Gradium→Gradium`, `OpenRouter→OpenRouter`, `xAI→xAI (Grok)`, `Anthropic→Anthropic (Claude)`.
+- **`_PROVIDER_ACCOUNT`** (`:106-112`) : `Gradium→Gradium`, `OpenRouter→OpenRouter`, `xAI→xAI (Grok)`, `Anthropic→Anthropic (Claude)`.
 - **`_log_detail(msg)`** (`:115-122`) : `print(f"[PROVIDER] {msg}", flush=True)`, exceptions avalées. Sous `pythonw`, `sys.stdout`/`stderr` sont redirigés vers `DATA_DIR/app.log` (append, UTF-8, line-buffered) par `_prepare_streams` (`app/main.py:1869-1884`) ; en console dev, sortie standard. Les corps de réponse sont tronqués (`r.text[:200..500]`).
 - **`_friendly_http(service, status, action="réessaie")`** (`:125-142`), `account = _PROVIDER_ACCOUNT.get(service, service)` :
   - 401/403 → `f"Clé {account} refusée — vérifie-la dans Réglages (recopie-la depuis le site {service})."`
@@ -7554,15 +6598,14 @@ job "voix_off" → pipeline.generate_voiceover(cfg, ad_id, ad_name, segments, fu
   - autre → `f"{service} a refusé la demande — {action} ; si ça persiste, vérifie ta clé et tes crédits {account} (Réglages)."`
 - **`_friendly_network(service, exc=None)`** (`:145-150`) : `f"Connexion à {service} impossible — vérifie ta connexion internet et réessaie dans un instant."` (`exc` ignoré).
 - **`is_network_hiccup(exc)`** (`:162-180`) : `None` → False ; instance de `requests.exceptions.Timeout | ConnectionError` → True ; nom de type contenant `timeout`/`connection` → True ; sinon message contenant `timed out`, `timeout`, `connection reset`, `connection aborted`, `connection error`, `max retries`, `read timed out`.
-- **`_request_with_retries(method, url, *, service, **kwargs)`** (`:183-206`) — **tests de connexion uniquement** (HeyGen avatars/avatars full/quota, OpenRouter `/key` pour Nano Banana et Kling, xAI `/models`) : `timeout` par défaut `CONNECTION_TEST_TIMEOUT = 180` s ; jusqu'à `CONNECTION_TEST_RETRIES = 3` essais ; pause `_RETRY_BACKOFF × attempt` (1,5 s puis 3,0 s) seulement si hoquet réseau ; renvoie la Response même en 4xx/5xx ; après échec réseau : log puis `ProviderError(f"{service} ne répond pas (serveur lent ou connexion instable) — réessaie dans un instant. Ce n'est pas forcément une clé invalide.")`. `gradium_check` (`:356-377`) et `brain.anthropic_check` (`app/brain.py:264-298`, client `timeout=180, max_retries=0`) reproduisent la même boucle. Les générations réelles n'utilisent **pas** ce mécanisme.
-- Endpoints des tests : `GET https://api.heygen.com/v2/avatars` (`:531`, `:561` avec `timeout=180` explicite), `GET https://api.heygen.com/v2/user/remaining_quota` (`:596`), `GET https://openrouter.ai/api/v1/key` (`:733`, `:1014`, service `"OpenRouter/Kling"` pour Kling), `GET https://api.x.ai/v1/models` (`:879`).
+- **`_request_with_retries(method, url, *, service, **kwargs)`** (`:183-206`) — **tests de connexion uniquement** (OpenRouter `/key` pour Nano Banana et Kling, xAI `/models`) : `timeout` par défaut `CONNECTION_TEST_TIMEOUT = 180` s ; jusqu'à `CONNECTION_TEST_RETRIES = 3` essais ; pause `_RETRY_BACKOFF × attempt` (1,5 s puis 3,0 s) seulement si hoquet réseau ; renvoie la Response même en 4xx/5xx ; après échec réseau : log puis `ProviderError(f"{service} ne répond pas (serveur lent ou connexion instable) — réessaie dans un instant. Ce n'est pas forcément une clé invalide.")`. `gradium_check` (`:356-377`) et `brain.anthropic_check` (`app/brain.py:264-298`, client `timeout=180, max_retries=0`) reproduisent la même boucle. Les générations réelles n'utilisent **pas** ce mécanisme.
+- Endpoints des tests : `GET https://openrouter.ai/api/v1/key` (`:733`, `:1014`, service `"OpenRouter/Kling"` pour Kling), `GET https://api.x.ai/v1/models` (`:879`).
 - Messages spécifiques des générations (verbatim) :
   - Gradium TTS (`:224-237`) : `"Conversion audio impossible (ffmpeg introuvable) — choisis le format WAV dans Réglages, ou installe ffmpeg (voir le README)."` (si « ffmpeg » dans l'erreur) ; réseau → `_friendly_network("Gradium")` ; sinon `"La génération de la voix a échoué — vérifie ta clé et ta voix Gradium (Réglages)."`.
-  - HeyGen : `"HeyGen n'a pas accepté l'audio — réessaie ; si ça persiste, vérifie ta clé HeyGen (Réglages)."` (`:423`) ; `"HeyGen n'a pas pu lancer la vidéo — réessaie."` (`:478`) ; `"HeyGen n'a pas renvoyé la vidéo finie — réessaie."` (`:510`) ; `"HeyGen n'a pas pu finir la vidéo — réessaie ; si ça persiste, l'avatar ou la voix pose peut-être problème."` (`:515-518`) ; `"La vidéo HeyGen met trop de temps — réessaie plus tard."` (`:521`) ; HTTP ≥ 400 → `_friendly_http("HeyGen", code)`.
   - Nano Banana : `"Clé API OpenRouter (Nano Banana) manquante — ajoute-la dans Réglages."` (`:654`) ; réseau → `_friendly_network("OpenRouter")` ; HTTP → `_friendly_http("OpenRouter")` ; `"Le modèle n'a pas renvoyé d'image — réessaie, ou change de modèle d'image (Réglages)."` (`:693-695`).
   - Grok : `"Clé API xAI (Grok) manquante — ajoute-la dans Réglages."` (`:789`) ; réseau création → `_friendly_network("xAI (Grok)")` ; HTTP → `_friendly_http("xAI")` ; `"L'animation Grok a échoué (réponse inattendue) — réessaie."` (`:822`) ; `"L'animation Grok a échoué — réessaie."` (`:835`) ; `"L'animation Grok met trop de temps — réessaie plus tard."` (`:839`).
   - Kling : `"Clé API OpenRouter manquante — ajoute-la dans Réglages (requise pour Kling)."` (`:924`) ; `"L'animation vidéo (Kling) a échoué — réessaie."` (`:961`) ; `"L'animation vidéo (Kling) a échoué (réponse inattendue) — réessaie."` (`:964`) ; `"L'animation vidéo (Kling) met trop de temps — réessaie plus tard."` (`:975`) ; `"Kling n'a pas produit de vidéo — réessaie."` (`:980`).
-- `_clean_key` retire espaces et caractères invisibles (`﻿`, `\xa0`, zero-width, `⁠`) en début/fin (`app/providers.py:612-617`) — appliqué à OpenRouter et xAI, **pas** à Gradium/HeyGen.
+- `_clean_key` retire espaces et caractères invisibles (`﻿`, `\xa0`, zero-width, `⁠`) en début/fin (`app/providers.py:612-617`) — appliqué à OpenRouter et xAI, **pas** à Gradium.
 
 ---
 
@@ -7575,26 +6618,23 @@ job "voix_off" → pipeline.generate_voiceover(cfg, ad_id, ad_name, segments, fu
 5. **Préfixe sans image sur plan neutre** : si `refs_needed == []`, `_select_clip_refs` n'envoie aucune image, pas même l'ancre (`app/pipeline.py:446`, `:451`), mais le préfixe « the FIRST reference image is the LOCKED character… » est quand même ajouté (`:472`) → consigne contradictoire.
 6. **UI refs ambiguë** : `_ad_shots_response` renvoie `refs_needed` normalisé `or []` (`app/main.py:1498`) → le front ne distingue pas `None` (toutes les réfs) de `[]` (aucune). Décocher la dernière puce enregistre `[]` (`app/main.py:649-650`), ce qui coupe toutes les réfs du plan.
 7. **Plafond de dépense Grok sous-estimé** : `estimate_objet` utilise une durée fixe `GROK_DEFAULT_CLIP_SECONDS = 5` (`app/cost.py:74-86`, `app/config_app.py:176`) alors que la durée réelle est `clamp(ceil(mots/débit), 4, 12)` (`app/config_app.py:217-228`) ; l'estimation omet aussi les 0,01 $/image d'entrée que `record_grok_clip` ajoute (`app/cost.py:108`). Le coût réel peut dépasser le plafond sans le déclencher. Les estimations d'images utilisent 0,04 $ (`NANO_BANANA_COST_PER_IMAGE_USD`) alors que le modèle par défaut est comptabilisé 0,045 $ (`app/config_app.py:157-161`).
-8. **Coût HeyGen estimé, pas mesuré** : `record_heygen_clip` reçoit `mots / 2.5` (`app/pipeline.py:165`), pas la durée réelle du MP4 ; Grok enregistre la durée demandée (`app/pipeline.py:580`) ; Kling prend `usage.cost` s'il est > 0.
-9. **Coûts non tracés en cas d'échec tardif** : `record_*` n'est appelé qu'après succès complet (ex. `app/pipeline.py:163-166`, `:575-580`, `:625-635`). Un rendu facturé par le fournisseur mais dont le téléchargement échoue n'est jamais enregistré ; `billed_despite_failure` (`app/main.py:1473`) ne s'allume que si d'autres coûts existent.
-10. **Relance avatar : voix et mode peuvent changer** : `voice_label` et `cost_mode` ne sont pas persistés avec la pub (`app/main.py:489-496`, `create_ad` ne stocke que `avatar_label`) ; `/api/generate/retry` reprend la 1re voix de la liste et le `cost_mode` des Réglages (`app/main.py:528`, `app/settings_service.py:13`, `:33`). Elle régénère aussi la voix (coût Gradium) même si l'échec était côté HeyGen (`app/pipeline.py:123-131`).
-11. **Clips orphelins après fermeture** (§1.4) : pub bloquée `en_cours`, clips `en_attente`/`voix_pret` jamais repris par retry/resume (qui ne prennent que `echec`, `app/main.py:534`, `:1556`).
-12. **Barre de progression d'animation bloquée** : `snapshot.done` ne compte que `phase ∈ {"pret","erreur"}` (`app/jobs.py:69`) alors qu'un clip animé réussi émet `phase: "clip"` (`app/pipeline.py:522`) → `done` n'inclut que les échecs pour les jobs `objet_animate`/`mashup_animate` ; les barres `objAnimProgFill`/`mashAnimProgFill` (`app/static/app.js:1661-1663`, `:2804-2806`) restent à 0 % pour les succès (les modales finales utilisent `summary.ok`).
-13. **Progression objet : ids désalignés** : `initAnimProgress` crée `anim-1…anim-k` (`app/static/app.js:1627-1637`) alors que les événements portent `scene = scene_n` réel (`app/pipeline.py:515`) → si les plans validés ne sont pas 1..k, les lignes ne se mettent pas à jour.
-14. **Job objet_animate : total/scènes incomplets** : la route ne passe que les plans `valide` (`app/main.py:676`, `:686`) mais le pipeline anime aussi les `echec` avec image (`app/pipeline.py:553-556`) → événements des plans `echec` ignorés par `Job.on_update` (`app/jobs.py:56`) et `total` sous-estimé. Et si tous les plans à reprendre sont `echec`, la route `animate` refuse (400) : il faut passer par `resume`.
-15. **Statut pub « objet_images » pour un Mashup** et summary `status: "termine"` constant après animation (`app/pipeline.py:530-532`), quel que soit le résultat ; seul l'état du job (`partiel`) signale les échecs.
-16. **Statuts audio sans échec** : `voix_seules` / `voix_off` sont posés même si 100 % des segments échouent (`app/pipeline.py:341`, `:770`).
-17. **Exception globale → pub « echec »** : `app/jobs.py:152` écrase le statut même pour une pub déjà `termine` (ex. reprise ou « Tester ce plan » qui lève `RuntimeError` si le clip a changé de statut entre la route et le job, `app/pipeline.py:511-512`). Le message `RuntimeError` précis est remplacé par le message générique (`app/jobs.py:27-28`).
-18. **Faux diagnostic ffmpeg** : toute exception dont le texte contient « ffmpeg » (y compris `CalledProcessError`, dont le message inclut la commande `['ffmpeg', …]`) devient `FFMPEG_MISSING_MSG` (« ffmpeg est introuvable ») sans log du détail (`app/pipeline.py:50-51`, `app/jobs.py:25-26`) ; ex. un échec `drawtext` du placeholder (stderr capturé, `app/media.py:169`) ou une conversion MP3 ratée alors que ffmpeg est installé (`app/providers.py:228-232`).
-19. **Erreurs réseau non traduites côté génération** : `heygen_upload_audio`, `heygen_create_video`, le polling HeyGen, le polling Grok (`app/providers.py:824-827`), le polling Kling (`:966`), `_download` (`raise_for_status`, `:1030-1031`) et le téléchargement d'image OpenRouter (`:718-719`) ne sont pas enveloppés : un timeout / 4xx de téléchargement remonte en exception `requests` → message générique « La génération a échoué… » au lieu du message réseau.
-20. **Messages de test écrasés** : les appelants de `_request_with_retries` attrapent `Exception` et remplacent sa `ProviderError` explicite par `_friendly_network(...)` (`app/providers.py:545-547`, `:585-587`, `:604-606`, `:740-742`, `:886-888`, `:1021-1023`). Pire cas d'un `/api/test-connection` réel : 4 tests × (3 × 180 s + 4,5 s) + Gradium + Anthropic, exécutés séquentiellement (`app/main.py:416-421`).
-21. **`_parallel_map` sans filet** (`app/pipeline.py:94-105`) : `db.create_clip` (`:123`) et `_emit_clip_failure` (`:142`) sont hors `try` dans `_voice_one_scene` ; une erreur base à cet endroit fait échouer tout le job avatar.
-22. **Pas de verrou par pub** : deux jobs peuvent tourner sur la même pub (double clic consistency/animate/resume) et écrire les mêmes fichiers `{n}.png`/`{n}.mp4` (`app/pipeline.py:473`, `:517`) et les mêmes clips.
-23. **Pas de limite de longueur par scène avatar** alors que Gradium est limité à ~1500 caractères par session (`app/config_app.py:40-41`) ; seule la voix off découpe (`app/pipeline.py:647`).
-24. **`gradium_sample_voice` réel non enveloppé** (`app/providers.py:314`) : une erreur SDK n'est pas convertie en `ProviderError` ; la route n'attrape que `ProviderError` (`app/main.py:352-355`).
-25. **Commentaires « Kling 1080p » inexacts** : les modèles Kling ne déclarent que `720p` (`app/config_app.py:368-375`) ; seuls Veo/Seedance servent 1080p.
-26. **`_unique_pub_dir` non atomique** : test `exists()` puis `mkdir(exist_ok=True)` (`app/pipeline.py:246-248`) ; deux pubs homonymes simultanées pourraient partager un dossier. Un nom réutilisé une 3e fois retombe sur `{nom}_{ad_id}`, toujours unique car `ad_id` est unique.
-27. **Durée Mashup UI vs backend** : input front 3–10 s (`app/static/app.js:2625`), clamp backend 3–12 s (`app/config_app.py:393-394`, `:401-407`) ; le prompt système demande 3–10 (`app/brain.py:769`).
+8. **Coût estimé, pas mesuré** : Grok enregistre la durée demandée (`app/pipeline.py:580`) ; Kling prend `usage.cost` s'il est > 0.
+9. **Coûts non tracés en cas d'échec tardif** : `record_*` n'est appelé qu'après succès complet (ex. `app/pipeline.py:575-580`, `:625-635`). Un rendu facturé par le fournisseur mais dont le téléchargement échoue n'est jamais enregistré ; `billed_despite_failure` (`app/main.py:1473`) ne s'allume que si d'autres coûts existent.
+10. **Clips orphelins après fermeture** (§1.4) : pub bloquée `en_cours`, clips `en_attente` jamais repris par resume (qui ne prend que `echec`, `app/main.py:1556`).
+11. **Barre de progression d'animation bloquée** : `snapshot.done` ne compte que `phase ∈ {"pret","erreur"}` (`app/jobs.py:69`) alors qu'un clip animé réussi émet `phase: "clip"` (`app/pipeline.py:522`) → `done` n'inclut que les échecs pour les jobs `objet_animate`/`mashup_animate` ; les barres `objAnimProgFill`/`mashAnimProgFill` (`app/static/app.js:1661-1663`, `:2804-2806`) restent à 0 % pour les succès (les modales finales utilisent `summary.ok`).
+12. **Progression objet : ids désalignés** : `initAnimProgress` crée `anim-1…anim-k` (`app/static/app.js:1627-1637`) alors que les événements portent `scene = scene_n` réel (`app/pipeline.py:515`) → si les plans validés ne sont pas 1..k, les lignes ne se mettent pas à jour.
+13. **Job objet_animate : total/scènes incomplets** : la route ne passe que les plans `valide` (`app/main.py:676`, `:686`) mais le pipeline anime aussi les `echec` avec image (`app/pipeline.py:553-556`) → événements des plans `echec` ignorés par `Job.on_update` (`app/jobs.py:56`) et `total` sous-estimé. Et si tous les plans à reprendre sont `echec`, la route `animate` refuse (400) : il faut passer par `resume`.
+14. **Statut pub « objet_images » pour un Mashup** et summary `status: "termine"` constant après animation (`app/pipeline.py:530-532`), quel que soit le résultat ; seul l'état du job (`partiel`) signale les échecs.
+15. **Statuts audio sans échec** : `voix_off` est posé même si 100 % des segments échouent (`app/pipeline.py:770`).
+16. **Exception globale → pub « echec »** : `app/jobs.py:152` écrase le statut même pour une pub déjà `termine` (ex. reprise ou « Tester ce plan » qui lève `RuntimeError` si le clip a changé de statut entre la route et le job, `app/pipeline.py:511-512`). Le message `RuntimeError` précis est remplacé par le message générique (`app/jobs.py:27-28`).
+17. **Faux diagnostic ffmpeg** : toute exception dont le texte contient « ffmpeg » (y compris `CalledProcessError`, dont le message inclut la commande `['ffmpeg', …]`) devient `FFMPEG_MISSING_MSG` (« ffmpeg est introuvable ») sans log du détail (`app/pipeline.py:50-51`, `app/jobs.py:25-26`) ; ex. un échec `drawtext` du placeholder (stderr capturé, `app/media.py:169`) ou une conversion MP3 ratée alors que ffmpeg est installé (`app/providers.py:228-232`).
+18. **Erreurs réseau non traduites côté génération** : le polling Grok (`app/providers.py:824-827`), le polling Kling (`:966`), `_download` (`raise_for_status`, `:1030-1031`) et le téléchargement d'image OpenRouter (`:718-719`) ne sont pas enveloppés : un timeout / 4xx de téléchargement remonte en exception `requests` → message générique « La génération a échoué… » au lieu du message réseau.
+19. **Messages de test écrasés** : les appelants de `_request_with_retries` attrapent `Exception` et remplacent sa `ProviderError` explicite par `_friendly_network(...)` (`app/providers.py:545-547`, `:585-587`, `:604-606`, `:740-742`, `:886-888`, `:1021-1023`). Pire cas d'un `/api/test-connection` réel : 4 tests × (3 × 180 s + 4,5 s) + Gradium + Anthropic, exécutés séquentiellement (`app/main.py:416-421`).
+20. **Pas de verrou par pub** : deux jobs peuvent tourner sur la même pub (double clic consistency/animate/resume) et écrire les mêmes fichiers `{n}.png`/`{n}.mp4` (`app/pipeline.py:473`, `:517`) et les mêmes clips.
+21. **`gradium_sample_voice` réel non enveloppé** (`app/providers.py:314`) : une erreur SDK n'est pas convertie en `ProviderError` ; la route n'attrape que `ProviderError` (`app/main.py:352-355`).
+22. **Commentaires « Kling 1080p » inexacts** : les modèles Kling ne déclarent que `720p` (`app/config_app.py:368-375`) ; seuls Veo/Seedance servent 1080p.
+23. **`_unique_pub_dir` non atomique** : test `exists()` puis `mkdir(exist_ok=True)` (`app/pipeline.py:246-248`) ; deux pubs homonymes simultanées pourraient partager un dossier. Un nom réutilisé une 3e fois retombe sur `{nom}_{ad_id}`, toujours unique car `ad_id` est unique.
+24. **Durée Mashup UI vs backend** : input front 3–10 s (`app/static/app.js:2625`), clamp backend 3–12 s (`app/config_app.py:393-394`, `:401-407`) ; le prompt système demande 3–10 (`app/brain.py:769`).
 
 ---
 
@@ -7654,7 +6694,7 @@ Les promesses renvoyées ne sont pas attendues ni `catch`ées (rejets non géré
 
 ### 1.5 Onboarding — `maybeOnboarding()` (app.js:2828-2857)
 1. `GET /api/onboarding` (main.py:65-68 → `{show: onboarding_seen != "1"}`).
-2. Si `show` : `showModal` avec titre « Bienvenue dans Pipeline UGC 👋 », `html` statique (app.js:2834-2848 : simulation sans clé, liste des fournisseurs Anthropic / Gradium / HeyGen / OpenRouter / xAI), boutons « Ouvrir les Réglages » / « Plus tard ».
+2. Si `show` : `showModal` avec titre « Bienvenue dans Pipeline UGC 👋 », `html` statique (app.js:2834-2848 : simulation sans clé, liste des fournisseurs Anthropic / Gradium / OpenRouter / xAI), boutons « Ouvrir les Réglages » / « Plus tard ».
 3. Quel que soit le choix : `POST /api/onboarding/seen` (main.py:70-74), erreurs ignorées.
 4. Si confirmé → `gotoSection("settings")`. Tout est dans un `try/catch` muet.
 
@@ -7672,26 +6712,18 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 ### 2.1 Squelette
 - `div.app` (index.html:10) → `aside.sidebar` (12-29) + `main.content` (32-548).
-- Sidebar : `.brand` (logo « ▶ », « Pipeline UGC », sous-titre « Gradium → HeyGen », 13-19) ; `nav` avec 5 `button.nav-item` : `dashboard` (actif par défaut, 21), `new` (22), `library` (23), `costs` (24), `settings` (25) ; `#modeBadge` (27) ; `#appVersion` (28).
+- Sidebar : `.brand` (logo « ▶ », « Pipeline UGC », 13-19) ; `nav` avec 5 `button.nav-item` : `dashboard` (actif par défaut, 21), `new` (22), `library` (23), `costs` (24), `settings` (25) ; `#modeBadge` (27) ; `#appVersion` (28).
 - `#ffmpegWarn.ffmpeg-warn.hidden` (35-40) : texte « ffmpeg est introuvable… `winget install Gyan.FFmpeg`… Le mode simulation fonctionne sans ffmpeg. »
 - Hors `.app` : modale `#modalOverlay.modal-overlay.hidden` (552-561) contenant `.modal[role=dialog]` → `#modalTitle` (554), `#modalBody` (555), `.modal-actions` → `#modalCancel` « Annuler » (557), `#modalConfirm.primary` « Continuer » (558) ; `#toast.toast.hidden` (563).
 
 ### 2.2 Tableau de bord — `section#dashboard.panel.active` (index.html:44-56)
 1. `header.panel-head` : `h1` « Tableau de bord », `#refreshDash` « ↻ Rafraîchir » (47).
-2. `.cards` : 3 `.card` → `#gradiumCredits` (50, « Crédits Gradium »), `#heygenQuota` (51, « Quota HeyGen »), `#totalVideos` (52, « Vidéos générées »), valeur initiale « — ».
+2. `.cards` : `.card` → `#gradiumCredits` (50, « Crédits Gradium »), `#totalVideos` (52, « Vidéos générées »), valeur initiale « — ».
 3. `h2` « Activité récente », `ul#activityList.activity` (55).
 
 ### 2.3 Nouvelle pub — `section#new.panel` (index.html:59-362)
 - `h1` « Nouvelle pub » (60), `h2` « 1. Style d'UGC » (63).
-- `#styleCards.styles` (64-81) : 4 `button.style-card` avec `data-style` = `avatar` (actif, 65), `objet_vivant` (69), `voix_off` (73), `mashup` (77) ; chacune `.style-emoji`, `.style-name`, `.style-tag` « disponible ».
-
-**Flux Avatar — `#avatarFlow`** (84-148, visible par défaut)
-1. `h2` « 2. Avatar & voix » ; `.row.grid2` : `select#avatarSelect` (88), `select#voiceSelect` (89, « Voix Gradium »).
-2. `h2` « 3. Ton script & ton brief » ; `textarea#scriptText` rows=7 (95, « Script (verbatim — jamais modifié) ») ; `textarea#briefText` rows=3 (98).
-3. `.row` : `#brainBtn.primary` « 🧠 Générer les scènes » (101), `#importJsonBtn` « Importer un scenes.json » (102), `input#scenesFile[type=file][accept=.json].hidden` (103).
-4. `#brainMsg.test-result` (105).
-5. `#adPreview.hidden` (108-138) : `h2` « 4. Scènes générées » ; `input#adName` (111, « Nom de la pub ») ; `#scenesPreview.scenes-preview` (113) ; `h2` « 5. Mode qualité / coût » ; `#modeCards.modes` (116-132) : `button.mode-card[data-mode=premium]` (117, « 💎 Premium », « Avatar V + mouvement custom · qualité max », `#modeCostPremium`), `[data-mode=classique]` (122, « 💠 Classique », « Avatar IV · gestes automatiques · moins cher », `#modeCostClassique`), `[data-mode=voix_seules]` (127, « 🎙️ Voix seules », `#modeCostVoix` = texte fixe « 0 crédit API ») ; `#estimate.estimate` (133) ; `#generateBtn.primary` « 🎬 Générer les vidéos » (136).
-6. `#progressArea.hidden` (140-147) : `h2` « Progression — voix d'abord (2 max), puis vidéos en parallèle » ; `#progPhase.prog-phase` (142) ; `.progressbar > #progFill.progressbar-fill` (143) ; `#progCount.prog-count` (144) ; `ul#sceneProgress.scene-progress` (145) ; `#retryFailedBtn.danger-outline.hidden` « 🔁 Réessayer les scènes en échec » (146).
+- `#styleCards.styles` (64-81) : `button.style-card` avec `data-style` = `objet_vivant` (69), `voix_off` (73), `mashup` (77) ; chacune `.style-emoji`, `.style-name`, `.style-tag` « disponible ».
 
 **Flux Objet animé — `#objetFlow.hidden`** (151-244)
 1. `h2` « 2. Ton produit » ; `input#objProduct` (155, « Nom du produit (optionnel) »).
@@ -7727,8 +6759,8 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 ### 2.4 Bibliothèque — `section#library.panel` (index.html:365-382)
 1. `h1` « Bibliothèque », `#refreshLib` « ↻ Rafraîchir » (368).
-2. `.subtabs` : 5 `button.subtab[data-libtab]` = `avatar` (actif, 371, « 🎬 Avatar »), `objet` (372, « 📦 Objet animé »), `mashup` (373, « 🎬 Mashup IA »), `voices` (374, « 🎙️ Voix off »), `photos` (375, « 🖼️ Photos »).
-3. 5 `div.lib-panel[data-libpanel]` (les 4 derniers `.hidden`) contenant respectivement `#libAvatarContent` (377), `#libObjetContent` (378), `#libMashupContent` (379), `#libVoicesContent` (380), `#photosContent` (381).
+2. `.subtabs` : `button.subtab[data-libtab]` = `objet` (372, « 📦 Objet animé »), `mashup` (373, « 🎬 Mashup IA »), `voices` (374, « 🎙️ Voix off »), `photos` (375, « 🖼️ Photos »).
+3. `div.lib-panel[data-libpanel]` contenant respectivement `#libObjetContent` (378), `#libMashupContent` (379), `#libVoicesContent` (380), `#photosContent` (381).
 
 ### 2.5 Coûts — `section#costs.panel` (index.html:385-431)
 1. `h1` « Coûts — dépenses estimées (générations réelles) » ; `.head-actions` : `#refreshCosts` (389), `#resetCosts` « 🗄 Archiver & repartir de zéro » (390, `title` explicatif).
@@ -7739,21 +6771,18 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 ### 2.6 Réglages — `section#settings.panel` (index.html:434-546)
 **Bloc « Clés & voix »** (437-495), dans l'ordre :
-`input#gradiumKey[type=password]` (439) ; `#heygenKey` (440) ; `#openrouterKey` (441-442, « Nano Banana — images « Objet animé », format sk-or-v1-… ») ; `#xaiKey` (443-444) ; `#anthropicKey` (445) ; `input#brainModel[type=text]` (446) ; `input#gradiumModel` (447) ; `select#audioFormat` (449) ; paragraphe sur le moteur HeyGen (451-452) ; `input#heygenVoiceId` (453) ; `select#costModeDefault` (454-458) avec 2 options statiques `premium` (« Premium — Avatar V + mouvement custom (~4 cr/s, plus cher) ») et `classique` (« Classique — Avatar IV, gestes auto (~1,5 cr/s, moins cher) ») ; `select#objetImageModel` (461) ; `select#objetVideoModel` (464) ; `select#mashupVideoModel` (467) ; `select#objetVoiceStyle` (470) ; `select#objetVoicePace` (473) ; `select#objetStyle` (476, « Style visuel « Objet vivant » ») ; `.row` : `#objetStylePreviewBtn.small` « 👁️ Aperçu du style » (479) + `span#objetStyleMsg` (480) ; `#objetStylePreview.style-preview` (482) ; `input#spendCap[type=number][min=0][step=1]` placeholder « 25 » (484, « Plafond de dépense par génération ($) (0 = aucun plafond) ») ; `input#dryRun[type=checkbox]` (487, « Mode simulation (aucune clé requise, aucun crédit dépensé) ») ; `#saveSettings.primary` « 💾 Enregistrer » (491) ; `#testConn` « 🔌 Tester la connexion » (492) ; `#testResult.test-result` (494).
+`input#gradiumKey[type=password]` (439) ; `#openrouterKey` (441-442, « Nano Banana — images « Objet animé », format sk-or-v1-… ») ; `#xaiKey` (443-444) ; `#anthropicKey` (445) ; `input#brainModel[type=text]` (446) ; `input#gradiumModel` (447) ; `select#audioFormat` (449) ; `select#objetImageModel` (461) ; `select#objetVideoModel` (464) ; `select#mashupVideoModel` (467) ; `select#objetVoiceStyle` (470) ; `select#objetVoicePace` (473) ; `select#objetStyle` (476, « Style visuel « Objet vivant » ») ; `.row` : `#objetStylePreviewBtn.small` « 👁️ Aperçu du style » (479) + `span#objetStyleMsg` (480) ; `#objetStylePreview.style-preview` (482) ; `input#spendCap[type=number][min=0][step=1]` placeholder « 25 » (484, « Plafond de dépense par génération ($) (0 = aucun plafond) ») ; `input#dryRun[type=checkbox]` (487, « Mode simulation (aucune clé requise, aucun crédit dépensé) ») ; `#saveSettings.primary` « 💾 Enregistrer » (491) ; `#testConn` « 🔌 Tester la connexion » (492) ; `#testResult.test-result` (494).
 
-**Bloc « Avatars »** (497-522) : `ul#avatarsList.avatars` (500) ; `input#newAvatarLabel` (502) ; `input#newAvatarId` (503) ; `#addAvatar` « + Ajouter » (506) ; `#browseHeygenBtn` « 🖼️ Parcourir les avatars HeyGen » (507) ; `#heygenPicker.heygen-picker.hidden` (509-521) : `input#heygenSearch[type=search]` (511), `select#heygenGender` (512-516 : `""` Tous genres / `male` Homme / `female` Femme), `#heygenRefresh.small` « ↻ Rafraîchir » (517), `#heygenMsg.muted` (519), `#heygenGrid.heygen-grid` (520).
-
-**Bloc « Voix Gradium »** (524-545) : `ul#voicesList.avatars` (527) ; `input#newVoiceLabel` (529) ; `input#newVoiceId` (530) ; `#addVoice` (533) ; `#browseVoicesBtn` « 🎙️ Parcourir les voix Gradium » (534) ; `#voicePicker.heygen-picker.hidden` (536-544) : `input#voiceSearch` (538), `select#voiceLang` (539, option initiale « Toutes langues »), `#voiceRefresh.small` (540), `#voiceMsg` (542), `#voiceList.voice-list` (543).
+**Bloc « Voix Gradium »** (524-545) : `ul#voicesList.avatars` (527) ; `input#newVoiceLabel` (529) ; `input#newVoiceId` (530) ; `#addVoice` (533) ; `#browseVoicesBtn` « 🎙️ Parcourir les voix Gradium » (534) ; `#voicePicker.hidden` (536-544) : `input#voiceSearch` (538), `select#voiceLang` (539, option initiale « Toutes langues »), `#voiceRefresh.small` (540), `#voiceMsg` (542), `#voiceList.voice-list` (543).
 
 ---
 
 ## 3. Écrans : fonctions, endpoints, rendu
 
 ### 3.1 Tableau de bord
-- **`loadDashboard()`** (app.js:562-578) → `GET /api/dashboard` (app.js:563 ; main.py:433-442, renvoie `dry_run`, `gradium_credits`, `heygen_quota`, `total_videos = db.count_clips("pret")`, `activity = db.recent_activity(15)`).
+- **`loadDashboard()`** (app.js:562-578) → `GET /api/dashboard` (app.js:563 ; main.py:433-442, renvoie `dry_run`, `gradium_credits`, `total_videos = db.count_clips("pret")`, `activity = db.recent_activity(15)`).
   - `setModeBadge(!!d.dry_run)`.
   - `renderCredits($("gradiumCredits"), d.gradium_credits)` (app.js:607-614) : `—` si null ; `— (simulation)` si `c.simulation` ; sinon `remaining` parmi `remaining_credits|remaining|credits|balance`, `allocated` parmi `allocated_credits|allocated|total` → `setTile`.
-  - `renderQuota($("heygenQuota"), d.heygen_quota)` (app.js:616-628) : idem avec `remaining_quota|remaining|credits|balance` / `allocated_quota|allocated|total`, et si `q.remaining` est un objet, recherche à l'intérieur.
   - `#totalVideos` = `d.total_videos ?? "0"`.
   - `#activityList` : un `li` par entrée : `<span class="kind">kind</span><span>message</span><span class="when">fmtDate(ts)</span>` ; vide → « Aucune activité pour l’instant. ».
 - `#refreshDash` → `loadDashboard` (app.js:579).
@@ -7762,29 +6791,13 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 #### 3.2.1 Cartes de style (app.js:637-655)
 - Clic sur `.style-card` : si `disabled` ou classe `soon` → toast « Ce style arrive bientôt. » (aucune carte n'a ces états dans le HTML actuel) ; sinon bascule `active`, `selectedStyle = card.dataset.style`, `applyStyleFlow(selectedStyle)`.
-- **`applyStyleFlow(style)`** (app.js:650-655) : `hidden` sur `#avatarFlow` si ≠ `avatar`, `#objetFlow` si ≠ `objet_vivant`, `#voixoffFlow` si ≠ `voix_off`, `#mashupFlow` si ≠ `mashup`.
-- À l'ouverture de la section : `populateNewPubSelectors()` (app.js:811-815) → `populateAvatarSelect()`, `populateVoiceSelect()`, `populateSelectFromVoices("voVoiceSelect")`.
-
-#### 3.2.2 Flux Avatar
-| Étape | Fonction / handler | Endpoint + body exact | Rendu |
-|---|---|---|---|
-| Générer les scènes | `#brainBtn` click (app.js:658-682) | `POST /api/brain/generate-scenes` (app.js:669) body `{script, brief, style: selectedStyle, avatar_label}` (app.js:672) ; `script`/`brief` = `.value.trim()`, `avatar_label` = `#avatarSelect.value`. Garde-fous front : script vide → toast « Colle d'abord ton script. » ; avatar vide → toast « Choisis un avatar (ou ajoute-en un dans Réglages). ». | `#brainMsg` « 🧠 Découpage en cours… » puis `✓ N scènes générées (simulation)` ou `✗ message`. `parsedAd = {ad: r.ad, avatar: r.avatar, scenes: r.scenes}` puis `showPreview(parsedAd, r.estimate)`. Bouton désactivé pendant l'appel. |
-| Importer scenes.json | `#importJsonBtn` → `#scenesFile.click()` (app.js:685) ; `change` (app.js:686-709) | `FileReader.readAsText(f, "utf-8")` ; JSON invalide → toast « JSON invalide — vérifie le format. » ; `scenes` vide → toast « Aucune scène dans le JSON. ». `parsedAd = {ad: data.ad \|\| "pub", avatar: data.avatar, scenes}` ; `await populateNewPubSelectors(data.avatar, data.voice)` ; `POST /api/estimate` (app.js:701) body `{scenes}` (app.js:704). | `showPreview(parsedAd, est)`. Erreur de l'estimation non capturée (rejet non géré dans `onload`). |
-| Aperçu | **`showPreview(ad, est)`** (app.js:711-729) | — | `lastEstimate = est` ; `#adName.value = ad.ad \|\| "pub"` ; un `.scene-card` par scène : `#n` (ou index+1), `.script` (script), `.motion` « 🎭 motion_prompt » ; `renderModeCosts(est)` ; `selectMode(currentSettings.cost_mode \|\| "premium")` ; affiche `#adPreview`. |
-| Coûts des modes | **`renderModeCosts(est)`** (app.js:731-736) | — | `#modeCostPremium` = `≈ frNum(credits_par_mode.premium ?? 0) crédits · (taux_par_mode.premium ?? 4) cr/s` ; `#modeCostClassique` idem avec repli **`?? 2`** cr/s. |
-| Choix du mode | **`selectMode(mode)`** (app.js:738-744) ; clic `.mode-card` (app.js:767-769) | — | `selectedMode` = `classique` / `voix_seules` sinon `premium` ; classe `active` ; `updateEstimateLine()`. |
-| Ligne d'estimation | **`updateEstimateLine()`** (app.js:746-765) | — | Voix seules : « Mode Voix seules : 0 crédit API (N scènes — voix Gradium uniquement) » + « Un dossier avec les audios numérotés (1.wav, 2.wav…) + un récap s'ouvrira à la fin… ». Sinon : total = `credits_par_mode[selectedMode] ?? credits_estimes ?? 0`, `perScene = round(total/n)`, « Mode Premium/Classique : ≈ X crédits au total (N scènes, ~Y crédits/scène) » + « ~{minutes} min de vidéo · payé seulement en mode réel ». |
-| Générer | `#generateBtn` click (app.js:838-886) | Garde-fous : `!parsedAd` → rien ; hors voix seules sans avatar → toast ; pas de voix → toast « Choisis une voix (ou ajoute-en une dans Réglages). ». Si non voix seules et non simulation : `showModal` danger « Mode réel — dépense de crédits » / « Mode {label} : cette génération va dépenser ≈ {total} crédits HeyGen pour de vrai. Continuer ? » / « Générer ». Puis `POST /api/generate` (app.js:865) body `{ad_name: #adName.trim() \|\| "pub", avatar_label, voice_label, cost_mode: selectedMode, scenes, confirm: true}` (app.js:868-875). | Erreur → toast. Succès : `_lastAvatarAdId = res.ad_id` ; masque `#retryFailedBtn` ; affiche `#progressArea` ; `initSceneProgress(scenes)` ; `pollJob(res.job_id)`. |
-| Progression | **`initSceneProgress(scenes)`** (app.js:916-934) | — | Un `li#sp-{n}` par scène : `.sp-row` (`.dot`, « Scène n », `.phase` « en attente ») + `.scene-err`. `#progFill` 0 %, `#progCount` vide, `#progPhase` « Phase 1 — Voix (Gradium, 2 max)… » classe `prog-phase p1`. |
-| Suivi | `pollJob(jobId)` (app.js:961-1030) — voir §5 | `GET /api/jobs/{id}` | — |
-| Réessayer | `#retryFailedBtn` click (app.js:890-914) | Rien si `_lastAvatarAdId == null`. Hors simulation : modale danger « Relancer les scènes en échec » / « Cette relance va rappeler HeyGen (crédits) pour les scènes qui ont planté. Continuer ? » / « Réessayer ». `POST /api/generate/retry/{_lastAvatarAdId}` (app.js:903) body `{confirm: true}` (app.js:906). | Masque le bouton, toast « Relance de {res.retry} scène(s) en échec… », `pollJob(res.job_id)` (réutilise les `li#sp-n` existants). |
+- **`applyStyleFlow(style)`** (app.js:650-655) : `hidden` sur `#objetFlow` si ≠ `objet_vivant`, `#voixoffFlow` si ≠ `voix_off`, `#mashupFlow` si ≠ `mashup`.
+- À l'ouverture de la section : `populateNewPubSelectors()` (app.js:811-815) → `populateSelectFromVoices("voVoiceSelect")`.
 
 **Sélecteurs** :
-- **`populateAvatarSelect(selected)`** (app.js:771-789) : `s = currentSettings || await api("/api/settings")` (app.js:772) ; `currentSettings = s` ; une option par avatar : `value = label`, texte `label (avatar_id)` ; aucun → option `""` « — aucun avatar (ajoute-en dans Réglages) — ».
-- **`populateVoiceSelect(selected)`** (app.js:791-809) : idem pour `#voiceSelect`, `value = label`, texte = label seul (l'ID n'est jamais affiché) ; vide → « — aucune voix (ajoute-en dans Réglages) — ».
-- **`populateSelectFromVoices(selectId, selected)`** (app.js:818-836) : même rendu que `populateVoiceSelect` mais sans appel réseau (lit `currentSettings.voices`) ; utilisé pour `#voVoiceSelect`.
+- **`populateSelectFromVoices(selectId, selected)`** (app.js:818-836) : une option par voix (`value = label`, texte = label seul, l'ID n'est jamais affiché ; vide → « — aucune voix (ajoute-en dans Réglages) — »), sans appel réseau (lit `currentSettings.voices`) ; utilisé pour `#voVoiceSelect`.
 
-#### 3.2.3 Flux Objet animé
+#### 3.2.2 Flux Objet animé
 | Étape | Fonction / handler | Endpoint + body exact | Rendu |
 |---|---|---|---|
 | Mode manuel | `#objManual` change (app.js:1227-1231) | — | Montre/masque `.objManualOn`. |
@@ -7801,14 +6814,14 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 `#objAnimEstimate` (index.html:234) n'est jamais rempli par app.js (aucune référence dans le JS).
 
-#### 3.2.4 Flux Voix off
+#### 3.2.3 Flux Voix off
 | Étape | Handler | Endpoint + body | Rendu |
 |---|---|---|---|
 | Aperçu | `#voPreviewBtn` (app.js:1685-1704) | `POST /api/voiceover/preview` (app.js:1689) body `{script}` (app.js:1692), `script = $("voScript").value` non trimé. Vide → toast « Colle d'abord ton script. ». | `#voPreview` : « Découpage : 1 fichier audio » ou « N fichiers audio numérotés » + « (frNum(total_chars) caractères, limite 1500/segment) » + `#n — X car.` par segment séparés par « · » ; affiché. Erreur → toast. |
 | Générer | `#voGenBtn` (app.js:1706-1726) | Garde-fous script / voix. `POST /api/voiceover/generate` (app.js:1715) body `{ad_name, voice_label, script}` (app.js:1718) ; `ad_name = #voAdName.trim() \|\| "voix_off"`. **Aucune modale de confirmation** (même en mode réel). | Vide `#voMsg` (jamais rempli ensuite) ; affiche `#voProgress` ; `initVoProgress(res.segments)` ; `pollVoJob(res.job_id)`. |
 | Progression | **`initVoProgress(count)`** (app.js:1728-1741) | — | `li#vosp-1…count` « Segment i ». |
 
-#### 3.2.5 Flux Mashup IA
+#### 3.2.4 Flux Mashup IA
 | Étape | Handler | Endpoint + body | Rendu |
 |---|---|---|---|
 | Ratios | IIFE `initMashRatios` (app.js:2383-2392) | — | Options `9:16` (« 9:16 (vertical, défaut) »), `1:1`, `4:5`, `16:9`, `3:2` (identiques à `config_app.IMAGE_RATIOS`, config_app.py:54). |
@@ -7824,15 +6837,15 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 | Animer | `#mashAnimateBtn` (app.js:2742-2781) | `!mashAdId` → toast. Hors simulation : modale danger « Animer les plans validés » / « Anime tous les plans validés avec le modèle vidéo choisi (payant, à la seconde). Continuer ? » (**aucun montant**). `POST /api/mashup/animate/{mashAdId}` (app.js:2755) body `{confirm: true}` ; si `/plafond/i` → modale puis re-POST (app.js:2769) body `{confirm: true, confirm_over_cap: true}`. | `#mashAnimProgress` ; `initMashAnimProgress(res.n_plans \|\| 1)` ; `pollMashAnimJob(res.job_id)`. |
 | Progression animation | **`initMashAnimProgress(n)`** (app.js:2783-2788) | — | Vide `ul#mashAnimSceneProgress` (aucun `li` créé), `#mashAnimProgFill` 0 %, `#mashAnimProgCount` = `0/{n} clips`. Les `li` sont reconstruits à chaque tick par `pollMashAnimJob` (pas d'id `li`). |
 
-### 3.3 Bibliothèque (5 onglets)
+### 3.3 Bibliothèque (4 onglets)
 - **`loadLibrary()`** (app.js:1913-1915) → `showLibTab(_libTab)`.
 - **`showLibTab(tab)`** (app.js:1897-1906) : `_libTab = tab`, classe `active` sur le `.subtab`, `hidden` sur les `.lib-panel` différents, `loadLibTab(tab)`.
 - Clic `.subtab` → `showLibTab(b.dataset.libtab)` (app.js:1908-1910). `#refreshLib` → `loadLibTab(_libTab)` (app.js:1916).
-- **`loadLibTab(tab)`** (app.js:1891-1895) : `avatar|objet|mashup` → `loadLibraryVideos()` (les 3 onglets vidéo sont rendus en même temps) ; `voices` → `loadVoicesLibrary()` ; `photos` → `loadPhotos()`.
+- **`loadLibTab(tab)`** (app.js:1891-1895) : `objet|mashup` → `loadLibraryVideos()` (les onglets vidéo sont rendus en même temps) ; `voices` → `loadVoicesLibrary()` ; `photos` → `loadPhotos()`.
 
 | Onglet | Fonction | Endpoint | Rendu |
 |---|---|---|---|
-| Avatar / Objet animé / Mashup IA | **`loadLibraryVideos()`** (app.js:1844-1852) | `GET /api/library` (app.js:1845 ; main.py:925-946) | Filtre `r.ads` par `kind` = `avatar` / `objet` / `mashup` ; `renderClipAds` dans `#libAvatarContent` (vide : « Aucune vidéo avatar (HeyGen) pour l’instant. »), `#libObjetContent` (« Aucun clip objet animé (Grok) pour l’instant. »), `#libMashupContent` (« Aucun clip Mashup IA pour l’instant. »). |
+| Objet animé / Mashup IA | **`loadLibraryVideos()`** (app.js:1844-1852) | `GET /api/library` (app.js:1845 ; main.py:925-946) | Filtre `r.ads` par `kind` = `objet` / `mashup` ; `renderClipAds` dans `#libObjetContent` (« Aucun clip objet animé (Grok) pour l’instant. »), `#libMashupContent` (« Aucun clip Mashup IA pour l’instant. »). |
 | Voix off | **`loadVoicesLibrary()`** (app.js:1855-1889) | `GET /api/library/voices` (app.js:1856 ; main.py:987-1010) | Par pub : `libAdHeader(ad, "audio", hasFiles)` (`hasFiles` = au moins un `audio_url`) ; par clip : si `audio_url` → `#scene_n` + lien `⬇ Télécharger` vers `/api/clips/{clip_id}/audio` (app.js:1876) + `<audio controls preload="none" src=audio_url>` + `.voice-script` (script) ; sinon `#n` + `.err` (`error \|\| "non généré"`). Vide → « Aucune voix off générée pour l’instant. ». |
 | Photos | **`loadPhotos()`** (app.js:1919-1956) | `GET /api/photos` (app.js:1920 ; main.py:948-973) | Par pub : `libAdHeader(ad, "image", hasFiles)` ; `.photo-grid` ; par image : `<img src=image_url?t=…>` (cache-buster, app.js:1938) ou « pas d'image », `#scene_n`, lien `⬇ Télécharger` `/api/clips/{clip_id}/image` (app.js:1948), lien « 🎬 clip animé » vers `video_url` (`target=_blank`, app.js:1940) ou « clip : non animé », `<details>` « prompt image (réutiliser) » avec le prompt. Vide → « Aucune image générée pour l’instant (objet animé). ». |
 
@@ -7843,7 +6856,7 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 - **`loadCosts()`** (app.js:2131-2134) : `applyCostView()` puis `Promise.all([loadCostTable(), loadCostChart(), loadArchives()])`.
 - **`applyCostView()`** (app.js:1997-2002) : `#costChartBlock` caché si `_costView === "table"`, `#costTableBlock` caché si `_costView === "chart"` (les archives sont toujours visibles).
 - **`loadCostTable()`** (app.js:2180-2187) → `GET /api/costs` (app.js:2181 ; main.py:1027-1032 = `cost.costs_report()` + `currency`). Met à jour `_costCurrency` (si `r.currency`), `_usdToEur` (si `r.usd_to_eur`), `applyCurrencyButtons()` (app.js:2174-2178), puis `#costsContent.innerHTML = costReportHTML(r)`.
-- **`costReportHTML(r, opts)`** (app.js:2137-2172) : `div.cost-total` « Total estimé : money(totals.usd) (dont frNum(credits) crédits HeyGen) · N génération(s) réelle(s) » ; `h3` « Par service » + `table.cost-table` (Service / Généré (`units`) / Coût estimé `money(usd)` + `(N cr)` si crédits) ou message vide (`opts.emptyMsg` ou « Aucune génération réelle pour l’instant (la simulation ne compte pas). ») ; `h3` « Par pub » + table (`name (kind)` / montant) ou « Aucune pub facturée sur cette période. » ; si `opts.note !== false` → `p.cost-note` « ⚠ {r.note} ».
+- **`costReportHTML(r, opts)`** (app.js:2137-2172) : `div.cost-total` « Total estimé : money(totals.usd) (dont frNum(credits) crédits de l'ancien fournisseur) · N génération(s) réelle(s) » ; `h3` « Par service » + `table.cost-table` (Service / Généré (`units`) / Coût estimé `money(usd)` + `(N cr)` si crédits) ou message vide (`opts.emptyMsg` ou « Aucune génération réelle pour l’instant (la simulation ne compte pas). ») ; `h3` « Par pub » + table (`name (kind)` / montant) ou « Aucune pub facturée sur cette période. » ; si `opts.note !== false` → `p.cost-note` « ⚠ {r.note} ».
 - **`loadCostChart()`** (app.js:2111-2119) → `GET /api/costs/timeseries?period={_costPeriod}` (app.js:2113 ; main.py:1041-1053 ; `cost.costs_timeseries`, cost.py:226-273). `_costData = d` ; `renderCostChart(d)`. Erreur → `#costChart` = `<p class="err">String(e)</p>` (affiche « Error: … »).
 - **`renderCostChart(d, opt)`** (app.js:2004-2092) — voir §6.6.
 - Légende principale (app.js:2122-2129) : délégation de clic sur `#costChartLegend` → bascule la clé `data-svc` dans `_costHidden`, re-rendu depuis `_costData` sans refetch.
@@ -7856,25 +6869,18 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 
 ### 3.5 Réglages
 - **`loadSettings()`** (app.js:109-176) → `GET /api/settings` (app.js:110 ; main.py:95-151). Écrit `currentSettings = s` puis :
-  - `setKeyField(id, isSet)` (app.js:98-107) pour `gradiumKey`, `heygenKey`, `openrouterKey`, `xaiKey`, `anthropicKey` : valeur vidée, placeholder « •••••••• clé enregistrée (laisse vide pour la garder) » (classe `is-set`, bordure verte, style.css:100-101) ou « colle ta clé ici ».
-  - `#gradiumModel` = `s.gradium_model || "default"` ; `#heygenVoiceId` ; `#brainModel` = `s.brain_model || "claude-sonnet-5"` ; `#costModeDefault` = `s.cost_mode || "premium"`.
+  - `setKeyField(id, isSet)` (app.js:98-107) pour `gradiumKey`, `openrouterKey`, `xaiKey`, `anthropicKey` : valeur vidée, placeholder « •••••••• clé enregistrée (laisse vide pour la garder) » (classe `is-set`, bordure verte, style.css:100-101) ou « colle ta clé ici ».
+  - `#gradiumModel` = `s.gradium_model || "default"` ; `#brainModel` = `s.brain_model || "claude-sonnet-5"`.
   - Menus remplis depuis le serveur : `#objetImageModel` (`objet_image_models`), `#objetVideoModel` (`objet_video_models`), `#mashupVideoModel` (`mashup_video_models`), et via `fillSelect` (app.js:154-165) : `#objetVoiceStyle`, `#objetVoicePace`, `#objetStyle`, `#audioFormat`.
-  - `#dryRun.checked`, `#spendCap.value = s.spend_cap_usd ?? 25`, `setModeBadge`, `renderAvatars(s.avatars)`, `renderVoices(s.voices)`, `renderMashStyleChips(s.mashup_style_suggestions)`.
+  - `#dryRun.checked`, `#spendCap.value = s.spend_cap_usd ?? 25`, `setModeBadge`, `renderVoices(s.voices)`, `renderMashStyleChips(s.mashup_style_suggestions)`.
 - **Enregistrer** `#saveSettings` (app.js:234-263) → `POST /api/settings` (app.js:255) body exact :
-  `{gradium_api_key, heygen_api_key, openrouter_api_key, xai_api_key, gradium_model, heygen_voice_id, anthropic_api_key, brain_model, cost_mode, objet_image_model, objet_video_model, mashup_video_model, objet_voice_style, objet_voice_pace, objet_style, audio_format, dry_run, spend_cap_usd}` (app.js:235-254). Textes trimés ; les menus optionnels valent `""` si absents ; `spend_cap_usd = parseFloat(value)` ou `null` si champ vide. Puis `setModeBadge(body.dry_run)`, `await loadSettings()`, toast « Réglages enregistrés ✓ ». Pas de `try/catch` (erreur = rejet non géré, aucun message).
+  `{gradium_api_key, openrouter_api_key, xai_api_key, gradium_model, anthropic_api_key, brain_model, objet_image_model, objet_video_model, mashup_video_model, objet_voice_style, objet_voice_pace, objet_style, audio_format, dry_run, spend_cap_usd}` (app.js:235-254). Textes trimés ; les menus optionnels valent `""` si absents ; `spend_cap_usd = parseFloat(value)` ou `null` si champ vide. Puis `setModeBadge(body.dry_run)`, `await loadSettings()`, toast « Réglages enregistrés ✓ ». Pas de `try/catch` (erreur = rejet non géré, aucun message).
 - **Aperçu de style** `#objetStylePreviewBtn` (app.js:382-408) : hors simulation, modale danger « Générer l'aperçu du style » / « Aucun aperçu en cache pour ce style : on en génère un (1 image Nano Banana, payante au-delà du quota gratuit). Continuer ? » (affichée **même si un aperçu est déjà en cache**). `POST /api/objet/style-preview` (app.js:398) body `{style, confirm: true}` (app.js:400). `#objetStyleMsg` « Génération de l'aperçu… » puis « Aperçu (cache). » / « Aperçu généré. » ; `#objetStylePreview` = `<img src="{image_url}?t={Date.now()}">` ; erreur → « ✗ … ».
 - **Plafond** : `#spendCap` envoyé dans le POST /api/settings (backend : `max(0, float)` si non `null`, main.py:223-224 ; 0 = aucun plafond, main.py:1391).
 - **Simulation** : `#dryRun` envoyé dans `dry_run`.
-- **Tester la connexion** `#testConn` (app.js:529-559) → `POST /api/test-connection` (app.js:533, sans body). `#testResult` : « Test en cours… », puis si `r.dry_run` « Mode simulation : validation réelle désactivée. », puis 5 lignes via `line(label, o)` (✓/✗ + `o.message` ou « OK »/« échec », `ok = o.ok !== false`) dans l'ordre Gradium, HeyGen, « Nano Banana (images Objet animé) », « Grok (animation Objet animé) », « Anthropic (cerveau) », puis « N avatars trouvés sur le compte. » si `h.avatars` non vide. Erreur → `✗ message`.
-- **Avatars** :
-  - **`renderAvatars(avatars)`** (app.js:197-213) : `li` = `.lab` label + `.aid` avatar_id + bouton `.del` « ✕ » → `DELETE /api/avatars/{a.id}` (app.js:207) → `renderAvatars(res.avatars)`, toast « Avatar supprimé. ». Vide → « Aucun avatar pour le moment. ».
-  - `#addAvatar` (app.js:265-278) : label + avatar_id requis (toast « Label et avatar_id requis. ») → `POST /api/avatars` (app.js:269) body `{label, avatar_id}` (app.js:272) → `renderAvatars(res.avatars)`, champs vidés, toast « Avatar ajouté ✓ ».
-  - Sélecteur HeyGen : `#browseHeygenBtn` (app.js:283-289) bascule `#heygenPicker` et charge une fois (`heygenAvatars === null`) ; `#heygenRefresh` → `loadHeygenAvatars(true)` ; `input` sur `#heygenSearch` et `change` sur `#heygenGender` → `renderHeygenGrid`.
-  - **`loadHeygenAvatars(refresh)`** (app.js:295-318) → `GET /api/heygen/avatars?refresh=true|false` (app.js:300 ; main.py:241-287). Message « Rafraîchissement depuis HeyGen (peut prendre jusqu'à 3 min)… » / « Chargement… ». `r.simulation` → message simulation + liste vide. `!r.ok && !r.avatars` → `✗ message|note|« Échec du chargement des avatars HeyGen. »`. Sinon `heygenAvatars = {avatars, talking_photos}`, `#heygenMsg` = « N avatar(s) — cache local | à l'instant. » + « ⚠ note ».
-  - **`renderHeygenGrid()`** (app.js:320-337) : fusion avatars + talking_photos, filtre genre (`a.gender` en minuscules) et recherche (nom ou avatar_id), **tronqué à 200**, vide → « Aucun avatar ne correspond. ».
-  - **`heygenCard(a)`** (app.js:339-363) : image `preview_image_url` (lazy) ou « pas d'aperçu », badge « Classique » (warn) si `is_photo`, badge « Premium » si `premium`, nom, genre, bouton « Choisir » → pré-remplit `#newAvatarLabel` (slug `[^a-z0-9]+ → _`, 40 car.) et `#newAvatarId`, toast (avertissement photo avatar ou « Avatar pré-rempli — clique « + Ajouter » pour l'enregistrer. »), scroll.
+- **Tester la connexion** `#testConn` (app.js:529-559) → `POST /api/test-connection` (app.js:533, sans body). `#testResult` : « Test en cours… », puis si `r.dry_run` « Mode simulation : validation réelle désactivée. », puis des lignes via `line(label, o)` (✓/✗ + `o.message` ou « OK »/« échec », `ok = o.ok !== false`) dans l'ordre Gradium, « Nano Banana (images Objet animé) », « Grok (animation Objet animé) », « Anthropic (cerveau) ». Erreur → `✗ message`.
 - **Voix** :
-  - **`renderVoices(voices)`** (app.js:215-232) : idem avatars, `DELETE /api/voices/{v.id}` (app.js:225), met à jour `currentSettings.voices`.
+  - **`renderVoices(voices)`** (app.js:215-232) : `li` = `.lab` label + `.aid` voice_id + bouton `.del` « ✕ » → `DELETE /api/voices/{v.id}` (app.js:225), met à jour `currentSettings.voices`.
   - `#addVoice` (app.js:365-379) → `POST /api/voices` (app.js:369) body `{label, voice_id}` (app.js:372) → `currentSettings.voices = res.voices`, rendu, toast « Voix ajoutée ✓ ».
   - `#browseVoicesBtn` (app.js:413-417), `#voiceRefresh` (418), `#voiceSearch` (419), `#voiceLang` (420).
   - **`loadGradiumVoices(refresh)`** (app.js:422-448) → `GET /api/gradium/voices?refresh=…` (app.js:427 ; main.py:290-336). Simulation → message + `[]` ; `!r.ok && voices vide` → ✗ ; sinon remplit `#voiceLang` (langues uniques triées) et `#voiceMsg` « N voix — cache local | à l'instant. ».
@@ -7891,11 +6897,8 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 |---|---|---|---|---|
 | 15 | (générique) | `fetch(url, opts)` | — | `api()` |
 | 110 | GET | `/api/settings` | — | `loadSettings` |
-| 207 | DELETE | `/api/avatars/{a.id}` | — | `renderAvatars` (✕) |
 | 225 | DELETE | `/api/voices/{v.id}` | — | `renderVoices` (✕) |
-| 255 | POST | `/api/settings` | JSON 18 champs (app.js:235-254) | `#saveSettings` |
-| 269 | POST | `/api/avatars` | `{label, avatar_id}` | `#addAvatar` |
-| 300 | GET | `/api/heygen/avatars?refresh=true\|false` | — | `loadHeygenAvatars` |
+| 255 | POST | `/api/settings` | JSON (app.js:235-254) | `#saveSettings` |
 | 369 | POST | `/api/voices` | `{label, voice_id}` | `#addVoice` |
 | 398 | POST | `/api/objet/style-preview` | `{style, confirm: true}` | `#objetStylePreviewBtn` |
 | 427 | GET | `/api/gradium/voices?refresh=true\|false` | — | `loadGradiumVoices` |
@@ -7903,13 +6906,6 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 | 519 | POST | `/api/gradium/voices/{uid}/label` | `{label, gender, age}` | `tagVoice` |
 | 533 | POST | `/api/test-connection` | (aucun) | `#testConn` |
 | 563 | GET | `/api/dashboard` | — | `loadDashboard` |
-| 669 | POST | `/api/brain/generate-scenes` | `{script, brief, style, avatar_label}` | `#brainBtn` |
-| 701 | POST | `/api/estimate` | `{scenes}` | import scenes.json |
-| 772 | GET | `/api/settings` (si `currentSettings` null) | — | `populateAvatarSelect` |
-| 792 | GET | `/api/settings` (si `currentSettings` null) | — | `populateVoiceSelect` |
-| 865 | POST | `/api/generate` | `{ad_name, avatar_label, voice_label, cost_mode, scenes, confirm: true}` | `#generateBtn` |
-| 903 | POST | `/api/generate/retry/{_lastAvatarAdId}` | `{confirm: true}` | `#retryFailedBtn` |
-| 963 | GET | `/api/jobs/{jobId}` | — | `pollJob` |
 | 1066 | POST | `/api/clips/{clip_id}/refs` | `{refs_needed: next}` | `planRefsControls` |
 | 1085 | POST | `/api/clips/{clip_id}/anchor` | `{is_anchor: !s.is_anchor}` | `planRefsControls` |
 | 1212 | POST | `/api/objet/plan` | `{product_name, ambiance, persona, script, manual}` | `#objPlanBtn` |
@@ -7962,7 +6958,7 @@ Les trois appels partent en parallèle, non attendus. **`loadSettings()` n'est P
 | 2852 | POST | `/api/onboarding/seen` | (aucun) | `maybeOnboarding` |
 | 2862 | GET | `/api/health` | — | `loadHealth` |
 
-URLs `/media/…` utilisées indirectement (construites par le backend via `_media_url`, main.py:1305-1314) : `c.media_url` (vidéo, app.js:1828), `s.image_url` (galeries, app.js:1443, 2613), `im.image_url` / `im.video_url` (photos, 1943/1940), `r.image_url` (aperçu style, 404), `v.sample_url` (échantillon voix, 478/497), `a.preview_image_url` (URL HeyGen externe, 343).
+URLs `/media/…` utilisées indirectement (construites par le backend via `_media_url`, main.py:1305-1314) : `c.media_url` (vidéo, app.js:1828), `s.image_url` (galeries, app.js:1443, 2613), `im.image_url` / `im.video_url` (photos, 1943/1940), `r.image_url` (aperçu style, 404), `v.sample_url` (échantillon voix, 478/497).
 
 ---
 
@@ -7970,26 +6966,21 @@ URLs `/media/…` utilisées indirectement (construites par le backend via `_med
 
 | Variable (déclaration) | Rôle | Écrite par | Lue par |
 |---|---|---|---|
-| `currentSettings` (app.js:96) | Copie des réglages `GET /api/settings` | `loadSettings` 111 ; `populateAvatarSelect` 773 ; `populateVoiceSelect` 793 ; `.voices` par `renderVoices` (✕) 226 et `#addVoice` 374 | `dry_run` : 386, 482, 848, 892, 1257, 1381, 1496, 1549, 1583, 2512, 2662, 2691, 2719, 2744 ; `openrouter_api_key_set` : 1259, 1551, 2514 ; `xai_api_key_set` : 1584 ; `cost_mode` : 727 ; `voices` : 821 ; cache évitant le refetch : 772, 792 |
-| `heygenAvatars` (281) | Cache mémoire liste HeyGen | 303, 310 | 286, 321, 325 |
+| `currentSettings` (app.js:96) | Copie des réglages `GET /api/settings` | `loadSettings` 111 ; `.voices` par `renderVoices` (✕) 226 et `#addVoice` 374 | `dry_run` : 386, 482, 848, 892, 1257, 1381, 1496, 1549, 1583, 2512, 2662, 2691, 2719, 2744 ; `openrouter_api_key_set` : 1259, 1551, 2514 ; `xai_api_key_set` : 1584 ; `voices` : 821 ; cache évitant le refetch : 772, 792 |
 | `gradiumVoices` (411) | Cache mémoire catalogue Gradium | 430, 437 ; mutations d'objets `v` (496, 523) | 416, 451, 455 |
-| `parsedAd` (631) | Scènes de la pub avatar en cours | 674, 699 | 839-840 |
-| `selectedStyle` (632, défaut `"avatar"`) | Style de la carte active | 644 | 672 (envoyé en `style`) |
-| `selectedMode` (633, défaut `"premium"`) | Mode qualité/coût | 739 | 750, 758, 760, 843, 851-852, 872 |
-| `lastEstimate` (634) | Estimation avatar (`cost.estimate`) | 712 | 747, 851 |
-| `_lastAvatarAdId` (889, déclarée après son 1er usage textuel en 881 mais lue seulement dans des handlers) | Dernière pub avatar générée | 881 | 891, 903, 1023 |
+| `selectedStyle` (632) | Style de la carte active | 644 | — |
 | `objRefsFiles` / `objRefsKinds` (1033-1034) | Images de réf. Objet + type parallèle | push 1149-1150 ; splice 1133-1134 ; `objRefsKinds[idx] = v` 1139 | 1119, 1275-1276 |
 | `objShots` (1035) | Plans renvoyés par `/api/objet/plan` | 1217 | 1256, 1273, 1286, 1572 |
 | `objAdId` (1036) | Pub Objet en cours | 1284 | 1287, 1516, 1544, 1548, 1564, 1576, 1581, 1598, 1613, 1677 |
 | `lastObjEstimate` (1037) | Estimation `cost.estimate_objet(len(shots))` | 1234 | 1261, 1586 |
 | `REF_KIND_OPTS` (1040, const) | Types de réf | — | 1057, 1103 |
-| `PHASE_LABEL` (936, const) | Libellés de phase | — | 971, 1315, 1650, 1753, 2565, 2800 |
-| `_libTab` (1794, défaut `"avatar"`) | Onglet Bibliothèque courant | 1898 | 1914, 1916 |
+| `PHASE_LABEL` (936, const) | Libellés de phase | — | 1315, 1650, 1753, 2565, 2800 |
+| `_libTab` (1794) | Onglet Bibliothèque courant | 1898 | 1914, 1916 |
 | `_costCurrency` (1966, défaut `"usd"`) | Devise d'affichage | 2183, 2347 | 1971, 2176, 2346 |
 | `_usdToEur` (1967, défaut `0.92`) | Taux | 2184, 2354 | 1971 |
 | `_costPeriod` (1976, défaut `"day"`) | Période du graphique principal | 2323 | 2113 |
 | `_costView` (1977, défaut `"both"`) | Vue Coûts | 2334 | 2000-2001 |
-| `COST_COLORS` / `COST_COLOR_FALLBACK` (1978-1986) | Couleurs par service (`openrouter #5b8cff`, `grok #22c55e`, `kling #06b6d4`, `heygen #f59e0b`, `gradium #a855f7`, `anthropic #ec4899` ; repli `#14b8a6 #eab308 #f97316 #64748b`) | — | `costColor` 1988-1990 |
+| `COST_COLORS` / `COST_COLOR_FALLBACK` (1978-1986) | Couleurs par service (`openrouter #5b8cff`, `grok #22c55e`, `kling #06b6d4`, `gradium #a855f7`, `anthropic #ec4899` ; repli `#14b8a6 #eab308 #f97316 #64748b`) | — | `costColor` 1988-1990 |
 | `COST_TOTAL_KEY` (1993) = `"__total__"` | Clé de la courbe Total | — | 2030, 2075, 2088-2089 |
 | `_costHidden` (1994, `Set`) | Courbes masquées (graphique principal) | 2126-2127, `clear()` 2205 | 2008 |
 | `_costData` (1995) | Dernière série temporelle | 2114, `null` 2206 | 2128, 2359 |
@@ -7999,7 +6990,7 @@ URLs `/media/…` utilisées indirectement (construites par le backend via `_med
 | `mashLastEstimate` (2381) | Estimation `cost.estimate_mashup` | 2490 | 2516 |
 | État local d'archive (`hidden`, `period`, `data`, app.js:2288-2290) | Par détail d'archive ouvert | `loadArch`, légende | `rerender` |
 
-**Perte au rechargement** : aucune de ces variables n'est persistée côté navigateur. Un rechargement (F5) de la fenêtre perd : les scènes non générées (`parsedAd`), le mode choisi, `_lastAvatarAdId` (le bouton « Réessayer les scènes en échec » ne peut plus être proposé), `objAdId` / `mashAdId` (aucun moyen dans l'UI de rouvrir la galerie de validation d'une pub Objet/Mashup existante : aucune liste des pubs en cours n'est proposée), `objShots` / `mashShots`, les estimations, les fichiers de référence sélectionnés, les caches `heygenAvatars` / `gradiumVoices` (rechargés depuis le cache disque serveur), les courbes masquées, la vue/période des Coûts, l'onglet de Bibliothèque. Les jobs eux-mêmes vivent en mémoire serveur (`JobManager._jobs`, jobs.py:87-90) : le polling d'un job en cours s'arrête au rechargement (pas de reprise côté front) ; après redémarrage du serveur, `GET /api/jobs/{id}` → 404 « Job inconnu. » (main.py:558-560). L'état durable des pubs/clips (statuts, images, dialogues, durées, validations, ancres, réfs) vit en base SQLite. La devise est la seule préférence d'affichage persistée (côté serveur, setting `currency`, main.py:1034-1039).
+**Perte au rechargement** : aucune de ces variables n'est persistée côté navigateur. Un rechargement (F5) de la fenêtre perd : `objAdId` / `mashAdId` (aucun moyen dans l'UI de rouvrir la galerie de validation d'une pub Objet/Mashup existante : aucune liste des pubs en cours n'est proposée), `objShots` / `mashShots`, les estimations, les fichiers de référence sélectionnés, le cache `gradiumVoices` (rechargé depuis le cache disque serveur), les courbes masquées, la vue/période des Coûts, l'onglet de Bibliothèque. Les jobs eux-mêmes vivent en mémoire serveur (`JobManager._jobs`, jobs.py:87-90) : le polling d'un job en cours s'arrête au rechargement (pas de reprise côté front) ; après redémarrage du serveur, `GET /api/jobs/{id}` → 404 « Job inconnu. » (main.py:558-560). L'état durable des pubs/clips (statuts, images, dialogues, durées, validations, ancres, réfs) vit en base SQLite. La devise est la seule préférence d'affichage persistée (côté serveur, setting `currency`, main.py:1034-1039).
 
 ---
 
@@ -8007,12 +6998,11 @@ URLs `/media/…` utilisées indirectement (construites par le backend via `_med
 
 Tous les pollers appellent `GET /api/jobs/{id}` (main.py:556-561 → `Job.snapshot()`, jobs.py:67-84 : `id, ad_id, ad_name, state, phase, total, done, voices_done, scenes[{n, phase, status, message?, mp4?, wav?, image?, voice_ok?}], summary`). `state` ∈ `en_attente | en_cours | termine | partiel | echec` (jobs.py:37, 147-151). `done` = nombre de scènes dont `phase` ∈ {`pret`, `erreur`} (jobs.py:69). Aucun poller n'a de nombre maximal d'essais ni de délai maximal ; aucun ne réessaie après une erreur réseau (arrêt + toast).
 
-Mise à jour commune d'une ligne (pollJob / pollObjJob / pollAnimJob / pollVoJob / pollMashJob) : `li#{prefixe}{sc.n}` ; `.dot` classe `ok` si `status === "ok"`, `echec` si `status === "echec"`, rien si `phase === "en_attente"`, sinon `en_cours` (couleurs style.css:190-193) ; `.phase` = `PHASE_LABEL[sc.phase] || sc.phase || ""` ; si `echec` → `.scene-err` = « ⚠ » + `prettyError(sc.message)`, `title` = message brut, `display:block` ; sinon vidé et masqué (pollMashJob ne vide pas le texte, il masque seulement, app.js:2572).
+Mise à jour commune d'une ligne (pollObjJob / pollAnimJob / pollVoJob / pollMashJob) : `li#{prefixe}{sc.n}` ; `.dot` classe `ok` si `status === "ok"`, `echec` si `status === "echec"`, rien si `phase === "en_attente"`, sinon `en_cours` (couleurs style.css:190-193) ; `.phase` = `PHASE_LABEL[sc.phase] || sc.phase || ""` ; si `echec` → `.scene-err` = « ⚠ » + `prettyError(sc.message)`, `title` = message brut, `display:block` ; sinon vidé et masqué (pollMashJob ne vide pas le texte, il masque seulement, app.js:2572).
 
 | Poller | Lignes | Intervalle | Condition de continuation | DOM | Échec global (`state === "echec"`) | Action finale |
 |---|---|---|---|---|---|---|
-| `pollJob(jobId)` | app.js:961-1030 | 800 ms (1003) | `state` ∈ {`en_cours`, `en_attente`} | `sp-{n}` ; `#progPhase` : si `j.phase === "voix"` → « Phase 1 — Voix (Gradium, 2 max) : {voices_done}/{total} générées » (`p1`) ; `"videos"` → « Phase 2 — Vidéos (HeyGen, en parallèle) · voix {vd}/{total} prêtes » (`p2`) ; sinon vide ; `#progFill` = round(done/total·100) % ; `#progCount` = « {done}/{total} vidéos » | **Non traité spécifiquement** : passe dans la branche terminale « vidéo » | Si `summary.status === "voix_seules"` ou `summary.folder` → `showModal` « 🎙️ Voix générées (0 crédit API) » avec `summary.message` + « Dossier : {folder} (Il vient de s'ouvrir dans l'explorateur.) ». Sinon toast « Terminé : {summary.ok ?? done} clip(s) prêt(s)[, {echec} en échec.] », `#retryFailedBtn` visible si `echec > 0 && _lastAvatarAdId != null`, `loadLibrary()`. Erreur réseau → toast « Suivi interrompu : … ». |
-| `pollObjJob(jobId, onDone)` | app.js:1305-1342 | 800 ms (1329) | idem | `osp-{n}` ; `#objProgFill` ; `#objProgCount` « {done}/{total} images » | toast `prettyError(summary.message \|\| "Échec de la génération des images.")` | `onDone()` (= `loadObjGallery(objAdId)`), y compris après échec. |
+| `pollObjJob(jobId, onDone)` | app.js:1305-1342 | 800 ms (1329) | `state` ∈ {`en_cours`, `en_attente`} | `osp-{n}` ; `#objProgFill` ; `#objProgCount` « {done}/{total} images » | toast `prettyError(summary.message \|\| "Échec de la génération des images.")` | `onDone()` (= `loadObjGallery(objAdId)`), y compris après échec. |
 | `pollAnimJob(jobId)` | app.js:1642-1682 | 800 ms (1665) | idem | `anim-{n}` ; `#objAnimProgFill` ; `#objAnimProgCount` « {done}/{total} clips » | `showModal` « Animation — échec » / `prettyError(summary.message \|\| "L'animation a échoué.")` (pas de rechargement de galerie) | `showModal` « 🎬 Clips animés » / « {summary.ok ?? done} clip(s) prêt(s) → disponibles dans la Bibliothèque. » ; `loadObjGallery(objAdId)` (pas de `loadLibrary`). |
 | `pollVoJob(jobId)` | app.js:1743-1791 | 800 ms (1767) | idem | `vosp-{n}` ; `#voProgFill` ; `#voProgCount` « {done}/{total} segments » | `showModal` « Voix off — échec » / `prettyError(summary.message \|\| "La génération de la voix off a échoué.")` | `showModal` « 🎙️ Voix off générée » + message + dossier. Pas de rechargement de la Bibliothèque. |
 | `pollMashJob(jobId, onDone)` | app.js:2557-2590 | 800 ms (2579) | idem | `msp-{n}` ; `#mashProgFill` ; `#mashProgCount` « {done}/{total} » | toast `prettyError(summary.message \|\| "Échec de la génération.")` | `onDone()` (= `loadMashGallery(mashAdId)`). |
@@ -8037,8 +7027,6 @@ Ces clés correspondent exactement aux phases émises par le backend (pipeline.p
 | `/quota\|insufficient\|not enough\|no.*credit\|crédits insuffisants/i` | `"crédits insuffisants"` |
 | `/too long\|trop long\|max.*char\|character limit\|1500\s*(car\|char)/i` | `"texte trop long (max 1500 car.)"` |
 | `/voice.*not found\|voix introuvable\|invalid voice\|unknown voice/i` | `"voix introuvable"` |
-| `/content type not match\|audio\/x-wav\|format audio/i` | `"format audio refusé par HeyGen"` |
-| `/avatar.*not found\|invalid avatar\|avatar introuvable/i` | `"avatar introuvable"` |
 | `/[{}]\|"message"\s*:\|traceback\|error code\|exception\|<\/?[a-z]/i` | `"erreur inattendue — réessaie ; si ça persiste, vérifie tes clés (Réglages)"` |
 | (défaut) | le message tel quel, tronqué à 140 caractères + « … » |
 Entrée vide → `"échec"`.
@@ -8066,8 +7054,8 @@ Entrée vide → `"échec"`.
 - **`renderObjRefs`** (app.js:1116-1142) / **`renderMashRefs`** (app.js:2394-2420) : vignettes `div.ref-thumb` (lecture `FileReader.readAsDataURL`), bouton « × » (`splice` des deux tableaux), `refKindSelect`.
 - Pas de limite de nombre côté front ; le backend ne garde que les `OBJET_MAX_REF_IMAGES = 14` premières (main.py:1425, config_app.py:144) et ignore celles dont `content_type` ne commence pas par `image/` (main.py:1426).
 
-### 6.4 Sélecteurs voix/avatar
-Voir §3.2.2 : `populateAvatarSelect` (app.js:771-789), `populateVoiceSelect` (791-809), `populateSelectFromVoices` (818-836), `populateNewPubSelectors` (811-815). Les voix et avatars sont choisis **par label** (la valeur de l'option est le label), résolus en ID côté serveur (`db.avatar_id_for_label`, `db.voice_id_for_label`, main.py:479, 490, 899).
+### 6.4 Sélecteur de voix
+Voir §3.2.1 : `populateSelectFromVoices` (app.js:818-836), `populateNewPubSelectors` (811-815). Les voix sont choisies **par label** (la valeur de l'option est le label), résolues en ID côté serveur (`db.voice_id_for_label`, main.py:899).
 
 ### 6.5 En-têtes de bibliothèque et ZIP
 `libAdHeader` (app.js:1798-1808) et `renderClipAds` (app.js:1810-1841) — voir §3.3. Le ZIP est servi par `GET /api/ads/{ad_id}/download?asset=` (main.py:1091-1128) : `video` → `mp4_path`, `audio` → `wav_path`, `image` → `image_path`, fichiers nommés `{scene_n}{ext}`, 404 « Aucun fichier téléchargeable pour cette pub. » si aucun.
@@ -8093,7 +7081,7 @@ Voir §3.2.2 : `populateAvatarSelect` (app.js:771-789), `populateVoiceSelect` (7
 ## 7. ÉCARTS FRONT ↔ BACK (factuels, vérifiés)
 
 ### 7.1 Test de connexion : ligne Kling jamais affichée
-`POST /api/test-connection` renvoie 7 clés dont `kling` (main.py:420 `kling = prov.kling_check(cfg)`, main.py:427 `"kling": kling`). Le front n'affiche que Gradium, HeyGen, Nano Banana, Grok, Anthropic (app.js:547-551) : la validation de la clé OpenRouter pour Kling (providers.py:1005-1020, message « Clé OpenRouter (Kling) acceptée. ») n'est jamais montrée.
+`POST /api/test-connection` renvoie plusieurs clés dont `kling` (main.py:420 `kling = prov.kling_check(cfg)`, main.py:427 `"kling": kling`). Le front n'affiche que Gradium, Nano Banana, Grok, Anthropic (app.js:547-551) : la validation de la clé OpenRouter pour Kling (providers.py:1005-1020, message « Clé OpenRouter (Kling) acceptée. ») n'est jamais montrée.
 
 ### 7.2 Durée des clips Mashup : front 3–10 s, backend 3–12 s, défaut 5 vs 6
 - Front : `input.mash-dur` `min="3" max="10"` et libellé « ⏱️ Durée du clip (3–10 s) » (app.js:2624-2625) ; repli `s.duration_s || 5` (app.js:2497, 2615) et `parseInt(...) || 5` (app.js:2639).
@@ -8116,87 +7104,73 @@ Docstring `mashup_animate` : « Anime les plans validés via Kling (1080p, sans 
 
 ### 7.5 `ad_name` Objet = nom du produit ou « pub » ; Mashup = 40 premiers caractères du brief
 - Objet : `fd.append("ad_name", $("objProduct").value.trim() || "pub")` (app.js:1272). Le cerveau renvoie un `ad` slugifié (`_slug(product_name)`, brain.py:398, 460) jamais utilisé par le front. Le nom du produit étant facultatif (index.html:154-155), toutes les pubs Objet sans nom s'appellent « pub » (Bibliothèque, ZIP `pub.zip`, noms de fichiers `pub_1.png`, main.py:984).
-- Mashup : `$("mashBrief").value.trim().slice(0, 40) || "mashup"` (app.js:2525) — texte brut tronqué au lieu du `r.ad = _slug(brief)` renvoyé (brain.py:920). Aucun champ « Nom de la pub » n'existe dans les flux Objet et Mashup (contrairement à Avatar `#adName` et Voix off `#voAdName`).
+- Mashup : `$("mashBrief").value.trim().slice(0, 40) || "mashup"` (app.js:2525) — texte brut tronqué au lieu du `r.ad = _slug(brief)` renvoyé (brain.py:920). Aucun champ « Nom de la pub » n'existe dans les flux Objet et Mashup (contrairement à Voix off `#voAdName`).
 
-### 7.6 Bouton « Réessayer les scènes en échec » dépendant de `_lastAvatarAdId` en mémoire ; la relance n'utilise ni la voix ni le mode choisis
-- Le bouton n'apparaît qu'à la fin de `pollJob` si `failed > 0 && _lastAvatarAdId != null` (app.js:1023) ; `_lastAvatarAdId` est une variable JS (app.js:889) perdue au rechargement ; aucune autre UI (Bibliothèque) ne propose la relance, alors que la route `POST /api/generate/retry/{ad_id}` accepte n'importe quelle pub avatar (main.py:524-554).
-- Body envoyé : `{confirm: true}` seulement (app.js:906), conforme à `RetryIn` (main.py:1160-1161). Mais la route recharge `cfg` depuis les réglages (main.py:528) : la **voix** utilisée est la voix par défaut (`cfg.gradium_voice_id`, main.py:541) et non le `voice_label` choisi à la génération (résolu seulement dans `/api/generate`, main.py:489-492), et le **mode** est `cost_mode` des Réglages, pas le mode par pub (appliqué seulement dans `/api/generate`, main.py:495-496). La relance régénère la voix (`_voice_one_scene`, pipeline.py:114-135). Les scènes relancées peuvent donc avoir une autre voix/un autre moteur que les autres.
-
-### 7.7 `prompt()` natifs encore utilisés
+### 7.6 `prompt()` natifs encore utilisés
 `tagVoice` utilise trois `prompt()` natifs (app.js:514, 516, 517) alors que index.html:551 (« Modale intégrée (remplace les alert/confirm natifs du navigateur) ») et app.js:29 (« remplace confirm()/alert() natifs ») annoncent leur remplacement. Aucun `alert(`/`confirm(` natif ne subsiste (grep).
 En outre `tagVoice` n'envoie pas `note` : `VoiceLabelIn.note` vaut `""` par défaut (main.py:1266) et `gradium_voice_label` écrit toujours `note=body.note.strip()` (main.py:362-365) → **chaque étiquetage efface la note existante**. `user_note` est renvoyé par `/api/gradium/voices` (main.py:309) mais jamais affiché.
 
-### 7.8 Progression d'animation : numérotation et compteur
+### 7.7 Progression d'animation : numérotation et compteur
 - `initAnimProgress(count)` crée `anim-1…anim-count` (app.js:1630-1633), mais le job d'animation Objet a pour scènes les **numéros réels** des plans validés (`anim_scenes = [{"n": int(c["scene_n"])} for c in valides]`, main.py:686). Si les plans validés sont 2, 4, 5, les lignes « Plan 1…3 » affichées ne correspondent pas : `pollAnimJob` met à jour `anim-2` (le 2e `li`, étiqueté « Plan 2 » — correct par hasard) et ignore 4 et 5 (`if (!li) return`, app.js:1647), tandis que « Plan 1 » et « Plan 3 » restent « en attente ».
 - `initMashAnimProgress(n)` (app.js:2783-2788) ne crée aucun `li` : c'est `pollMashAnimJob` qui reconstruit la liste depuis `j.scenes` à chaque tick (app.js:2793-2803) — il n'a donc pas ce défaut, mais les deux flux sont incohérents entre eux.
 - Compteur : `Job.snapshot().done` ne compte que les phases `pret`/`erreur` (jobs.py:69), or un clip animé réussi émet `phase: "clip"` (pipeline.py:522). Pendant et après une animation (Objet et Mashup), la barre et « {done}/{total} clips » (app.js:1661-1663, 2804-2806) ne progressent que sur les échecs ; le message final s'en sort grâce à `summary.ok` (app.js:1673, 2811).
 - Consistance Objet : repli `Array.from({length: res.n}, (_, i) => ({n: i + 1}))` (app.js:1573) quand `objShots` est vide → lignes `osp-1…osp-n`, alors que les cibles sont tous les plans sauf `ref_plan` (main.py:1620-1623), typiquement 2…n+1.
 
-### 7.9 Mode par défaut et repli « 2 cr/s »
-`renderModeCosts` utilise `tx.classique ?? 2` (app.js:735) alors que le backend fixe `credits_per_sec: 1.5` (config_app.py:135) et que le select des Réglages affiche « ~1,5 cr/s » (index.html:457). En pratique `taux_par_mode` est toujours fourni par `cost.estimate` (cost.py:32, 41), le repli n'apparaît que si l'estimation est absente. Le mode sélectionné à l'aperçu est `currentSettings.cost_mode || "premium"` (app.js:727) = `DEFAULT_COST_MODE = "premium"` (config_app.py:138) ; « voix_seules » n'est jamais un défaut possible (le select n'a que 2 options, index.html:455-458).
-
-### 7.10 Échecs globaux de job non traités
-- `pollJob` (avatar + voix seules) ne teste pas `state === "echec"` : en cas d'exception du job, `summary = {message}` (jobs.py:151) → toast « Terminé : {done} clip(s) prêt(s). » (app.js:1018-1021), message d'erreur jamais affiché.
-- `pollMashAnimJob` idem : toast « Animation terminée : … » même si `state === "echec"` (app.js:2809-2814).
+### 7.8 Échecs globaux de job non traités
+- `pollMashAnimJob` ne teste pas `state === "echec"` : toast « Animation terminée : … » même si `state === "echec"` (app.js:2809-2814).
 - `pollAnimJob`, `pollVoJob`, `pollObjJob`, `pollMashJob`, `pollResumeJob` le gèrent (app.js:1666-1668, 1768-1776, 1333-1336, 2581-2584, 1422).
 - « Tester ce plan » et les régénérations ignorent le résultat de `waitJobDone` (app.js:1514, 2677, 2706) : un échec n'est visible qu'au rechargement de la carte (badge/erreur), et pour « Tester ce plan » aucun message de résultat n'est donné.
 - Le state `partiel` (jobs.py:147-148) n'est jamais distingué de `termine` côté front.
 
-### 7.11 Réglages non chargés au démarrage : puces de style Mashup et `currentSettings` périmé
-- `loadSettings()` n'est pas appelé au démarrage (app.js:2873-2875). Ouvrir « Nouvelle pub » charge les réglages via `populateAvatarSelect` (app.js:772) **sans** appeler `renderMashStyleChips` : les puces de style Mashup (`mashup_style_suggestions`, main.py:139 ; 8 suggestions config_app.py:344-353) restent vides tant que l'utilisateur n'a pas ouvert « Réglages ».
-- `populateAvatarSelect`/`populateVoiceSelect` réutilisent `currentSettings` s'il existe (app.js:772, 792). Or l'ajout/suppression d'un avatar (app.js:207-208, 269-274) ne met pas à jour `currentSettings.avatars` (contrairement aux voix, app.js:226, 374) : un avatar ajouté dans Réglages n'apparaît pas dans `#avatarSelect` avant un nouveau `loadSettings` (réouverture de Réglages ou Enregistrer).
-- Chaque ouverture de « Nouvelle pub » rappelle `populateNewPubSelectors()` sans argument (app.js:84) → les trois selects sont reconstruits et reviennent à la 1re option (choix utilisateur perdu).
+### 7.9 Réglages non chargés au démarrage : puces de style Mashup et `currentSettings` périmé
+- `loadSettings()` n'est pas appelé au démarrage (app.js:2873-2875). Ouvrir « Nouvelle pub » charge les réglages **sans** appeler `renderMashStyleChips` : les puces de style Mashup (`mashup_style_suggestions`, main.py:139 ; 8 suggestions config_app.py:344-353) restent vides tant que l'utilisateur n'a pas ouvert « Réglages ».
+- Chaque ouverture de « Nouvelle pub » rappelle `populateNewPubSelectors()` sans argument (app.js:84) → les selects sont reconstruits et reviennent à la 1re option (choix utilisateur perdu).
 - Les contrôles `currentSettings && currentSettings.dry_run` considèrent `null` comme « mode réel » (affichage de modales de dépense même en simulation si les réglages n'étaient pas chargés).
 
-### 7.12 Devise : course au chargement et titre figé
+### 7.10 Devise : course au chargement et titre figé
 - `loadCosts` lance `loadCostTable` (qui fixe `_costCurrency` depuis `/api/costs`, app.js:2183) **en parallèle** de `loadCostChart` et `loadArchives` (app.js:2133). Au premier affichage avec « € » persisté, si la série temporelle ou les archives arrivent avant `/api/costs`, elles sont rendues en `$` (valeur initiale `"usd"`, app.js:1966) et ne sont pas redessinées.
 - Le titre « Évolution des coûts (estimés, USD) » est statique (index.html:414) même en €.
 - `money()` sert aussi à la bannière Objet/Mashup (app.js:1362) : avant toute visite de « Coûts », elle est en `$` même si la devise persistée est `€`.
 - Le taux `usd_to_eur` renvoyé par `/api/costs/timeseries` (cost.py:267) n'est pas lu (seuls `/api/costs` et `/api/costs/currency` le mettent à jour).
 
-### 7.13 Ratio Mashup : n'affecte que le prompt image
+### 7.11 Ratio Mashup : n'affecte que le prompt image
 Le ratio choisi (`#mashRatio`) est envoyé à `/api/mashup/plan` (app.js:2477) et intégré au texte du prompt image (`_compose_image_prompt`, brain.py:735-747), mais n'est transmis ni à `/api/mashup/generate-images` (FormData app.js:2524-2529 ; Form main.py:752-758) ni à l'animation : `kling_generate_video` envoie `aspect_ratio: config_app.ASPECT_RATIO` (providers.py:936) = `"9:16"` (config_app.py:99). Les vignettes de galerie sont aussi forcées en 9:16 (`.obj-shot .thumb { aspect-ratio: 9 / 16; object-fit: cover }`, style.css:392). Le `ratio` renvoyé par `/api/mashup/plan` (brain.py:920) n'est pas lu.
 
-### 7.14 Statut « pret » affiché « à valider » dans les galeries
+### 7.12 Statut « pret » affiché « à valider » dans les galeries
 `objShotCard`/`mashShotCard` n'ont que 3 badges (app.js:1434-1438, 2606-2610) : un plan déjà animé (`status = "pret"`, pipeline.py:521) apparaît « à valider » avec un bouton « Valider ». Le backend accepte de le repasser en `valide` (`_set_clip_validation` ne vérifie que la présence d'une image, main.py:1644-1654) → il sera réanimé (et refacturé) au prochain « Animer » (sélection `status="valide"`, main.py:676 ; mashup `valide|echec`, main.py:845). Le `video_url` renvoyé par `/api/objet/ad` et `/api/mashup/ad` (main.py:1495) n'est pas affiché dans la galerie.
 
-### 7.15 Cache vidéo
+### 7.13 Cache vidéo
 Une réanimation réécrit le même fichier `{n}.mp4` (pipeline.py:517) ; la Bibliothèque sert `<video src="{media_url}">` sans `?t=` (app.js:1828), contrairement aux images (app.js:1441, 1938, 2611) : risque de voir l'ancien clip.
 
-### 7.16 Aperçu de style
+### 7.14 Aperçu de style
 La modale « Aucun aperçu en cache pour ce style : on en génère un… » (app.js:388-393) s'affiche même quand un aperçu existe déjà (le backend renvoie le cache avant toute vérification, main.py:375-376). Le champ `refresh` de `StylePreviewIn` (main.py:1272) n'est jamais envoyé : impossible de régénérer un aperçu depuis l'UI.
 
-### 7.17 Plafond de dépense : texte et champ
+### 7.15 Plafond de dépense : texte et champ
 - Le message 402 invite à faire « Tester 1 plan » (main.py:1395) ; ce bouton s'appelle « Tester ce plan » et n'existe que dans le Mashup (app.js:2629), pas dans l'Objet animé.
 - Vider `#spendCap` envoie `spend_cap_usd: null` (app.js:253) → le backend ne change rien (main.py:223) : on ne peut pas revenir à la valeur par défaut autrement qu'en saisissant 25.
 - La génération d'images (generate-images, consistency, regenerate) ne passe pas par `_check_spend_cap` (main.py:585-630, 751-792, 1509-1542, 1605-1641) ; seuls animate/resume le font.
 
-### 7.18 Libellés audio « .wav » vs MP3 par défaut
-`updateEstimateLine` annonce « audios numérotés (1.wav, 2.wav…) » (app.js:754) et le commentaire de `loadVoicesLibrary` « téléchargement du .wav » (app.js:1854) ; or `DEFAULT_AUDIO_FORMAT = "mp3"` (config_app.py:81) et les voix seules/voix off sont écrites dans ce format (pipeline.py:326-330 ; `clip_audio` sert `audio/mpeg` pour les .mp3, main.py:1019-1023). (Les voix intermédiaires de l'avatar restent en WAV, pipeline.py:130-131.)
+### 7.16 Libellés audio « .wav » vs MP3 par défaut
+Le commentaire de `loadVoicesLibrary` annonce « téléchargement du .wav » (app.js:1854) ; or `DEFAULT_AUDIO_FORMAT = "mp3"` (config_app.py:81) et les voix off sont écrites dans ce format (`clip_audio` sert `audio/mpeg` pour les .mp3, main.py:1019-1023).
 
-### 7.19 Autres incohérences de textes
+### 7.17 Autres incohérences de textes
 - Message vide de l'onglet Photos : « Aucune image générée pour l’instant (objet animé). » (app.js:1924) alors que `/api/photos` inclut Objet **et** Mashup (main.py:950-955).
-- Sous-titre de la sidebar « Gradium → HeyGen » (index.html:17) alors que l'app pilote aussi OpenRouter/Nano Banana, Grok et Kling.
 - Commentaire app.js:131 « l'animation n'est pas encore branchée » pour le modèle vidéo Objet, alors que `/api/objet/animate` existe (main.py:669-693).
 - Voix off : aucune modale de confirmation en mode réel (app.js:1706-1726), alors que l'échantillon de voix (bien plus court) en demande une (app.js:483-490) ; le backend n'exige pas `confirm` pour `/api/voiceover/generate` (`VoiceoverIn` sans `confirm`, main.py:1195-1198).
 - `#voMsg` (index.html:261) est vidé mais jamais rempli (app.js:1712).
 
-### 7.20 Champs renvoyés par l'API mais non exploités par le front
+### 7.18 Champs renvoyés par l'API mais non exploités par le front
 | Route | Champs ignorés |
 |---|---|
 | `GET /api/health` (main.py:59-63) | `ok`, `app`, `dry_run` |
 | `POST /api/settings` | `ok` |
-| `POST /api/avatars`, `POST /api/voices` | `ok`, `id` |
-| `GET /api/heygen/avatars` | `fetched_at` ; en cas d'échec/simulation sans cache, le `{**res}` fournisseur |
+| `POST /api/voices` | `ok`, `id` |
 | `GET /api/gradium/voices` | `user_note` (main.py:309) |
 | `POST /api/gradium/voices/{uid}/sample` | `cached`, `ok` |
 | `POST /api/gradium/voices/{uid}/label` | `meta` (main.py:366) |
 | `POST /api/objet/style-preview` | `style` |
 | `POST /api/test-connection` | `kling` (main.py:427) |
-| `POST /api/brain/generate-scenes` | champs de l'estimation `words`, `seconds`, `mode` (cost.py:35-38) |
-| `POST /api/generate` | `ok`, `dry_run`, `voix_seules` (main.py:520-521) |
-| `POST /api/generate/retry` | `ad_id` |
-| `GET /api/jobs/{id}` | `id`, `ad_id`, `ad_name`, par scène `mp4`/`wav`/`image`/`voice_ok` ; `summary.recap`, `summary.status` (hors test voix seules), `summary.ad_id` |
+| `GET /api/jobs/{id}` | `id`, `ad_id`, `ad_name`, par scène `mp4`/`wav`/`image`/`voice_ok` ; `summary.recap`, `summary.status`, `summary.ad_id` |
 | `POST /api/objet/plan` | `ad`, `product` (brain.py:398/460), estimation `usd_total`, `clip_seconds`, `cout_grok_par_seconde_usd`, `note_images` (cost.py:87-96) |
 | `POST /api/objet/generate-images`, `/api/mashup/generate-images` | `plans_total`, `dry_run` (main.py:629, 791) |
 | `POST /api/objet/animate`, `/api/mashup/animate` | `usd_video`, `dry_run`, `ad_id` (main.py:691-692, 863-864) |
@@ -8214,9 +7188,9 @@ La modale « Aucun aperçu en cache pour ce style : on en génère un… » (app
 | `GET /api/costs/archives` | `label` (cost.py:327) |
 | `GET /api/costs/archives/{id}` | bloc `archive` (cost.py:345-350) |
 
-Champs de modèles Pydantic jamais envoyés : `ScenesIn.mode` (main.py:1183) ; `MashupPlanIn.persona` (main.py:1216 ; aucun champ persona dans le flux Mashup) ; `StylePreviewIn.refresh` (main.py:1272) ; `VoiceLabelIn.note` (main.py:1266) ; `RegenerateIn.prompt_image` pour le Mashup (volontaire, `allow_prompt_edit=False`, main.py:797-799). `BrainIn.style` reçoit toujours `"avatar"` (le bouton n'existe que dans le flux Avatar, app.js:672).
+Champs de modèles Pydantic jamais envoyés : `MashupPlanIn.persona` (main.py:1216 ; aucun champ persona dans le flux Mashup) ; `StylePreviewIn.refresh` (main.py:1272) ; `VoiceLabelIn.note` (main.py:1266) ; `RegenerateIn.prompt_image` pour le Mashup (volontaire, `allow_prompt_edit=False`, main.py:797-799).
 
-### 7.21 Routes backend jamais appelées par le front
+### 7.19 Routes backend jamais appelées par le front
 Comparaison de la liste des routes de main.py (57-1091) avec la table §3.6 :
 | Route | main.py | Statut |
 |---|---|---|
@@ -8225,15 +7199,13 @@ Comparaison de la liste des routes de main.py (57-1091) avec la table §3.6 :
 | `POST /api/mashup/estimate` | 746-749 | **Jamais appelée** (aurait permis une estimation sur le nombre de plans validés) |
 Toutes les autres routes sont appelées (les deux routes `resume` via le chemin dynamique `"/api/" + kind + "/resume/"`, app.js:1391). Les montages `/media` et `/static` sont consommés via les URLs fournies par l'API et `index.html`.
 
-### 7.22 Divers vérifiés
+### 7.20 Divers vérifiés
 - `#mashCount` `max="40"` (index.html:297) = `OBJET_MAX_SHOTS = 40` (config_app.py:143), mais `MashupPlanIn.count` n'est pas borné (main.py:1219) ; la limite 40 n'est appliquée qu'à la génération d'images (`_parse_shot_list`, main.py:1342-1343) — un plan de plus de 40 plans passe l'aperçu et échoue au bouton « Générer le Plan 1 » (400 « Trop de plans (max 40). »).
 - Le prompt image Objet édité dans `textarea.pi` n'est persisté que si l'utilisateur clique « Régénérer » (app.js:1495, 1512 ; main.py:1528-1531) ; une édition sans régénération est perdue au prochain rendu de la galerie.
 - Ancre : après activation d'une ancre, le backend désactive les autres (main.py:662-665) mais seules la puce cliquée et l'objet `s` local sont mis à jour (app.js:1089-1091).
 - `#mashConsistencyBtn` ne vérifie pas la clé OpenRouter côté front (contrairement à l'Objet, app.js:1551-1552) ; le backend le fait (main.py:1628-1629).
 - `loadCostChart` et les archives affichent `String(e)` → « Error: … » (app.js:2117, 2227, 2265), contrairement au reste de l'app qui affiche `e.message`.
-- Le bouton « Enregistrer » et les suppressions d'avatar/voix n'ont pas de `try/catch` (app.js:206-210, 224-229, 234-263, 265-278, 365-379) : une erreur serveur n'affiche aucun message.
-- Heygen : sans `refresh`, le backend renvoie le cache disque avant tout test de simulation (main.py:260-263) ; en simulation avec cache, le front affiche donc la liste (et non le message « Mode simulation… », app.js:301-305).
-- Import `scenes.json` : l'appel `/api/estimate` et `populateNewPubSelectors` dans `rd.onload` ne sont pas protégés par `try/catch` (app.js:700-706).
+- Le bouton « Enregistrer » et les suppressions de voix n'ont pas de `try/catch` (app.js:224-229, 234-263, 365-379) : une erreur serveur n'affiche aucun message.
 
 ---
 
@@ -8252,16 +7224,16 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 - **Port** : plus de port fixe `8765`. `app/config_app.py` : `PORT = int(os.environ.get("UGC_PORT", "0"))` (0 = port libre choisi au démarrage par `main._pick_free_port()`), port réel mémorisé dans `PORT_FILE = DATA_DIR / "port"` pour l'instance unique.
 - **« Images seules » (`kind="images"`) n'existe plus** : aucune route `/api/images/*`, pas de `NANO_MAX_PARALLEL` dans `config_app.py`. Il ne reste que des commentaires résiduels (`config_app.py` l.53 « Mode « Images seules » (B-roll) : ratios proposés » au-dessus de `IMAGE_RATIOS`, `brain.py` l.754 « Clone de la logique « Images seules » »). Remplacé par **Mashup IA** (`kind="mashup"`, routes `/api/mashup/*`).
 - **Cap de plans** : `OBJET_MAX_SHOTS = 40` (ancien 12) + génération cerveau par sous-lots `BRAIN_SHOTS_PER_BATCH = 10`.
-- **Parallélisme actuel** (`config_app.py`) : `HEYGEN_MAX_PARALLEL = 3`, `GROK_MAX_PARALLEL = 3`, `GRADIUM_MAX_PARALLEL = 2`, `GRADIUM_TTS_RETRIES = 3`, `KLING_MAX_PARALLEL = 2`.
+- **Parallélisme actuel** (`config_app.py`) : `GROK_MAX_PARALLEL = 3`, `GRADIUM_MAX_PARALLEL = 2`, `GRADIUM_TTS_RETRIES = 3`, `KLING_MAX_PARALLEL = 2`.
 - **Tests** : 216 fonctions de test aujourd'hui (décompte AST, cf. 6.3) — les docs citent 21, 36, 44, 51, 52, 58, 63, 90/91, 172, 207, 213 selon leur date.
 - **Clés** : Nano Banana passe par **OpenRouter** (`openrouter_api_key`), aucune clé Google directe n'existe plus dans `app/` ; Higgsfield : zéro code vivant.
 - `ARCHITECTURE.md` indique `app = create_app()` l.1099 : c'est aujourd'hui `app/main.py` l.1676 (main.py fait 1907 lignes, 59 routes `@app.get/post/delete`).
 
 ### TODO.md — avertissement de fraîcheur
 
-**Fraîcheur : très ancien (2026-07-15, avant Objet animé/Mashup/Phases 1-2).** Cite `pytest 21/21` puis `36/36`, un `OUTILS.bat` qui n'existe plus dans le dépôt (seul `LANCER.bat` est présent), et un test live « 17 scènes ». `HEYGEN_FIELDS` existe toujours (`app/providers.py` l.30). Idées futures : la purge des jobs en mémoire n'est toujours PAS faite (`JobManager._jobs: dict[str, Job]` sans purge, `app/jobs.py` l.89) ; le masquage des clés est de fait réalisé côté API (`/api/settings` ne renvoie que des booléens `*_api_key_set`).
+**Fraîcheur : très ancien (2026-07-15, avant Objet animé/Mashup/Phases 1-2).** Cite `pytest 21/21` puis `36/36`, un `OUTILS.bat` qui n'existe plus dans le dépôt (seul `LANCER.bat` est présent). Idées futures : la purge des jobs en mémoire n'est toujours PAS faite (`JobManager._jobs: dict[str, Job]` sans purge, `app/jobs.py` l.89) ; le masquage des clés est de fait réalisé côté API (`/api/settings` ne renvoie que des booléens `*_api_key_set`).
 
-### Fichier : TODO.md (30 lignes)
+### Fichier : TODO.md (21 lignes)
 
 ~~~~~markdown
 # TODO
@@ -8269,7 +7241,7 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 ## Fait ✅
 - [x] M0 — Socle (FastAPI, SQLite, DRY_RUN, providers, ffmpeg, import config.py)
 - [x] M1 — Réglages (clés/voix/avatars + test connexion)
-- [x] M2 — Tableau de bord (crédits Gradium, quota HeyGen, total, activité, rafraîchir)
+- [x] M2 — Tableau de bord (crédits Gradium, total, activité, rafraîchir)
 - [x] M3 — Nouvelle pub (import/collage JSON, estimation coût, génération tâche de fond + progression)
 - [x] M4 — Bibliothèque (galerie, lecteur, regroupé par pub, n°/date, téléchargement)
 - [x] M5 — Packaging (LANCER.bat lance l'app, OUTILS.bat pour les scripts, raccourcis Bureau)
@@ -8282,15 +7254,6 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 - [x] Parcours « Nouvelle pub » : style → script/brief → cerveau → scènes → vidéos
 - [x] Audit sous-agents + correctifs, pytest 36/36
 
-## À faire par Théo (test live — nécessite les 3 vraies clés)
-- [ ] Ouvrir l'app → Réglages → coller clés **Gradium + HeyGen + Anthropic** + voice_id + avatar_id
-- [ ] « Tester la connexion » (valide les 3 + liste avatars)
-- [ ] Décocher « Mode simulation », choisir le style Avatar, coller un script + brief
-- [ ] « Générer les scènes » (cerveau) puis générer **1 scène** en réel
-- [ ] Si HeyGen renvoie une erreur de champ : ajuster `HEYGEN_FIELDS` dans `app/providers.py`
-      (audio_asset_id/audio_url, motion_prompt/custom_motion_prompt, dimension/aspect_ratio)
-- [ ] Lancer la pub complète (17 scènes)
-
 ## Idées futures (non bloquantes)
 - [ ] Purge des vieux jobs en mémoire (fuite négligeable en usage local)
 - [ ] Masquer les clés dans l'UI (app 100 % locale : non bloquant)
@@ -8300,10 +7263,12 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 **Fraîcheur : 2026-07-18, avant Phase 1/2.** Annonce `pytest ✅ 172 tests` et un lancement sur `127.0.0.1:8765` (obsolète : port libre, voir ci-dessus). Son risque bloquant R1 « cap 12 plans (`OBJET_MAX_SHOTS=12`) » est résolu (cap 40 + sous-lots de 10). Son §0 signale déjà correctement la suppression d'« Images seules ». Plusieurs faiblesses listées ont été traitées depuis (plafond de dépense `spend_cap_usd`, reprise `/resume`, réfs par plan + ancre, « Tester 1 plan »).
 
-### Fichier : AUDIT.md (223 lignes)
+### Fichier : AUDIT.md (208 lignes)
 
 ~~~~~markdown
 # AUDIT — Application locale de production de pubs UGC
+
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
 
 > Audit **lecture seule** du code réel au 2026-07. Aucun fichier d'app modifié, aucune écriture en base réelle, aucune clé affichée.
 > État repo : **ruff ✅ · mypy ✅ (12 fichiers) · pytest ✅ 172 tests · node --check app.js ✅**.
@@ -8313,13 +7278,13 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 ## 0. État de `ARCHITECTURE.md` (ce qui est encore vrai / devenu faux)
 
-**Encore exact** : stack (FastAPI + uvicorn thread + pywebview), SQLite `sqlite3` sans ORM, clients HTTP `requests` (sync) / SDK `gradium` / SDK `anthropic`, entrypoint `run()` / `LANCER.bat`, schéma de base (tables + migrations), lifespan, montages `/media` `/static`, pipelines Avatar / Objet / Voix seules / Voix off, garde-fous verbatim, mode simulation, dropzone, retry avatar 2-phases.
+**Encore exact** : stack (FastAPI + uvicorn thread + pywebview), SQLite `sqlite3` sans ORM, clients HTTP `requests` (sync) / SDK `gradium` / SDK `anthropic`, entrypoint `run()` / `LANCER.bat`, schéma de base (tables + migrations), lifespan, montages `/media` `/static`, pipelines Objet / Voix off, garde-fous verbatim, mode simulation, dropzone.
 
 **Devenu FAUX / obsolète** (à corriger si on régénère ce doc) :
-- **Pipeline « Images seules » (`kind="images"`) : SUPPRIMÉE.** `ARCHITECTURE.md §2.5` la décrit encore. Endpoints `/api/images/*`, `brain.generate_image_plan`, `IMAGES_SYSTEM_PROMPT`, `pipeline.generate_images_only`, `cost.estimate_images`, output_mode `images_only` → **n'existent plus**. Remplacée par **Mashup IA** (`kind="mashup"`).
+- **Pipeline « Images seules » (`kind="images"`) : SUPPRIMÉE.** `ARCHITECTURE.md §2.3` la décrit encore. Endpoints `/api/images/*`, `brain.generate_image_plan`, `IMAGES_SYSTEM_PROMPT`, `pipeline.generate_images_only`, `cost.estimate_images`, output_mode `images_only` → **n'existent plus**. Remplacée par **Mashup IA** (`kind="mashup"`).
 - **Nouvelle pipeline « Mashup IA »** : absente de l'archi. (Nano Banana → animation vidéo Kling/Veo via OpenRouter.)
 - **Colonne `clips.duration_s`** ajoutée (migration) — absente de l'archi.
-- **Coûts** : HeyGen désormais **converti en USD** à l'enregistrement (900 cr = 15 €) — l'archi dit « HeyGen en crédits, absent du graphique USD ». Nouveau service **`kling`** dans `_SERVICE_ORDER`. Constantes `USD_TO_EUR`, `HEYGEN_EUR_PER_CREDIT`, `HEYGEN_USD_PER_CREDIT`. Toggle devise **$/€** + endpoint `POST /api/costs/currency`.
+- **Coûts** : nouveau service **`kling`** dans `_SERVICE_ORDER`. Constante `USD_TO_EUR`. Toggle devise **$/€** + endpoint `POST /api/costs/currency`.
 - **Réglages** : nouveau `mashup_video_model` (sélecteur de modèle vidéo). Le champ `NANO_MAX_PARALLEL` a été retiré.
 - **Nano Banana ne passe PAS les images de réf « chemins locaux »** comme l'écrit l'archi §6.2 — elles partent en **base64 data-URI** (le texte de l'archi est ambigu ; le code fait bien du base64).
 
@@ -8339,16 +7304,16 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 - Chemin : `%LOCALAPPDATA%\PipelineUGC\data\app.db` (`config_app.DB_PATH`). WAL, `foreign_keys=ON`, timeout 30 s, **une connexion par appel** (thread-safe pour le parallélisme). Tests surchargent `UGC_DATA_DIR` (base jetable) — la base réelle n'est **jamais** touchée par la CI.
 - **Tables** (`db._SCHEMA` + `_MIGRATIONS`) :
   - `settings(key, value)` — clés API, modèles, dry_run, devise, etc.
-  - `avatars(id, label, avatar_id)`, `voices(id, label, voice_id)` — gérés par label.
+  - `voices(id, label, voice_id)` — gérées par label.
   - `ads(id, name, avatar_label, created_at, scenes_json, status='en_cours', kind='avatar')`.
   - `clips(id, ad_id, scene_n, script, motion_prompt, prompt_image, image_path, wav_path, mp4_path, status='en_attente', error, created_at, duration_s=5)`.
   - `ref_images(id, ad_id, path)` — photos de référence uploadées.
   - `activity(id, ts, kind, message)` — journal.
   - `cost_events(id, ad_id, service, unit, qty, usd, credits, detail, created_at, archive_id)`.
   - `cost_archives(id, label, started_at, ended_at, created_at)`.
-- **`kind`** possibles : `avatar`, `objet`, `mashup`, `audio` (voix seules ET voix off ; distinguées par `status`), `images` (legacy, plus produit mais toléré en lecture Photos).
+- **`kind`** possibles : `objet`, `mashup`, `audio` (voix off), `images` (legacy, plus produit mais toléré en lecture Photos).
 - **Statuts clip** : `en_attente` → `en_cours` / `voix_pret` / `image_pret` / `valide` / `pret` / `echec`.
-- **Statuts pub** : `en_cours`, `voix_seules`, `voix_off`, `objet_images` (phase images objet ET mashup), `images_pretes` (legacy), `termine`, `partiel`, `echec`.
+- **Statuts pub** : `en_cours`, `voix_off`, `objet_images` (phase images objet ET mashup), `images_pretes` (legacy), `termine`, `partiel`, `echec`.
 
 ### 1.3 Modules `app/` (rôle de chacun)
 | Module | Rôle |
@@ -8357,8 +7322,8 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 | `config_app.py` | Constantes : chemins, modèles, tarifs, parallélisme, ratios, devise, capacités vidéo. |
 | `db.py` | Schéma + accès SQLite (ads/clips/refs/cost_events/archives/settings). |
 | `providers.py` | Appels API externes + `ProviderConfig` + tests de connexion (timeout/retry). |
-| `brain.py` | Cerveau Claude (découpe scènes, plans objet, plans mashup) + simulation + garde-fous verbatim + retry 529/JSON. |
-| `pipeline.py` | Orchestration des pipelines (avatar 2-phases, objet, mashup, voix). Parallélisme borné. |
+| `brain.py` | Cerveau Claude (plans objet, plans mashup) + simulation + garde-fous verbatim + retry 529/JSON. |
+| `pipeline.py` | Orchestration des pipelines (objet, mashup, voix). Parallélisme borné. |
 | `jobs.py` | Jobs de fond (threads) + suivi de progression par scène + phases. |
 | `cost.py` | Estimations `estimate_*`, comptabilité `record_*`, rapports, série temporelle, archives. |
 | `media.py` | Placeholders simulation (PNG/MP4/WAV/MP3), réparation entête WAV, WAV→MP3. |
@@ -8367,9 +7332,8 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 | `static/` | Front : `index.html`, `app.js`, `style.css`. |
 
 ### 1.4 Médias & nommage
-- Avatar : `MEDIA_DIR/ad_{id}/{n}.wav` (voix intermédiaire, **toujours WAV** pour HeyGen) + `{n}.mp4`.
 - Objet / Mashup : `OBJET_DIR/{safe_name}_{id}/{n}.png` (images), `.../refs/ref_{i}.<ext>` (réfs uploadées), `{n}.mp4` (clips animés). `OBJET_DIR = MEDIA_DIR/objet`.
-- Voix seules : `VOICES_DIR/{safe}/{n}.<ext>` + `recap.html`. Voix off : `VOICEOVER_DIR/{safe}/` → `voixoff.<ext>` (1 seg) ou `{i}.<ext>` + `recap.txt`. Ext = `mp3` (défaut) / `wav`.
+- Voix off : `VOICEOVER_DIR/{safe}/` → `voixoff.<ext>` (1 seg) ou `{i}.<ext>` + `recap.txt`. Ext = `mp3` (défaut) / `wav`.
 - ZIP « Télécharger tout » : entrées **`{scene_n}.<ext>`** triées, nom = nom de pub assaini. Servi via `/media/...` (`_media_url`).
 
 ### 1.5 Vérif repo (état actuel)
@@ -8377,35 +7341,23 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 - `python -m mypy app` → **no issues (12 fichiers)**.
 - `python -m pytest -q` → **172 passed**.
 - `node --check app/static/app.js` → **OK**.
-- **Couverture pipelines** : Avatar (génération 2-phases, retry, verbatim), Objet (plan/images/validation/animation/consistency/dialogue), Voix seules & off (découpe verbatim, MP3, réparation WAV), Mashup (plan/images/validate/animate/kling payload+download auth/coût/durée-snap), Coûts (estimations, timeseries, archives, devise, HeyGen USD, Kling), DB (migrations). **Simulation e2e couverte de bout en bout pour chaque pipeline** ; les vrais appels réseau sont mockés.
+- **Couverture pipelines** : Objet (plan/images/validation/animation/consistency/dialogue), Voix off (découpe verbatim, MP3, réparation WAV), Mashup (plan/images/validate/animate/kling payload+download auth/coût/durée-snap), Coûts (estimations, timeseries, archives, devise, Kling), DB (migrations). **Simulation e2e couverte de bout en bout pour chaque pipeline** ; les vrais appels réseau sont mockés.
 
 ---
 
-## 2. Les 5 pipelines
+## 2. Les 3 pipelines
 
 > Convention : ⚙️ = étape auto (job de fond) · 🖐️ = action manuelle utilisateur · ⏸️ = point d'attente.
 
-### 2.1 Avatar (HeyGen) — `kind="avatar"`
-**Flux** : 🖐️ choisir style « Avatar » → 🖐️ coller script + choisir avatar + voix → ⚙️ `POST /api/brain/generate-scenes` (`brain.generate_scenes` → Claude découpe en scènes {script, motion_prompt}, garde-fou verbatim) → 🖐️ vérifier scènes, choisir mode coût (Premium/Classique/**Voix seules**) → 🖐️ « Générer » (confirmation crédits si réel) → `POST /api/generate` → job `video` → `pipeline.generate_ad` **en 2 phases** :
-- **Phase 1** — toutes les voix Gradium **2 max en parallèle** (`GRADIUM_MAX_PARALLEL=2`, retry `GRADIUM_TTS_RETRIES=3`), on attend qu'elles finissent.
-- **Phase 2** — toutes les vidéos HeyGen **en parallèle** (`HEYGEN_MAX_PARALLEL=3`), chacune : upload audio → create video → render+download.
-- 🖐️ Bouton **« Réessayer les scènes en échec »** si `echec>0` (relance parallèle, réutilise les clips).
-**Actions manuelles** : ~4–5 (style, script/avatar/voix, découpe, mode, générer). **Garde-fous** : verbatim (concat scripts == script), confirmation crédits, bannière Phase 1/2.
-**Échec** : par scène (dot rouge + message `prettyError`) ; bouton réessayer.
-
-### 2.2 Objet vivant / animé (Nano Banana → Grok) — `kind="objet"`
+### 2.1 Objet vivant / animé (Nano Banana → Grok) — `kind="objet"`
 **Flux** : 🖐️ style « Objet animé » → 🖐️ produit (optionnel) + script (verbatim) + ambiance/persona + dropzone photos produit → ⚙️ `POST /api/objet/plan` (`brain.generate_shooting_plan` → {shots: prompt_image, prompt_motion, dialogue}) → 🖐️ **« Générer le Plan 1 »** (séquentiel : `first_only=shots[:1]`) → ⚙️ image Nano Banana → ⏸️ **galerie de validation** : 🖐️ Valider / Régénérer / éditer prompt / éditer dialogue par plan → 🖐️ **« Générer les plans suivants »** (`/consistency`, référence chaînée = image Plan 1 validé + préfixe `_CHARACTER_CONSISTENCY` Pixar) → ⏸️ re-valider → 🖐️ **« Animer les plans validés »** (`/animate`, confirmation coût) → job `objet_animate` → `animate_objet_clips` (Grok, **voix + lip-sync natifs** depuis `dialogue`, parallèle `GROK_MAX_PARALLEL=3`).
 **Actions manuelles** : **beaucoup** (~2 + N validations + 3 boutons). **Garde-fous** : dialogue verbatim, rien n'est animé sans validation, confirmation coût images + animation, cohérence perso.
 **Échec** : par plan dans la galerie / progression.
 
-### 2.3 Voix seules (Gradium) — `kind="audio"`, statut `voix_seules`
-**Flux** : depuis le flux Avatar, 🖐️ mode « Voix seules » → `POST /api/generate` (`cost_mode="voix_seules"`) → job `voix_seules` → `generate_voices_only` : voix Gradium par scène (**MP3 défaut**), `recap.html`, dossier ouvert. 0 crédit vidéo.
-**But** : finir à la main dans HeyGen (le récap explique : déposer N.mp3 + coller motion prompt N). **Garde-fou** : verbatim.
-
-### 2.4 Voix off (Gradium) — `kind="audio"`, statut `voix_off`
+### 2.2 Voix off (Gradium) — `kind="audio"`, statut `voix_off`
 **Flux** : 🖐️ style « Voix off » → 🖐️ script + voix → ⚙️ `POST /api/voiceover/preview` (découpe ≤1500 car) → 🖐️ « Générer » → job `voix_off` → `generate_voiceover` (1 segment→`voixoff.mp3`, sinon `{i}.mp3` + `recap.txt`). **Garde-fou** : verbatim.
 
-### 2.5 Mashup IA (Nano Banana → Kling/Veo via OpenRouter) — `kind="mashup"`
+### 2.3 Mashup IA (Nano Banana → Kling/Veo via OpenRouter) — `kind="mashup"`
 **Flux** : 🖐️ style « Mashup IA » → 🖐️ brief (idée OU mes prompts) + case manuel + style libre + format + **nb plans** + dropzone réfs → ⚙️ `POST /api/mashup/plan` (`brain.generate_mashup_plan` → {shots: prompt_image, prompt_motion **sobre**, duration_s}) → 🖐️ **« Générer le Plan 1 »** (séquentiel) → ⚙️ image Nano Banana → ⏸️ **galerie** : 🖐️ Valider / Régénérer / **durée** par plan / **« Tester ce plan »** → 🖐️ **« Générer les plans suivants »** (`/consistency`, préfixe `_MASHUP_CONSISTENCY` **ultra-réaliste, sans Pixar**) → ⏸️ re-valider → 🖐️ **« Animer les plans validés »** (`/animate`, confirmation coût) → job `mashup_animate` → `animate_mashup_clips` (Kling/Veo, **sans voix**, `generate_audio=false`, durée/résolution **adaptées au modèle**, parallèle `KLING_MAX_PARALLEL=2`).
 **Actions manuelles** : **beaucoup** (comme l'objet). **Garde-fous** : rien n'est animé sans validation, confirmation coût, aucun texte/voix. **Style LIBRE** (jamais Pixar).
 **Échec** : par plan dans la galerie/progression ; re-cliquer « Animer » réessaie les `echec`.
@@ -8416,11 +7368,10 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 | Provider | Rôle | Pipeline(s) | Modèle(s) exact(s) | Tarif (estimé) | Clé (setting) | Limites réelles |
 |---|---|---|---|---|---|---|
-| **Anthropic (cerveau)** | Découpe script → scènes/plans ; écrit prompt_image, prompt_motion, dialogues | Avatar, Objet, Mashup | `claude-sonnet-5` (`DEFAULT_BRAIN_MODEL`) | 3 $/Mtok in, 15 $/Mtok out | `anthropic_api_key` | retry 529/réseau/JSON (`_BRAIN_MAX_ATTEMPTS=4`, backoff 2/5/10 s) |
+| **Anthropic (cerveau)** | Découpe script → scènes/plans ; écrit prompt_image, prompt_motion, dialogues | Objet, Mashup | `claude-sonnet-5` (`DEFAULT_BRAIN_MODEL`) | 3 $/Mtok in, 15 $/Mtok out | `anthropic_api_key` | retry 529/réseau/JSON (`_BRAIN_MAX_ATTEMPTS=4`, backoff 2/5/10 s) |
 | **OpenRouter → Nano Banana** | Génère les images (edit fidèle depuis réfs base64) | Objet, Mashup | `google/gemini-3.1-flash-image` (défaut) / `google/gemini-2.5-flash-image` | ~0,045 / 0,04 $/img (gratuit ≤~500/j) | `openrouter_api_key` | 14 réfs max ; images en **base64 data-URI** multimodal |
 | **OpenRouter → vidéo** | Anime l'image validée (image→vidéo) | Mashup | voir §3.1 | 0,05–0,168 $/s | `openrouter_api_key` (**même clé**) | résolutions/durées **par modèle** ; download **authentifié** |
-| **HeyGen** | Rend la vidéo avatar (avatar V/IV + audio + motion) | Avatar | engine `avatar_v` (Premium) / `avatar_iv` (Classique) | Premium ~4 cr/s (1080p), Classique ~1,5 cr/s (720p) ; **900 crédits = 15 €** | `heygen_api_key` | upload audio **WAV/x-wav** (pas mp3) ; polling |
-| **Gradium** | TTS (voix off / voix seules / voix intermédiaire avatar) | Avatar, Voix seules, Voix off | `default` (`gradium_model`), voix par `voice_id` | facturé/génération (non chiffré en $ en base) | `gradium_api_key` | **2 sessions TTS max** → phase 1 avatar 2-par-2 ; entête WAV « streaming » réparé (bug 12 h) ; sortie **MP3** par défaut |
+| **Gradium** | TTS (voix off) | Voix off | `default` (`gradium_model`), voix par `voice_id` | facturé/génération (non chiffré en $ en base) | `gradium_api_key` | **2 sessions TTS max** ; entête WAV « streaming » réparé (bug 12 h) ; sortie **MP3** par défaut |
 | **xAI / Grok** | Anime l'objet + **voix + lip-sync natifs** | Objet | `grok-imagine-video-1.5` | 0,14 $/s + 0,01 $/img d'entrée | `xai_api_key` | image en **objet `{url:...}`** (pas `image_url` à plat) ; 720p ; polling |
 
 ### 3.1 OpenRouter → vidéo (capacités réelles vérifiées via `GET /videos/models`)
@@ -8435,7 +7386,6 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 **Adaptation** : `config_app.snap_mashup_duration(sec, model)` (plus proche supporté, ties vers le haut) + `mashup_resolution_for(model)` (meilleure supportée). Paramètres envoyés : `aspect_ratio="9:16"`, `generate_audio=false`, `input_references[0]` = image base64 first_frame.
 
 ### 3.2 Prompts système (noms de constantes — texte non recopié)
-- `brain.SYSTEM_PROMPT` — découpe avatar (verbatim).
 - `brain.OBJET_SYSTEM_PROMPT` — objet vivant (Pixar/mascotte imposé, verbatim, contexte prioritaire).
 - `brain.OBJET_MANUAL_SYSTEM_PROMPT` — objet manuel (visuel seul).
 - `brain.MASHUP_SYSTEM_PROMPT` — mashup (ultra-réaliste **LIBRE**, interdit Pixar, prompt_image + prompt_motion sobre + duration_s, no text).
@@ -8453,26 +7403,24 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 | Demande | Pipeline | Agents dans l'ordre | Actions manuelles | Coût estimé | Durée approx. | Fragilités |
 |---|---|---|---|---|---|---|
-| **Pub avatar face caméra** | Avatar | Claude (découpe) → Gradium (voix ×N, 2//) → HeyGen (vidéo ×N, 3//) | ~5 (script, avatar, voix, découpe, générer) | HeyGen crédits (≈4 cr/s Premium) + Gradium | min–min ×N | quota HeyGen, concurrency Gradium, avatar_id non configuré |
 | **B-roll ultra-réaliste sans voix (doc)** | **Mashup IA** | Claude (plans) → Nano Banana (images ×N) → Kling/Veo (clips ×N, 2//) | ~2 + N validations + 3 boutons | ~0,04 $/img + 0,084–0,168 $/s | plusieurs min | cap 12, réfs au lot, validations plan-par-plan |
 | **Produit transformé en personnage qui parle** | Objet animé | Claude (plans+dialogues) → Nano Banana (images) → Grok (clip+voix+lipsync) | ~2 + N validations + 3 boutons | ~0,04 $/img + 0,14 $/s | plusieurs min | verbatim, cohérence perso, cap 12 |
-| **Seulement les voix (finir dans HeyGen)** | Voix seules | Claude (découpe) → Gradium (voix ×N) | ~4 | Gradium seul (0 crédit vidéo) | rapide | — |
 | **Juste une voix off** | Voix off | Gradium (voix ×N segments) | ~3 | Gradium seul | rapide | découpe ≤1500 car |
 | **Seulement des images, sans animation** | **Mashup (workaround)** | Claude (plans) → Nano Banana (images) → **STOP avant animation** | plan + Générer + valider, **ne pas animer** | ~0,04 $/img | rapide | pas de mode dédié ; images récupérables via **Photos + ZIP `asset=image`** |
 | **Animer des images que j'ai déjà** | **❌ IMPOSSIBLE aujourd'hui** | — | — | — | — | **Aucun endpoint n'anime une image uploadée telle quelle.** Les photos de réf *influencent* Nano Banana mais ne deviennent pas la frame animée. Il faut passer par plan→génération (l'app régénère l'image). |
-| **Relancer/réparer une pub partiellement échouée** | Avatar : oui / Objet-Mashup : partiel | selon pipeline | Avatar : bouton « réessayer les échoués » ; Objet/Mashup : re-cliquer « Animer » (réessaie les `echec`) ; images : « Régénérer » par plan | selon | — | **Pas de reprise globale d'une pub** (voir §6) ; granularité limitée |
+| **Relancer/réparer une pub partiellement échouée** | Objet-Mashup : partiel | selon pipeline | Objet/Mashup : re-cliquer « Animer » (réessaie les `echec`) ; images : « Régénérer » par plan | selon | — | **Pas de reprise globale d'une pub** (voir §6) ; granularité limitée |
 
 ---
 
 ## 5. Points FORTS
 
 1. **Architecture claire par responsabilités** (`config`/`db`/`providers`/`brain`/`pipeline`/`jobs`/`cost`/`media`), réutilisation forte : le Mashup est un **clone paramétré** de l'Objet (mêmes images/validation/consistance, seul le moteur d'anim change).
-2. **Mode simulation (dry_run) complet et de bout en bout** : cerveau canned, Nano Banana → PNG placeholder, HeyGen/Grok/Kling → mp4 placeholder, Gradium → silence. **Tout le parcours testable sans clé ni crédit.**
+2. **Mode simulation (dry_run) complet et de bout en bout** : cerveau canned, Nano Banana → PNG placeholder, Grok/Kling → mp4 placeholder, Gradium → silence. **Tout le parcours testable sans clé ni crédit.**
 3. **Garde-fous solides** : verbatim (concat == script, retry), **rien ne s'anime sans validation** (garde-fou budget), confirmations de coût, cohérence personnage (référence chaînée Plan 1).
 4. **Robustesse réseau/erreurs** : retry cerveau (529/JSON tronqué réparé), timeouts + retry sur tests de connexion, retry TTS, parallélisme borné par provider, **une connexion SQLite/appel** (thread-safe).
-5. **Gestion des coûts mature** : estimations par pipeline, comptabilité réelle (jamais en simulation), **`usage.cost` réel prioritaire**, série temporelle jour/mois/trimestre, **archives non destructives**, toggle devise $/€, HeyGen homogénéisé en USD.
+5. **Gestion des coûts mature** : estimations par pipeline, comptabilité réelle (jamais en simulation), **`usage.cost` réel prioritaire**, série temporelle jour/mois/trimestre, **archives non destructives**, toggle devise $/€.
 6. **Détails de qualité** : réparation entête WAV (bug 12 h), WAV→MP3 (léger, sans alerte Premiere), ZIP par pub, anti-cache JS, messages d'erreur traduits (`prettyError`), sécurité clés (jamais renvoyées en clair, seulement `*_set`).
-7. **172 tests verts** couvrant les 5 pipelines en simulation + cas d'erreur.
+7. **172 tests verts** couvrant les pipelines en simulation + cas d'erreur.
 
 ---
 
@@ -8481,20 +7429,20 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 ### 🔴 Bloquant (impact usage/argent)
 - **R1 — Cap de 12 plans par run (`OBJET_MAX_SHOTS=12`)** : un script de 21 plans oblige à **découper manuellement en plusieurs pubs** et **re-coller les prompts** → confusion, erreurs, cohérence perso cassée entre lots (chaque lot repart d'un Plan 1). **La douleur #1 en usage réel.**
 - **R2 — Lisibilité des erreurs providers insuffisante** : le bug d'auth au download (résolu) illustre le risque : des clips **générés ET facturés** apparaissaient en « échec » sans dire *pourquoi* ni *que tu as été débité*. Les messages `prettyError` ne couvrent pas les cas vidéo. **Risque de payer sans récupérer, sans le voir.**
-- **R3 — Aucune reprise d'une pub complète** : si un run objet/mashup plante en cours (ex. réseau), pas de bouton « reprendre cette pub là où elle en était ». On re-génère, on re-valide, on ré-anime (et on **repaie** les clips déjà produits). L'avatar a « réessayer les échoués » (scènes), mais objet/mashup n'ont pas d'équivalent global.
+- **R3 — Aucune reprise d'une pub complète** : si un run objet/mashup plante en cours (ex. réseau), pas de bouton « reprendre cette pub là où elle en était ». On re-génère, on re-valide, on ré-anime (et on **repaie** les clips déjà produits). Objet/mashup n'ont pas de reprise globale.
 
 ### 🟠 Gênant
 - **R4 — Photos de référence au niveau du LOT** : `_save_ref_images` associe les mêmes réfs à **tous** les plans. Impossible d'avoir « visage » sur certains plans et « produit » sur d'autres → **contamination** (un visage s'incruste dans une macro produit ; mélange de traits si plusieurs visages déposés). Pas de réf par plan/groupe.
 - **R5 — Aucun préréglage client** : style/format/modèle/réfs/voix re-saisis à chaque pub, alors que tu travailles pour les mêmes clients (Lunia…). **Perte de temps + incohérence entre pubs d'un même client.**
 - **R6 — Écart estimation vs coût réel** : `estimate_mashup` utilise des taux $/s hardcodés (0,168/0,084/0,10…) et une durée moyenne ; le réel dépend de `usage.cost` et de la durée **snappée** (5→6 pour Veo) → l'estimation affichée peut sous/sur-estimer. Le réel est bien enregistré, mais **l'estimation avant lancement n'est qu'indicative** (à afficher comme telle).
 - **R7 — Suffixe dupliqué en mode MANUEL** : `_compose_image_prompt` ajoute « . {style}. {ratio} aspect ratio. No text, letters, captions or watermark. » **même si le prompt utilisateur contient déjà** « ultra-réaliste / 9:16 / no text ». Doublon inutile (mode manuel objet ET mashup ; l'auto n'est pas touché car Claude gère la mention). Peut nuire à la qualité du prompt.
-- **R8 — Granularité du « réessayer »** : avatar = par scène (bien) ; objet/mashup = re-cliquer « Animer » (réessaie tous les `echec`, pas de sélection fine) ; pas de « réessayer uniquement ce plan » côté avatar.
+- **R8 — Granularité du « réessayer »** : objet/mashup = re-cliquer « Animer » (réessaie tous les `echec`, pas de sélection fine).
 
 ### 🟡 Confort / dette
 - **R9 — pywebview/clr** : fenêtre native indisponible → repli navigateur (voir §1.1). Cosmétique, mais impose parfois Ctrl+Shift+R.
 - **R10 — Validation plan-par-plan** : pas de « tout valider » / « valider sauf X ». Pénible dès 4-5 plans.
 - **R11 — Code/statuts hérités** : `kind="images"` (legacy) encore lu par `/api/photos` ; statut pub `images_pretes` mort ; pub mashup porte le statut `objet_images` en phase images (confus mais inoffensif).
-- **R12 — `frNum`/labels** : quelques libellés « crédits » vs « USD » cohabitent dans le rapport (HeyGen affiche montant + crédits en indice) — clair mais à surveiller.
+- **R12 — `frNum`/labels** : quelques libellés « crédits » vs « USD » cohabitent dans le rapport — clair mais à surveiller.
 - **R13 — Duplication objet↔mashup** : galeries/dropzones/poll JS quasi dupliqués entre `#objetFlow` et `#mashupFlow` (2× ~250 lignes JS). Maintenance double.
 - **R14 — Pas de nettoyage des jobs** : `JobManager` garde tous les jobs en mémoire (fuite lente sur session très longue) — négligeable en usage desktop.
 
@@ -8502,10 +7450,10 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 ## 7. Coûts (estimation, enregistrement, affichage, fiabilité)
 
-- **Estimation (avant génération)** : `cost.estimate` (avatar, crédits HeyGen), `estimate_objet` (Nano + Grok), `estimate_mashup` (Nano + vidéo modèle). Taux $/s **hardcodés** + durée moyenne snappée. **Indicatif.**
-- **Enregistrement (réel, jamais en simulation)** : `record_image` / `record_grok_clip` / `record_kling_clip(usd_cost=usage.cost prioritaire)` / `record_heygen_clip` (crédits **et** USD via 900 cr=15 €) / `record_gradium_tts` (qty, pas de $) / `record_anthropic_call` (tokens). → table `cost_events` **en USD**.
-- **Affichage** : `/api/costs` (par service / par pub / total) + `/api/costs/timeseries` (courbe) + archives ; **toggle $/€** (conversion `USD_TO_EUR=0,92` à l'affichage, base en USD). HeyGen désormais dans la courbe USD.
-- **Fiabilité des taux** : Nano (0,04) et Anthropic (3/15) raisonnables ; Kling/Veo estimés (réel = `usage.cost`) ; HeyGen 900 cr=15 € = réel ; `USD_TO_EUR` **fixe** (pas live).
+- **Estimation (avant génération)** : `estimate_objet` (Nano + Grok), `estimate_mashup` (Nano + vidéo modèle). Taux $/s **hardcodés** + durée moyenne snappée. **Indicatif.**
+- **Enregistrement (réel, jamais en simulation)** : `record_image` / `record_grok_clip` / `record_kling_clip(usd_cost=usage.cost prioritaire)` / `record_gradium_tts` (qty, pas de $) / `record_anthropic_call` (tokens). → table `cost_events` **en USD**.
+- **Affichage** : `/api/costs` (par service / par pub / total) + `/api/costs/timeseries` (courbe) + archives ; **toggle $/€** (conversion `USD_TO_EUR=0,92` à l'affichage, base en USD).
+- **Fiabilité des taux** : Nano (0,04) et Anthropic (3/15) raisonnables ; Kling/Veo estimés (réel = `usage.cost`) ; `USD_TO_EUR` **fixe** (pas live).
 - **Ce qui peut faire dépenser sans s'en rendre compte** 🔴 :
   - **Clips vidéo générés mais non téléchargés** (bug R2) → **facturés, invisibles**.
   - **Régénérer une image / Tester un plan** = appels payants (confirmés, mais faciles à répéter).
@@ -8517,8 +7465,8 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 ## 8. Sécurité & robustesse
 
 - **Clés** : stockées en DB `settings`, jamais renvoyées en clair (`/api/settings` expose seulement `*_set`) ; `save_settings` n'écrase que si non vide ; **plus aucun préfixe de clé loggé** (corrigé). Nettoyées via `_clean_key` (invisibles/espaces).
-- **Réseau** : timeouts (tests 180 s + retry), retry cerveau (529/JSON), retry TTS, `prettyError` pour l'UI. Endpoints externes : HeyGen (upload+polling), OpenRouter (POST+polling+download authentifié), xAI (polling), Anthropic (SDK).
-- **Jobs longs** : threads daemon + polling `/api/jobs/{id}` ; parallélisme **borné par provider** (HeyGen 3, Grok 3, Kling 2, Gradium 2). Pas d'annulation de job.
+- **Réseau** : timeouts (tests 180 s + retry), retry cerveau (529/JSON), retry TTS, `prettyError` pour l'UI. Endpoints externes : OpenRouter (POST+polling+download authentifié), xAI (polling), Anthropic (SDK).
+- **Jobs longs** : threads daemon + polling `/api/jobs/{id}` ; parallélisme **borné par provider** (Grok 3, Kling 2, Gradium 2). Pas d'annulation de job.
 - **Concurrence** : SQLite WAL + connexion/appel → sûr pour les writes concurrents des workers.
 - **Intégrité base** : migrations additives idempotentes (`_MIGRATIONS` + `CREATE TABLE IF NOT EXISTS`) ; archives non destructives (pas de DELETE). Réparation WAV. Réseau local uniquement (`TrustedHostMiddleware`).
 - **Points d'attention** : pas de sauvegarde/backup de `app.db` ; pas d'annulation de jobs ; fuite mémoire lente des jobs (R14) ; aucune limite de dépense globale (pas de « stop à X $ »).
@@ -8530,12 +7478,14 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 ### ARCHITECTURE.md — avertissement de fraîcheur
 
-**Fraîcheur : 2026-07-17, AVANT le Mashup — la plus périmée.** Décrit encore la pipeline « Images seules » (§2.5, `kind="images"`, `IMAGES_SYSTEM_PROMPT`, `generate_images_only`), `NANO_MAX_PARALLEL=3`, `PORT = ... "8765"`, `OBJET_MAX_SHOTS=12`, des outils de dev dans `requirements.txt` (désormais dans `requirements-dev.txt`), un `extend-exclude` ruff de fichiers legacy (absent du `pyproject.toml` actuel) et des numéros de ligne périmés (`app = create_app()` l.1099 → l.1676). Rien de tout cela n'existe plus ; à n'utiliser que pour la structure générale (SQLite WAL, une connexion par appel, TrustedHost, DRY_RUN).
+**Fraîcheur : 2026-07-17, AVANT le Mashup — la plus périmée.** Décrit encore la pipeline « Images seules » (§2.3, `kind="images"`, `IMAGES_SYSTEM_PROMPT`, `generate_images_only`), `NANO_MAX_PARALLEL=3`, `PORT = ... "8765"`, `OBJET_MAX_SHOTS=12`, des outils de dev dans `requirements.txt` (désormais dans `requirements-dev.txt`), un `extend-exclude` ruff de fichiers legacy (absent du `pyproject.toml` actuel) et des numéros de ligne périmés (`app = create_app()` l.1099 → l.1676). Rien de tout cela n'existe plus ; à n'utiliser que pour la structure générale (SQLite WAL, une connexion par appel, TrustedHost, DRY_RUN).
 
-### Fichier : ARCHITECTURE.md (525 lignes)
+### Fichier : ARCHITECTURE.md (442 lignes)
 
 ~~~~~markdown
 # ARCHITECTURE.md — Audit lecture seule
+
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
 
 > Document **factuel** décrivant le code tel qu'il est réellement (signatures exactes copiées des fichiers).
 > Généré en mode audit lecture seule — aucun fichier de l'app modifié, aucune app lancée, aucun appel réseau.
@@ -8551,17 +7501,17 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
   - `uvicorn.Config(app, host=..., port=..., log_level="warning", log_config=None)`, signaux désactivés (thread non principal). Sous `pythonw` (pas de console) les flux stdout/stderr sont redirigés vers `DATA_DIR/app.log` (`_prepare_streams`).
 - **Base de données** : **SQLite** via le module standard `sqlite3` (pas d'ORM). Chemin `config_app.DB_PATH = DATA_DIR / "app.db"` où `DATA_DIR = Path(os.environ.get("UGC_DATA_DIR", _default_data_dir()))` et `_default_data_dir()` = `%LOCALAPPDATA%\PipelineUGC\data`. Les tests surchargent `UGC_DATA_DIR` (base jetable). Connexion : `db.connect()` → `sqlite3.connect(DB_PATH, timeout=30)`, `row_factory=sqlite3.Row`, `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`. **Une connexion par appel** (chaque fonction `connect()`/`close()`), ce qui rend le code thread-safe pour le parallélisme.
 - **Clients HTTP externes** :
-  - **`requests`** (synchrone) pour **HeyGen**, **OpenRouter (Nano Banana)**, **xAI (Grok)** — voir `app/providers.py`. Pas de `httpx` en runtime (httpx n'est présent que comme dépendance de test via `TestClient`).
+  - **`requests`** (synchrone) pour **OpenRouter (Nano Banana)**, **xAI (Grok)** — voir `app/providers.py`. Pas de `httpx` en runtime (httpx n'est présent que comme dépendance de test via `TestClient`).
   - **SDK `gradium`** (client **async**, appelé via `asyncio.run(...)`) pour la TTS Gradium.
   - **SDK `anthropic`** (client synchrone) pour le cerveau Claude.
 - **Version Python** : `pyproject.toml` déclare `target-version = "py313"` (ruff) et `python_version = "3.13"` (mypy). **En pratique l'interpréteur observé est CPython 3.14** (cf. `LANCER.bat` pointant `pythoncore-3.14-64`, et les caches `*.cpython-314-pytest-9.1.0.pyc`). → écart à noter : pyproject cible 3.13, runtime 3.14.
 - **Lint / typage / tests** (dépendances dans `requirements.txt` : `pytest httpx ruff mypy`) :
-  - **ruff** : `python -m ruff check app tests` — `[tool.ruff]` line-length=100, select `["E","F","I","UP","B"]`, ignore `["E501"]`, `extend-exclude` = `["ugc_pipeline.py","check_ids.py","test_gradium.py","test_heygen_one.py"]`, `flake8-bugbear.extend-immutable-calls = ["fastapi.File","fastapi.Form"]`.
+  - **ruff** : `python -m ruff check app tests` — `[tool.ruff]` line-length=100, select `["E","F","I","UP","B"]`, ignore `["E501"]`, `extend-exclude` = `["ugc_pipeline.py","check_ids.py","test_gradium.py"]`, `flake8-bugbear.extend-immutable-calls = ["fastapi.File","fastapi.Form"]`.
   - **mypy** : `python -m mypy app` — `python_version="3.13"`, `ignore_missing_imports=true`, `check_untyped_defs=true`, `files=["app"]`.
   - **pytest** : `python -m pytest -q` — `addopts="-q"`, `testpaths=["tests"]`.
 - **Dépendances runtime** (`requirements.txt`) : `fastapi`, `uvicorn`, `pywebview`, `requests`, `gradium`, `anthropic`, `python-multipart`, `pillow`.
 - **Modules `app/`** : `main.py` (routes + entrypoint), `config_app.py` (constantes), `db.py` (SQLite), `providers.py` (appels API externes + `ProviderConfig`), `brain.py` (cerveau Claude + simulation), `pipeline.py` (orchestration des pipelines), `jobs.py` (jobs de fond), `cost.py` (estimation + comptabilité coûts), `media.py` (placeholders simulation + réparation WAV + WAV→MP3), `bootstrap.py` (seed/migration au démarrage), `settings_service.py` (DB→`ProviderConfig`), `static/` (front : `index.html`, `app.js`, `style.css`).
-- **Fichiers hors app** (exclus du lint, non pertinents pour le build) : `ugc_pipeline.py`, `check_ids.py`, `test_gradium.py`, `test_heygen_one.py`, `config.py`/`config.example.py` (seed initial).
+- **Fichiers hors app** (exclus du lint, non pertinents pour le build) : `ugc_pipeline.py`, `check_ids.py`, `test_gradium.py`, `config.py`/`config.example.py` (seed initial).
 
 ### Middleware & montages
 - `TrustedHostMiddleware(allowed_hosts=["127.0.0.1","localhost","testserver"])`.
@@ -8571,26 +7521,13 @@ Constats transverses vérifiés dans le code actuel, utiles pour lire les docs a
 
 ---
 
-## 2. Les 5 pipelines existants
+## 2. Les 3 pipelines existants
 
 Terminologie : une **pub** = une ligne `ads` (avec un `kind`), ses **plans/scènes** = lignes `clips`. Le `kind` détermine où la pub apparaît. Un **job** de fond (thread) exécute la fonction pipeline et pousse la progression via `on_update`.
 
-`kind` possibles observés : `"avatar"`, `"objet"`, `"images"`, `"audio"` (voix seules ET voix off).
+`kind` possibles observés : `"objet"`, `"images"`, `"audio"` (voix off).
 
-### 2.1 Avatar (HeyGen) — `kind="avatar"`
-**Flux réel (2 phases, cf. section retry/parallélisme) :**
-1. Front `#avatarFlow` : cerveau `POST /api/brain/generate-scenes` (`brain.generate_scenes`) découpe le script en scènes `{n, script, motion_prompt}`.
-2. `POST /api/generate` (`GenerateIn`) → `db.create_ad(..., kind="avatar")` (ou `kind="audio"` si `cost_mode=="voix_seules"`) → `jobs.manager.start(output_mode="video")`.
-3. Thread → `pipeline.generate_ad(...)` **en 2 phases** :
-   - **Phase 1** — `emit({"job_phase":"voix"})` puis `_parallel_map(scenes, _voice_one_scene, GRADIUM_MAX_PARALLEL=2)` : toutes les voix Gradium **2 par 2** (retry auto `GRADIUM_TTS_RETRIES=3`). On **attend** que toutes finissent.
-   - **Phase 2** — `emit({"job_phase":"videos"})` puis `_parallel_map(ready, _render_one_video, HEYGEN_MAX_PARALLEL=3)` : chaque scène = `heygen_upload_audio(wav)` → `heygen_create_video(avatar_id, asset, motion, title)` → `heygen_render_to_file(...)` (polling puis download du .mp4).
-4. Front poll `GET /api/jobs/{id}` (bannière Phase 1/Phase 2, `voices_done`).
-
-- **Endpoints** : `POST /api/generate` (`GenerateIn` → `{ok, job_id, ad_id, dry_run, voix_seules}`), `POST /api/generate/retry/{ad_id}` (`RetryIn` → relance parallèle des scènes `echec`, réutilise les clips), `GET /api/jobs/{job_id}` (snapshot).
-- **Sortie fichiers** : `pipeline.ad_media_dir(ad_id)` = `MEDIA_DIR / f"ad_{ad_id}"` ; par scène `{n}.wav` (voix intermédiaire) + `{n}.mp4` (livrable). `clips.mp4_path` renseigné, statut `pret`.
-- **Bibliothèque** : `GET /api/library` inclut `kind in ("avatar","objet")` avec au moins un clip `mp4_path` `pret`. `clip.media_url = /media/ad_{id}/{n}.mp4`.
-
-### 2.2 Objet vivant / animé (Nano Banana → Grok) — `kind="objet"`
+### 2.1 Objet vivant / animé (Nano Banana → Grok) — `kind="objet"`
 **Flux réel (séquentiel, avec cohérence personnage) :**
 1. `#objetFlow` : `POST /api/objet/plan` (`ObjetPlanIn`) → `brain.generate_shooting_plan` renvoie `{ad, product, shots:[{n, prompt_image, prompt_motion, dialogue}]}` + `estimate = cost.estimate_objet(len(shots))`.
 2. `POST /api/objet/generate-images` (**multipart** : `ad_name`, `shots_json`, `confirm`, `files`) → `db.create_ad(kind="objet")`, sauve les photos de réf, crée un `clip` par plan (`script`=dialogue, `motion_prompt`, `prompt_image`), puis lance un job **UNIQUEMENT sur le Plan 1** (`first_only = job_shots[:1]`, `output_mode="objet_images"`). C'est le **mode séquentiel** : le Plan 1 fixe le personnage.
@@ -8603,19 +7540,13 @@ Terminologie : une **pub** = une ligne `ads` (avec un `kind`), ses **plans/scèn
 - **Sortie fichiers** : `pipeline.objet_dir(ad_id, ad_name)` = `OBJET_DIR / f"{_safe_name(ad_name)}_{ad_id}"` (= `MEDIA_DIR/objet/...`), images `{n}.png`, réfs sous `.../refs/`, clips animés `{n}.mp4`.
 - **Bibliothèque** : les images apparaissent dans **Photos** (`GET /api/photos`, `kind in ("objet","images")`) ; les clips animés dans la Bibliothèque vidéo (`GET /api/library`, une fois `_has_video`).
 
-### 2.3 Voix seules (Gradium) — `kind="audio"`
-**Flux réel :** sélection du mode `voix_seules` dans `#avatarFlow` (carte de mode) → `POST /api/generate` avec `cost_mode="voix_seules"` → `db.create_ad(kind="audio")` → job `output_mode="voix_seules"` → `pipeline.generate_voices_only(...)`.
-- Génère par scène `gradium_tts(cfg, script, out)` (**MP3 par défaut** selon `cfg.audio_format`), statut clip `voix_pret`, statut pub `voix_seules`. Écrit un **récap HTML** (`_write_recap`) + ouvre le dossier.
-- **Sortie fichiers** : `pipeline.voices_dir(ad_id, ad_name)` = `VOICES_DIR / <safe_name>` (suffixé `_{ad_id}` si collision), fichiers `{n}.<ext>` (ext = `mp3`/`wav`) + `recap.html`.
-- **Bibliothèque** : hors Bibliothèque vidéo (`kind="audio"`). Apparaît dans **Voix off** (`GET /api/library/voices`, `kind=="audio"`), lecteur audio via `GET /api/clips/{id}/audio`.
-
-### 2.4 Voix off (Gradium) — `kind="audio"`
+### 2.2 Voix off (Gradium) — `kind="audio"`
 **Flux réel :** `#voixoffFlow` : `POST /api/voiceover/preview` (`VoiceoverIn`) découpe le script (`pipeline.split_voiceover`, ≤ `GRADIUM_MAX_CHARS=1500`) → `POST /api/voiceover/generate` (`VoiceoverIn`) → `db.create_ad(kind="audio")` → job `output_mode="voix_off"` → `pipeline.generate_voiceover(...)`.
 - Un segment = un `clip` ; `gradium_tts` par segment (MP3 par défaut), statut clip `voix_pret`, statut pub `voix_off`. Récap texte (`_write_voiceover_recap`) + ouverture dossier.
 - **Sortie fichiers** : `pipeline.voiceover_dir(ad_id, ad_name)` = `VOICEOVER_DIR / <safe_name>` (suffixé `_{ad_id}` si collision). Un seul segment → `voixoff.<ext>` ; plusieurs → `{i}.<ext>` + `recap.txt`.
-- **Bibliothèque** : idem 2.3, sous-section **Voix off**.
+- **Bibliothèque** : hors Bibliothèque vidéo (`kind="audio"`). Apparaît dans **Voix off** (`GET /api/library/voices`, `kind=="audio"`), lecteur audio via `GET /api/clips/{id}/audio`.
 
-### 2.5 Images seules (Nano Banana) — `kind="images"`
+### 2.3 Images seules (Nano Banana) — `kind="images"`
 **Flux réel :** `#imagesFlow` : `POST /api/images/plan` (`ImagesPlanIn`) → `brain.generate_image_plan` renvoie `{ad, shots:[{n, prompt_image}], ratio}` + `estimate = cost.estimate_images(len(shots))`. Puis `POST /api/images/generate` (**multipart** : `ad_name`, `shots_json`, `confirm`, `files`) → `db.create_ad(kind="images")`, crée un `clip` par image (`script=""`, `motion=""`, `prompt_image`), lance un job `output_mode="images_only"` sur **TOUS** les plans → `pipeline.generate_images_only(...)`.
 - Génère toutes les images Nano Banana **en parallèle** (`NANO_MAX_PARALLEL=3`), **sans animation, sans cohérence perso** (préfixe vide), statut clip `image_pret`, statut pub `images_pretes`. Le **style est LIBRE** (déjà intégré au `prompt_image`).
 - **Endpoints** : `POST /api/images/plan`, `POST /api/images/generate` (`{ok, job_id, ad_id, dry_run, images_total}`).
@@ -8636,11 +7567,10 @@ Terminologie : une **pub** = une ligne `ads` (avec un `kind`), ses **plans/scèn
 ### 3.1 `app/brain.py`
 
 **Prompts système (noms de constantes, contenu non recopié) :**
-- `SYSTEM_PROMPT` (l. 19) — découpage avatar en scènes (verbatim).
 - `OBJET_SYSTEM_PROMPT` (l. 76) — objet vivant AUTO, style Pixar/mascotte imposé + règles verbatim/contexte.
 - `OBJET_MANUAL_SYSTEM_PROMPT` (l. 380) — objet vivant MANUEL (visuel seul, dialogues déjà fournis).
 - `IMAGES_SYSTEM_PROMPT` (l. 613) — **Images seules**, style LIBRE, interdit d'imposer Pixar/cartoon, « no text ».
-- Autres constantes : `STYLES_DISPONIBLES = {"avatar": True, "objet_vivant": False, "voix_off": False}` (l. 72) ; `MAX_SCRIPT_CHARS = 20000` (l. 73).
+- Autre constante : `MAX_SCRIPT_CHARS = 20000` (l. 73).
 
 **Génération de plan — objet animé :**
 ```python
@@ -8694,24 +7624,6 @@ def _compose_image_prompt(desc: str, style: str, ratio: str) -> str:   # desc + 
 def _ratio_phrase(ratio: str) -> str:
 ```
 
-**Génération de scènes — avatar :**
-```python
-def generate_scenes(
-    cfg: ProviderConfig,
-    script: str,
-    brief: str,
-    style: str,
-    avatar_label: str,
-) -> dict[str, Any]:                  # -> {ad, avatar, scenes:[...]}
-def _generate_with_retry(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str,
-    max_attempts: int = _BRAIN_MAX_ATTEMPTS,
-) -> list[dict[str, Any]]:
-def _call_claude(
-    cfg: ProviderConfig, script: str, brief: str, avatar_label: str, attempt: int = 0
-) -> list[dict[str, Any]]:            # system=SYSTEM_PROMPT
-```
-
 **Appel Anthropic + retry + JSON + simulation :**
 - Retry : constantes `_BRAIN_RETRY_BACKOFFS = (2.0, 5.0, 10.0)`, `_BRAIN_MAX_ATTEMPTS = 4`, `_OVERLOADED_MESSAGE` (message « IA surchargée »).
 ```python
@@ -8727,9 +7639,8 @@ def anthropic_check(cfg: ProviderConfig) -> dict[str, Any]:        # test de con
 ```python
 def _simulate_shooting_plan(product_name: str, ambiance: str, script: str) -> list[dict[str, Any]]:
 def _simulate_image_shots(brief: str, style: str, ratio: str, count: int = 0) -> list[dict[str, Any]]:
-def _simulate_scenes(script: str) -> list[dict[str, Any]]:
 ```
-  découpe locale par phrases/idées + gabarits `_CANNED_OBJET` / `_CANNED_MOTIONS`. `generate_scenes`/`generate_shooting_plan`/`generate_image_plan` branchent la simulation via `if cfg.dry_run`.
+  découpe locale par phrases/idées + gabarits `_CANNED_OBJET`. `generate_shooting_plan`/`generate_image_plan` branchent la simulation via `if cfg.dry_run`.
 - Garde-fous verbatim :
 ```python
 def verbatim_ok(original: str, scenes: list[dict[str, Any]]) -> bool:
@@ -8754,27 +7665,7 @@ def _parallel_map(
     max_parallel: int,
 ) -> list[Any]:                       # résultats DANS L'ORDRE des items
 ```
-Implémentés avec `concurrent.futures.ThreadPoolExecutor(max_workers=min(cap, len(items)))`. Caps : avatar phase 1 = `GRADIUM_MAX_PARALLEL`, phase 2 = `HEYGEN_MAX_PARALLEL`, objet = `GROK_MAX_PARALLEL`, images = `NANO_MAX_PARALLEL`.
-
-**Avatar (2 phases) :**
-```python
-def generate_ad(
-    cfg: ProviderConfig,
-    ad_id: int,
-    ad_name: str,
-    scenes: list[dict[str, Any]],
-    avatar_id: str,
-    on_update: UpdateFn | None = None,
-    is_retry: bool = False,
-) -> dict[str, Any]:                  # -> {ok, echec, status, ad_id}
-def _voice_one_scene(
-    cfg: ProviderConfig, ad_id: int, out_dir: Path, s: dict[str, Any], emit: UpdateFn,
-) -> dict[str, Any]:                  # PHASE 1 ; retry TTS ; réutilise s["clip_id"] si fourni
-def _render_one_video(
-    cfg: ProviderConfig, ad_id: int, ad_name: str, out_dir: Path,
-    prep: dict[str, Any], avatar_id: str, emit: UpdateFn,
-) -> bool:                            # PHASE 2 (upload+create+render HeyGen)
-```
+Implémentés avec `concurrent.futures.ThreadPoolExecutor(max_workers=min(cap, len(items)))`. Caps : objet = `GROK_MAX_PARALLEL`, images = `NANO_MAX_PARALLEL`.
 
 **Objet animé (images unitaire + batch + animation) :**
 ```python
@@ -8813,12 +7704,8 @@ def generate_images_only(
 ) -> dict[str, Any]:                  # _run_parallel(..., NANO_MAX_PARALLEL) ; status pub "images_pretes"
 ```
 
-**Voix / voix off :**
+**Voix off :**
 ```python
-def generate_voices_only(
-    cfg: ProviderConfig, ad_id: int, ad_name: str, scenes: list[dict[str, Any]],
-    on_update: UpdateFn | None = None, avatar_label: str = "",
-) -> dict[str, Any]:
 def generate_voiceover(
     cfg: ProviderConfig, ad_id: int, ad_name: str, segments: list[str],
     full_script: str = "", on_update: UpdateFn | None = None,
@@ -8831,13 +7718,12 @@ def voiceover_verbatim_ok(original: str, segments: list[str]) -> bool:
 ```python
 def ad_media_dir(ad_id: int) -> Path:            # MEDIA_DIR/ad_{id}
 def objet_dir(ad_id: int, ad_name: str) -> Path: # OBJET_DIR/{safe}_{id}
-def voices_dir(ad_id: int, ad_name: str) -> Path:
 def voiceover_dir(ad_id: int, ad_name: str) -> Path:
 def _safe_name(name: str) -> str:                # caractères Windows interdits + noms réservés
 ```
 
 **Statuts clip/pub utilisés (littéraux réels)** :
-`en_attente` (défaut clip), `en_cours`, `voix_pret`, `image_pret`, `valide`, `pret`, `echec` (clips) ; `voix_seules`, `voix_off`, `objet_images`, `images_pretes`, `termine`, `partiel`, `echec` (pubs). (Statut pub avatar : `termine`/`partiel`/`echec` via `db.set_ad_status`.)
+`en_attente` (défaut clip), `en_cours`, `voix_pret`, `image_pret`, `valide`, `pret`, `echec` (clips) ; `voix_off`, `objet_images`, `images_pretes`, `termine`, `partiel`, `echec` (pubs).
 
 ### 3.3 `app/cost.py`
 
@@ -8845,8 +7731,6 @@ def _safe_name(name: str) -> str:                # caractères Windows interdits
 
 **Estimations (`estimate_*`)** :
 ```python
-def estimate(scenes: list[dict[str, Any]], mode: str = config_app.DEFAULT_COST_MODE) -> dict[str, Any]:
-    # avatar : crédits HeyGen par mode (premium/classique), à partir des mots -> secondes
 def estimate_images(n_shots: int) -> dict[str, Any]:
     # images seules : n * NANO_BANANA_COST_PER_IMAGE_USD -> {shots, usd_images, usd_total, cout_par_image_usd, note_images}
 def estimate_objet(
@@ -8859,7 +7743,6 @@ def estimate_objet(
 ```python
 def record_image(ad_id: int | None, model: str) -> None:          # service="openrouter", unit="image"
 def record_grok_clip(ad_id: int | None, seconds: float) -> None:  # service="grok", unit="second"
-def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:  # service="heygen", unit="credit"
 def record_gradium_tts(ad_id: int | None) -> None:                # service="gradium", unit="generation"
 def record_anthropic_call(input_tokens=0, output_tokens=0, ad_id=None) -> None: # service="anthropic", unit="call"
 ```
@@ -8872,7 +7755,7 @@ def costs_timeseries(period: str = "month", archive_id: int | None = None, ancho
 def archives_list() -> dict[str, Any]:
 def archive_detail(archive_id: int) -> dict[str, Any] | None:
 _TS_WINDOW = {"day": 14, "month": 6, "quarter": 4}
-_SERVICE_ORDER = ["openrouter", "grok", "heygen", "gradium", "anthropic"]
+_SERVICE_ORDER = ["openrouter", "grok", "gradium", "anthropic"]
 ```
 - **Stockage** : table `cost_events(id, ad_id, service, unit, qty, usd, credits, detail, created_at, archive_id)`. **Archivage** (au lieu d'effacer) : `db.archive_cost_events(label)` tague les événements actifs (`archive_id IS NULL`) vers une ligne `cost_archives`. Endpoints : `GET /api/costs`, `GET /api/costs/timeseries`, `POST /api/costs/archive`, `GET /api/costs/archives`, `GET /api/costs/archives/{id}`.
 
@@ -8905,12 +7788,10 @@ Lance un `threading.Thread(daemon=True)` qui appelle la bonne fonction pipeline 
 **Modes de sortie (valeurs EXACTES de `output_mode`) → fonction pipeline :**
 | `output_mode` | fonction |
 |---|---|
-| `"voix_seules"` | `pipeline.generate_voices_only` |
 | `"voix_off"` | `pipeline.generate_voiceover` |
 | `"objet_images"` | `pipeline.generate_objet_images` |
 | `"images_only"` | `pipeline.generate_images_only` |
 | `"objet_animate"` | `pipeline.animate_objet_clips` |
-| *défaut* (ex. `"video"`) | `pipeline.generate_ad` (avatar, `is_retry` transmis) |
 
 Instance globale : `manager = JobManager()`. Progression : le front poll `GET /api/jobs/{id}` (~toutes les 800 ms) et lit `snapshot()`.
 
@@ -8918,7 +7799,7 @@ Instance globale : `manager = JobManager()`. Progression : le front poll `GET /a
 
 - **Chemins** : `BASE_DIR`, `DATA_DIR` (`UGC_DATA_DIR` ou `%LOCALAPPDATA%\PipelineUGC\data`), `MEDIA_DIR = DATA_DIR/media`, `DB_PATH = DATA_DIR/app.db`, `VOICES_DIR = DATA_DIR/voix`, `VOICEOVER_DIR = DATA_DIR/voix_off`, `OBJET_DIR = MEDIA_DIR/objet`. `ensure_dirs()` crée data/media/objet.
 - **Réseau** : `HOST = "127.0.0.1"`, `PORT = int(os.environ.get("UGC_PORT","8765"))`.
-- **Parallélisme** : `HEYGEN_MAX_PARALLEL = 3`, `GROK_MAX_PARALLEL = 3`, `GRADIUM_MAX_PARALLEL = 2`, `GRADIUM_TTS_RETRIES = 3`, `NANO_MAX_PARALLEL = 3`.
+- **Parallélisme** : `GROK_MAX_PARALLEL = 3`, `GRADIUM_MAX_PARALLEL = 2`, `GRADIUM_TTS_RETRIES = 3`, `NANO_MAX_PARALLEL = 3`.
 - **Ratios image** : `IMAGE_RATIOS = ("9:16", "1:1", "4:5", "16:9", "3:2")`, `DEFAULT_IMAGE_RATIO = "9:16"`, `normalize_image_ratio(ratio)`.
 - **Audio** : `AUDIO_FORMATS = ("mp3","wav")`, `DEFAULT_AUDIO_FORMAT = "mp3"`, `MP3_BITRATE_KBPS = 192`, `normalize_audio_format`, `audio_ext`.
 - **Vidéo/format** : `VIDEO_WIDTH=1080`, `VIDEO_HEIGHT=1920`, `IMAGE_WIDTH/HEIGHT` = idem, `ASPECT_RATIO="9:16"`.
@@ -8928,28 +7809,24 @@ Instance globale : `manager = JobManager()`. Progression : le front poll `GET /a
   - Vidéo xAI : `OBJET_VIDEO_MODELS = { "grok_imagine": "grok-imagine-video-1.5" }`, `DEFAULT_OBJET_VIDEO_MODEL = "grok_imagine"`.
 - **Tarifs (estimés)** : `COST_USD_PER_IMAGE`, `COST_USD_PER_IMAGE_DEFAULT=0.04`, `NANO_BANANA_COST_PER_IMAGE_USD=0.04`, `GROK_COST_PER_SECOND_USD=0.14`, `GROK_COST_USD_PER_INPUT_IMAGE=0.01`, `ANTHROPIC_USD_PER_MTOK_IN=3.0`, `ANTHROPIC_USD_PER_MTOK_OUT=15.0`.
 - **Grok/voix** : `GROK_DEFAULT_CLIP_SECONDS=5`, `GROK_MIN/MAX_CLIP_SECONDS=4/12`, `GROK_WORDS_PER_SEC=2.5`, `GROK_RESOLUTION="720p"`, `NANO_BANANA_IMAGE_SIZE="1K"`, `clip_seconds_for_dialogue(...)`. `GROK_VOICE_PACES` (lent/naturel/dynamique), `GROK_VOICE_STYLES` (douce/premium/dynamique) — timbre et débit séparés.
-- **HeyGen** : `COST_MODES = {"premium": avatar_v/1080p/motion, "classique": avatar_iv/720p/no-motion}`, `DEFAULT_COST_MODE="premium"`.
 - **Objet** : `OBJET_MAX_SHOTS=12` (cap plans, sert AUSSI aux images seules), `OBJET_MAX_REF_IMAGES=14`.
 - **Simulation** : `DEFAULT_DRY_RUN = True`.
 
 ### 3.6 `app/providers.py` (appels externes) — clés fonctions
-`@dataclass ProviderConfig` (champs) : `gradium_api_key, heygen_api_key, openrouter_api_key, xai_api_key, objet_image_model, objet_video_model, objet_voice_style, objet_voice_pace, gradium_voice_id, gradium_model, audio_format, heygen_voice_id, anthropic_api_key, brain_model, cost_mode, dry_run` (tous avec défauts).
+`@dataclass ProviderConfig` (champs) : `gradium_api_key, openrouter_api_key, xai_api_key, objet_image_model, objet_video_model, objet_voice_style, objet_voice_pace, gradium_voice_id, gradium_model, audio_format, anthropic_api_key, brain_model, dry_run` (tous avec défauts).
 ```python
 def gradium_tts(cfg: ProviderConfig, text: str, out_path: str | Path, fmt: str | None = None) -> str:
-def heygen_upload_audio(cfg: ProviderConfig, wav_path: str | Path) -> str:          # -> asset_id
-def heygen_create_video(cfg, avatar_id, audio_asset_id, motion_prompt, title) -> str:  # -> video_id
-def heygen_render_to_file(cfg, video_id, out_mp4, scene_label="") -> str:            # polling + download
 def nano_banana_generate_image(cfg, prompt_image, ref_paths, out_path, label="", subtitle="", index=0) -> str:
 def grok_generate_video(cfg, image_path, prompt_motion, out_mp4, model_value="grok-imagine-video-1.5",
                         seconds=..., label="", index=0) -> str:
 def grok_dialogue_prompt(motion: str, dialogue: str, tone: str = "", pace: str = "") -> str:
-# Tests de connexion (timeout 180s + retry) : gradium_check, heygen_list_avatars, heygen_quota,
+# Tests de connexion (timeout 180s + retry) : gradium_check,
 #   nano_banana_check, grok_check ; is_network_hiccup / _request_with_retries.
 ```
-Bases URL : `HEYGEN_API="https://api.heygen.com"`, `OPENROUTER_API_BASE="https://openrouter.ai/api/v1"`, `GROK_API_BASE="https://api.x.ai/v1"`.
+Bases URL : `OPENROUTER_API_BASE="https://openrouter.ai/api/v1"`, `GROK_API_BASE="https://api.x.ai/v1"`.
 
 ### 3.7 `app/db.py` — schéma & accès
-Tables (`_SCHEMA`) : `settings(key,value)`, `avatars(id,label,avatar_id)`, `voices(id,label,voice_id)`, `ads(id,name,avatar_label,created_at,scenes_json,status DEFAULT 'en_cours',kind DEFAULT 'avatar')`, `clips(id,ad_id,scene_n,script,motion_prompt,prompt_image,image_path,wav_path,mp4_path,status DEFAULT 'en_attente',error,created_at)`, `ref_images(id,ad_id,path)`, `activity(id,ts,kind,message)`, `cost_events(...,archive_id)`, `cost_archives(...)`. Migrations additives via `_MIGRATIONS` (PRAGMA table_info + ALTER).
+Tables (`_SCHEMA`) : `settings(key,value)`, `voices(id,label,voice_id)`, `ads(id,name,avatar_label,created_at,scenes_json,status DEFAULT 'en_cours',kind DEFAULT 'avatar')`, `clips(id,ad_id,scene_n,script,motion_prompt,prompt_image,image_path,wav_path,mp4_path,status DEFAULT 'en_attente',error,created_at)`, `ref_images(id,ad_id,path)`, `activity(id,ts,kind,message)`, `cost_events(...,archive_id)`, `cost_archives(...)`. Migrations additives via `_MIGRATIONS` (PRAGMA table_info + ALTER).
 ```python
 def create_ad(name: str, avatar_label: str, scenes_json: str, kind: str = "avatar") -> int:
 def create_clip(ad_id: int, scene_n: int, script: str, motion_prompt: str, prompt_image: str = "") -> int:
@@ -8968,10 +7845,10 @@ def add_cost_event(service, unit, qty=0.0, *, usd=0.0, credits=0.0, ad_id=None, 
 ## 4. Frontend (`app/static/index.html` + `app.js`)
 
 ### 4.1 Cartes de style « Nouvelle pub »
-Dans `index.html`, sous « Étape 1 : style d'UGC », `div.styles#styleCards` contient des `<button class="style-card" data-style="...">`. Attribut identifiant = **`data-style`**. Valeurs : `avatar`, `objet_vivant`, `voix_off`, `images`. Structure d'une carte :
+Dans `index.html`, sous « Étape 1 : style d'UGC », `div.styles#styleCards` contient des `<button class="style-card" data-style="...">`. Attribut identifiant = **`data-style`**. Valeurs : `objet_vivant`, `voix_off`, `images`. Structure d'une carte :
 ```html
-<button class="style-card active" data-style="avatar">
-  <div class="style-emoji">🧍</div><div class="style-name">Avatar</div>
+<button class="style-card" data-style="objet_vivant">
+  <div class="style-emoji">📦</div><div class="style-name">Objet animé</div>
   <div class="style-tag">disponible</div>
 </button>
 ```
@@ -8980,13 +7857,12 @@ Handler (`app.js`) : chaque `.style-card` au clic met `active` sur la carte, `se
 ### 4.2 `applyStyleFlow(style)` (affiche/masque les sections de flux)
 ```javascript
 function applyStyleFlow(style) {
-  $("avatarFlow").classList.toggle("hidden", style !== "avatar");
   $("objetFlow").classList.toggle("hidden", style !== "objet_vivant");
   $("voixoffFlow").classList.toggle("hidden", style !== "voix_off");
   $("imagesFlow").classList.toggle("hidden", style !== "images");
 }
 ```
-Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#imagesFlow` (toutes dans `<section id="new">`). Navigation latérale : `.nav-item[data-section]` → sections `#dashboard`, `#new`, `#library`, `#costs`, `#settings`.
+Sections HTML correspondantes : `#objetFlow`, `#voixoffFlow`, `#imagesFlow` (toutes dans `<section id="new">`). Navigation latérale : `.nav-item[data-section]` → sections `#dashboard`, `#new`, `#library`, `#costs`, `#settings`.
 
 ### 4.3 Galerie de validation « Objet animé »
 - `async function loadObjGallery(adId)` (l. 975) : `GET /api/objet/ad/{adId}`, affiche `#objValidation`, vide `#objGallery`, ajoute une carte par shot via `objShotCard(s)`.
@@ -8999,13 +7875,9 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
   - boutons `.btn-valid` (Valider/Dévalider → `POST /api/objet/validate/{clip_id}` avec `{valide: !valid}`, puis `card.replaceWith(objShotCard(s))`) et `.btn-regen` (Régénérer → confirmation si réel → `POST /api/objet/regenerate-image/{clip_id}` `{prompt_image, confirm}` → `waitJobDone` → recharge cette seule carte).
 - Boutons du flux : `#objRefreshBtn` (`loadObjGallery`), `#objConsistencyBtn` (`POST /api/objet/consistency/{ad_id}`), `#objAnimateBtn` (`POST /api/objet/animate/{ad_id}`).
 
-### 4.4 Dropzone (photos de référence) & progression parallèle
+### 4.4 Dropzone (photos de référence) & Bibliothèque
 - **Dropzone** : pattern répété par flux (objet `#objDropzone`/`initObjDropzone`/`objRefsFiles` ; images `#imgDropzone`/`initImgDropzone`/`imgRefsFiles`). Chaque IIFE branche : clic → `input.click()`, `change` → `add*Refs(files)`, drag `dragenter/over` → `.dragover`, `drop` → `add*Refs(dataTransfer.files)`. Les fichiers sont envoyés en **multipart** (`FormData.append("files", f, f.name)`) aux endpoints `generate-images` / `images/generate`.
-- **Progression parallèle (avatar)** dans `pollJob(jobId)` :
-  - Bannière **2 phases** `#progPhase` : `j.phase === "voix"` → « Phase 1 — Voix (Gradium, 2 max) : {voices_done}/{total} générées » ; `j.phase === "videos"` → « Phase 2 — Vidéos (HeyGen, en parallèle) … ».
-  - Barre `#progFill` = `j.done/j.total`, liste `#sceneProgress` (un `li#sp-{n}` par scène, point + label de phase + erreur détaillée `prettyError`).
-  - **Bouton « réessayer les échoués »** `#retryFailedBtn` : affiché si `sm.echec > 0` en fin de job ; au clic → `POST /api/generate/retry/{_lastAvatarAdId}` `{confirm:true}` (confirmation si mode réel) → re-poll. `_lastAvatarAdId = res.ad_id` est mémorisé au lancement.
-- Bibliothèque : `libAdHeader(ad, asset, hasFiles)` ajoute un bouton « ⬇ Télécharger tout (ZIP) » → `GET /api/ads/{ad.id}/download?asset=<video|audio|image>` par sous-section (Avatar/Objet=video, Voix off=audio, Photos=image).
+- Bibliothèque : `libAdHeader(ad, asset, hasFiles)` ajoute un bouton « ⬇ Télécharger tout (ZIP) » → `GET /api/ads/{ad.id}/download?asset=<video|audio|image>` par sous-section (Objet=video, Voix off=audio, Photos=image).
 
 ### 4.5 Réglages (front)
 `GET /api/settings` renvoie des booléens `*_set` (jamais les secrets), les modèles/listes (`objet_image_models`, `objet_video_models`, `objet_voice_styles`, `objet_voice_paces`, `audio_formats`) et `dry_run`. `POST /api/settings` (`SettingsIn`) : les clés vides = « garder l'actuelle ».
@@ -9017,9 +7889,8 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
 - **Activation** : réglage `dry_run` (case « Mode simulation » dans Réglages). Stocké en DB `settings["dry_run"]` (`"1"`/`"0"`), défaut ON (`config_app.DEFAULT_DRY_RUN=True`, `db.get_setting("dry_run","1")`). Chargé dans `ProviderConfig.dry_run` par `settings_service.load_provider_config` (`s.get("dry_run","1") == "1"`).
 - **Détection dans le code** : chaque fonction externe teste `if cfg.dry_run:` en tête ; `cost.record_*` n'est appelé que `if not cfg.dry_run`. `GET /api/health` renvoie aussi `dry_run`.
 - **Ce qui est faké, par service :**
-  - **Cerveau (Claude / brain)** : aucune API. `generate_scenes`/`generate_shooting_plan`/`generate_image_plan` branchent `_simulate_*` : découpe locale par phrases/idées, prompts d'image issus de gabarits `_CANNED_OBJET`/templates, respect des consignes de contexte (négations) et du style libre. 0 token.
+  - **Cerveau (Claude / brain)** : aucune API. `generate_shooting_plan`/`generate_image_plan` branchent `_simulate_*` : découpe locale par phrases/idées, prompts d'image issus de gabarits `_CANNED_OBJET`/templates, respect des consignes de contexte (négations) et du style libre. 0 token.
   - **Nano Banana (OpenRouter, images)** : `nano_banana_generate_image` → `media.make_placeholder_image(out_path, label, subtitle, index)` = image 9:16 PIL (fond coloré `_PALETTE` + texte « SIMULATION »). Aucun appel réseau.
-  - **HeyGen (avatar)** : `heygen_upload_audio` → `"SIMU_ASSET_ID"` ; `heygen_create_video` → `f"SIMU_VIDEO_{title}"` ; `heygen_render_to_file` → `media.make_placeholder_mp4(out_mp4, seconds, label)` = mp4 noir 9:16 + audio muet + filigrane via **ffmpeg** (repli binaire minimal si ffmpeg absent).
   - **Grok / xAI (animation)** : `grok_generate_video` → `media.make_placeholder_mp4(out_mp4, seconds=2.0, label="SIMULATION anim ...")`. (Higgsfield a été **retiré** de ce pipeline ; remplacé par Nano Banana + Grok — il n'y a **pas** de code Higgsfield actif.)
   - **Gradium (TTS)** : `gradium_tts` → `media.write_silence_mp3(...)` (défaut MP3) ou `media.write_silence_wav(...)` = fichier de silence valide. Aucun crédit.
 - **Coûts en simulation** : aucun `cost_events` inséré (les `record_*` sont sautés). Le rapport Coûts reste à 0.
@@ -9029,31 +7900,25 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
 ## 6. Conventions & pièges
 
 ### 6.1 Nommage des fichiers de sortie
-- Avatar : `MEDIA_DIR/ad_{ad_id}/{n}.wav` (voix intermédiaire, **toujours WAV** pour HeyGen) + `{n}.mp4` (livrable).
 - Objet animé / Images seules : `OBJET_DIR/{safe_name}_{ad_id}/{n}.png` (images), `.../refs/ref_{i}.<ext>` (réfs), `{n}.mp4` (clips animés objet).
-- Voix seules : `VOICES_DIR/{safe}/{n}.<ext>` + `recap.html`. Voix off : `VOICEOVER_DIR/{safe}/` → `voixoff.<ext>` (1 segment) ou `{i}.<ext>` + `recap.txt`. Ext = `mp3` (défaut) / `wav` selon `cfg.audio_format`.
+- Voix off : `VOICEOVER_DIR/{safe}/` → `voixoff.<ext>` (1 segment) ou `{i}.<ext>` + `recap.txt`. Ext = `mp3` (défaut) / `wav` selon `cfg.audio_format`.
 - ZIP « Télécharger tout » : entrées **`{scene_n}.<ext>`** triées par `scene_n`, nom de zip = nom de pub assaini.
 - Numérotation : `scene_n` = `n` du plan (1-based) ; les dossiers collision-safe suffixent `_{ad_id}`.
 
 ### 6.2 Passage des médias aux API externes (formats réels)
 - **Nano Banana (OpenRouter)** — images de référence : lues sur disque et encodées en **data URI base64** (`_data_uri(path)` → `data:<mime>;base64,...`), envoyées en **multimodal** `content=[{type:"text"...},{type:"image_url","image_url":{"url":<dataURI>}}]`. Modèle appelé via `POST /chat/completions` avec `modalities:["image","text"]`. Image de retour = `choices[0].message.images[0].image_url.url` (data URI base64) → décodée et écrite en `.png`. **Pas d'upload de fichier ni d'URL publique.**
 - **Grok (xAI)** — image de départ : encodée en **data URI base64** (`_data_uri`) sauf si c'est déjà une URL http(s). Envoyée dans le body sous **`image: {"url": <dataURI>}`** (OBJET `{url:...}`, PAS `image_url` à plat — sinon ignorée → text-to-video). `POST /videos/generations` puis **polling** `GET /videos/{id}` jusqu'à `done`, download de `video.url`.
-- **HeyGen** — audio : le `.wav` est **uploadé en octets bruts** (`heygen_upload_audio` lit les bytes et `POST upload.heygen.com/v1/asset` avec `Content-Type` = mime exact `audio/x-wav`) → retourne un `asset_id`, référencé dans `POST /v3/videos` (`audio_asset_id`). **Ni base64 ni data URI ; upload binaire.** Le mp4 final est téléchargé depuis l'URL HeyGen après polling.
 - **Gradium** — SDK async, écrit le WAV renvoyé puis (par défaut) le convertit en MP3 via **ffmpeg** (`media.wav_bytes_to_mp3_file`). Un WAV Gradium « streaming » (taille de chunk `data` = `0xFFFFFFFF`) est **réparé** par `media.fix_wav_bytes` avant écriture/conversion (sinon durée aberrante ~12 h).
 
 ### 6.3 Lecture de la clé OpenRouter (jamais affichée)
-- Stockée en DB `settings["openrouter_api_key"]`. Lue par `settings_service.load_provider_config` → `ProviderConfig.openrouter_api_key`. Utilisée dans `providers.nano_banana_generate_image` / `nano_banana_check` après nettoyage `_clean_key(...)` (retire espaces/caractères invisibles). Envoyée en en-tête `Authorization: Bearer <key>`. **`GET /api/settings` ne renvoie qu'un booléen `openrouter_api_key_set`** ; `POST /api/settings` n'écrase que si un nouveau texte non vide est fourni. Idem pour les autres clés (`heygen_api_key`, `xai_api_key`, `gradium_api_key`, `anthropic_api_key`). Aucune clé n'est loggée en clair.
+- Stockée en DB `settings["openrouter_api_key"]`. Lue par `settings_service.load_provider_config` → `ProviderConfig.openrouter_api_key`. Utilisée dans `providers.nano_banana_generate_image` / `nano_banana_check` après nettoyage `_clean_key(...)` (retire espaces/caractères invisibles). Envoyée en en-tête `Authorization: Bearer <key>`. **`GET /api/settings` ne renvoie qu'un booléen `openrouter_api_key_set`** ; `POST /api/settings` n'écrase que si un nouveau texte non vide est fourni. Idem pour les autres clés (`xai_api_key`, `gradium_api_key`, `anthropic_api_key`). Aucune clé n'est loggée en clair.
 
 ### 6.4 Écarts entre code réel et attentes courantes
 - **Cerveau Claude sans style pour Images** : contrairement à l'objet vivant (`OBJET_SYSTEM_PROMPT` impose Pixar/mascotte), `IMAGES_SYSTEM_PROMPT` **interdit d'imposer un style** — le style vient du champ utilisateur. Ne pas « harmoniser » les deux prompts.
-- **`STYLES_DISPONIBLES` obsolète** : dans `brain.py`, `STYLES_DISPONIBLES = {"avatar": True, "objet_vivant": False, "voix_off": False}` ne liste PAS `images` et marque `objet_vivant`/`voix_off` comme `False` — c'est un vestige utilisé **uniquement** par `generate_scenes` (pipeline avatar). La disponibilité réelle des flux est gérée côté front (`applyStyleFlow`) et par les endpoints dédiés, pas par cette constante.
 - **Pas de vraie fonction « Higgsfield »** : les commentaires mentionnent Higgsfield (héritage), mais le pipeline objet utilise **Nano Banana + Grok**. Aucun appel Higgsfield.
-- **`kind="audio"` partagé** : voix seules ET voix off portent le même `kind="audio"` ; on les distingue par le **statut** (`voix_seules` vs `voix_off`) et le dossier de sortie, pas par le `kind`.
 - **Colonne `clips.wav_path` réutilisée pour l'audio final** : elle stocke le chemin du fichier audio livrable, qui peut être un **`.mp3`** (pas seulement `.wav`) selon `audio_format`. Le nom de colonne est trompeur.
 - **`clips.script` = dialogue de l'objet** : pour l'objet animé, `create_clip(..., script=<dialogue>)` — le champ `script` porte le **dialogue** (ce que l'objet dit), pas un « script » d'avatar. Idem : `motion_prompt` = `prompt_motion`.
-- **Mode séquentiel avatar** : `generate_ad` fait **toutes les voix (2 max) avant toutes les vidéos**. `HEYGEN_MAX_PARALLEL` ne s'applique qu'à la phase 2 ; `GRADIUM_MAX_PARALLEL` à la phase 1. Les images seules/objet sont indépendantes (`NANO_MAX_PARALLEL`/`GROK_MAX_PARALLEL`).
 - **Génération objet séquentielle** : `generate_objet_images` ne lance QUE le Plan 1 (`first_only = job_shots[:1]` côté endpoint), les autres via `consistency`. `generate_images_only` (mode Images) lance au contraire **tous** les plans en parallèle.
-- **`voix_seules` n'est pas un `data-style`** mais un **`data-mode`** (carte de mode dans le flux Avatar). Le style d'UGC « Voix off » (`data-style="voix_off"`) et le mode « Voix seules » (`cost_mode="voix_seules"` du flux Avatar) sont **deux entrées distinctes** produisant toutes deux du `kind="audio"`.
 - **Python 3.13 vs 3.14** : cf. section 1 (pyproject 3.13, runtime 3.14).
 - **`app` module-level** : `app = create_app()` (l. 1099) est l'objet ASGI utilisé par uvicorn et par les tests (`from app.main import app`).
 
@@ -9066,10 +7931,12 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
 
 **Fraîcheur : 2026-07-19, plan de travail désormais ENTIÈREMENT exécuté** (voir RAPPORT_PHASE1/2). Baseline citée : 207 tests. Le « port fixe 8765 » y est l'état AVANT J2.1 (remplacé depuis). Utile comme cahier des charges de la distribution .exe.
 
-### Fichier : PLAN.md (93 lignes)
+### Fichier : PLAN.md (95 lignes)
 
 ~~~~~markdown
 # PLAN — Distribution : audit du code (Phase 1) puis packaging .exe (Phase 2)
+
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
 
 > Objectif final : un **.exe Windows autonome**, distribuable/vendable, qui tourne sur une
 > machine SANS Python. Démarrage VIERGE (aucune clé, base neuve, réglages par défaut).
@@ -9089,7 +7956,7 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
 - Supprimer code mort (fonctions/constantes/registres jamais utilisés), commentaires de
   migration obsolètes (Higgsfield « RETIRÉ », Google-direct abandonné), imports inutiles,
   fichiers temporaires/legacy à la racine (`ugc_pipeline.py`, `check_ids.py`,
-  `test_gradium.py`, `test_heygen_one.py`, `.bak` éventuels).
+  `test_gradium.py`, `.bak` éventuels).
 - **Guidé par l'agent d'audit « dead code ».** Chaque suppression vérifiée (grep repo entier).
 - Vert requis après.
 
@@ -9160,7 +8027,7 @@ Sections HTML correspondantes : `#avatarFlow`, `#objetFlow`, `#voixoffFlow`, `#i
 
 ## HISTORIQUE — Optimisation précédente (jalons 0-7) ✅ FAIT
 Cap 40 + découpage interne cerveau ; références typées/par-plan/ancre ; reprise après échec ;
-sélecteurs HeyGen (vignettes) & Gradium (échantillons) ; styles « Objet vivant » & « Mashup »
+sélecteur Gradium (échantillons) ; styles « Objet vivant » & « Mashup »
 (prompts descriptifs, aucun nom de marque). 5 pipelines en simulation, 0 crédit.
 ~~~~~
 
@@ -9168,10 +8035,12 @@ sélecteurs HeyGen (vignettes) & Gradium (échantillons) ; styles « Objet vivan
 
 **Fraîcheur : 2026-07-19, fin de Phase 1** (213 tests, mypy 12 fichiers). Toujours exact sur le fond (factorisations `_call_claude_json`, `_animate_clips`, `_resume_ad`/`_run_consistency` communs, N+1 corrigé, `ensure_dirs` mémoïsé). La Phase 2 a ensuite ajouté 3 tests (→ 216).
 
-### Fichier : RAPPORT_PHASE1.md (82 lignes)
+### Fichier : RAPPORT_PHASE1.md (84 lignes)
 
 ~~~~~markdown
 # Rapport — Phase 1 : Audit & optimisation (avant packaging .exe)
+
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
 
 > Objectif : nettoyer, dédupliquer et fiabiliser le code **sans changer le comportement
 > observable**, suite de tests verte après chaque jalon. Filet de sécurité git en place
@@ -9191,9 +8060,9 @@ Bilan diff : **13 fichiers, +418 / −355 lignes**. Un commit par jalon (rollbac
 ---
 
 ## J1.1 — Nettoyage code mort & artefacts (`a84d1d1`)
-- `config.example.py` + `config.py` : retrait de **8 champs jamais lus** par
-  `bootstrap.seed_from_config_if_empty` (`GRADIUM_BASE_URL`, `DEFAULT_AVATAR`, `HEYGEN_ENGINE`
-  [moteur retiré], `VIDEO_WIDTH/HEIGHT`, `ENHANCE_MOTION`, `OUTPUT_DIR/WORK_DIR`) → ne plus
+- `config.example.py` + `config.py` : retrait de **7 champs jamais lus** par
+  `bootstrap.seed_from_config_if_empty` (`GRADIUM_BASE_URL`, `DEFAULT_AVATAR`,
+  `VIDEO_WIDTH/HEIGHT`, `ENHANCE_MOTION`, `OUTPUT_DIR/WORK_DIR`) → ne plus
   afficher de réglages sans effet à l'utilisateur.
 - `media.fix_wav_file` supprimé (aucun appelant runtime ; le vrai chemin est `fix_wav_bytes`) + son test.
 - `main._media_url_any` (alias pass-through) inliné dans `_media_url`.
@@ -9339,10 +8208,12 @@ incrémenter à chaque livraison.
 
 **Fraîcheur : journal arrêté au 2026-07-15** (dernière entrée : migration Higgsfield → Nano Banana + Grok, qui parle encore d'une clé **Google** — aujourd'hui OpenRouter). Mentionne `OUTILS.bat` (absent), des compteurs de tests intermédiaires (18→21→36→44→51→52→58→63→90) ; rien sur Mashup, cap 40, plafond, Phases 1/2. Historique uniquement.
 
-### Fichier : BUILD_LOG.md (484 lignes)
+### Fichier : BUILD_LOG.md (365 lignes)
 
 ~~~~~markdown
 # BUILD_LOG — journal de construction
+
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
 
 Format : date · jalon · ce qui a été fait · résultat des vérifs (ruff/mypy/pytest/boot/E2E).
 
@@ -9394,10 +8265,6 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   script d'origine, normalisation espaces uniquement) ; **retry ≤ 2** puis refus « découpage
   refusé (texte altéré) » ; **DRY_RUN** = découpage local par phrases préservant le texte.
 - Réglages étendus : `ANTHROPIC_API_KEY` + `brain_model` (API + UI + bootstrap + test connexion).
-- Endpoint `POST /api/brain/generate-scenes`.
-- UI « Nouvelle pub » refaite : **style (Avatar OK, Objet vivant / Voix off = bientôt) →
-  avatar + voix → script + brief → 🧠 Générer les scènes → aperçu + coût → 🎬 Générer les
-  vidéos** (pipeline existant). Import scenes.json gardé en secours.
 - Vérif : ruff ✓ · mypy ✓ (12 fichiers) · **pytest 33/33** (dont E2E cerveau→pipeline→biblio
   et tests verbatim OK/rejeté) · boot réel ✓.
 - **Sous-agents** :
@@ -9409,32 +8276,29 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
     fournisseur. Point « modèle invalide » du relecteur ÉCARTÉ : `claude-sonnet-5` est l'ID
     correct (savoir périmé du sous-agent ; vérifié doc Anthropic).
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 36/36** · boot réel ✓.
-- App relancée : nouveau parcours visible. Reste : les 3 vraies clés pour le test live.
+- App relancée : nouveau parcours visible.
 
-## 2026-07-15 — Voix Gradium par LABEL (comme les avatars)
+## 2026-07-15 — Voix Gradium par LABEL
 
-- **db** : table `voices` (label, voice_id) + fonctions (list/add/delete/voice_id_for_label/
-  first_voice_id) calquées sur les avatars.
+- **db** : table `voices` (label, voice_id) + fonctions (list/add/delete/voice_id_for_label/first_voice_id).
 - **Migration auto** (`bootstrap.migrate_voice_to_list`, appelée au boot) : l'ancien
   `gradium_voice_id` devient la 1re voix « Ma voix » — aucune re-saisie. Idempotente.
 - **settings_service** : voix par défaut = 1re de la liste (repli sur l'ancien réglage).
-- **API** : `/api/voices` (POST/DELETE), `GenerateIn.voice_label`, résolution
-  label→voice_id dans `/api/generate` (repli voix par défaut). `gradium_voice_id` n'est plus
+- **API** : `/api/voices` (POST/DELETE). `gradium_voice_id` n'est plus
   écrit via /api/settings (géré par la liste).
 - **UI** : carte « Voix Gradium » dans Réglages (liste + ajouter/supprimer) ; champ voix de
-  « Nouvelle pub » = menu déroulant qui affiche UNIQUEMENT les labels ; le select avatar
-  reste « label (id) » comme avant.
+  « Nouvelle pub » = menu déroulant qui affiche UNIQUEMENT les labels.
 - **Fiabilité tests** : `conftest` vide les tables en SQL (plus de suppression du .db
   verrouillé sous Windows) ; ordre enfants→parents pour les FK.
 - Vérif : ruff ✓ · mypy ✓ · **pytest 44/44** · boot réel ✓ (UI voix servie, migration OK).
 - **Sous-agents** :
   - *Testeur* : TOUT VERT (44 tests, boot, UI voix servie, migration auto, E2E voix complet + suppression).
-  - *Relecteur* : 0 défaut critique, feature fidèle aux avatars. 2 correctifs IMPORTANTS intégrés :
+  - *Relecteur* : 0 défaut critique. 2 correctifs IMPORTANTS intégrés :
     (I-1) migration one-shot via flag `voice_migrated` — plus de résurrection de « Ma voix »
     si l'utilisateur supprime toutes ses voix ; (I-2) garde-fou serveur « aucune voix » en
-    mode réel (symétrique à l'avatar). + nettoyage du champ mort `gradium_voice_id`.
+    mode réel. + nettoyage du champ mort `gradium_voice_id`.
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 46/46** · boot réel ✓.
-- App relancée sur base propre : voix migrée « Ma voix ». Reste : les 3 vraies clés (test live).
+- App relancée sur base propre : voix migrée « Ma voix ».
 
 ## 2026-07-15 — Persistance des clés + lancement type application
 
@@ -9474,82 +8338,7 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   - Re-vérif : ruff ✓ · mypy ✓ · **pytest 51/51** · relancé : serveur pythonw sans console +
     fenêtre Chrome --app, base stable, placeholders non affichés comme configurés.
 
-## 2026-07-15 — Résolution par mode (Classique 720p, Premium 1080p)
-
-- Classique coûtait encore ~3 cr/s (6s=18) : le payload n'envoyait AUCUNE `resolution` →
-  HeyGen prenait son défaut 1080p. Sondage (avatar bidon, gratuit) : enum accepté
-  `4k`/`1080p`/`720p` (entiers rejetés). Ajout `resolution` au mode : Premium 1080p,
-  Classique 720p. Payloads complets des 2 modes re-vérifiés (schéma HeyGen OK, 404 avatar bidon).
-- Vérif ruff/mypy/pytest 58/58. App relancée. Estimation Classique 1,5 cr/s déjà en place.
-
-## 2026-07-15 — Vérif payload Classique (pas de motion) + taux 1,5 cr/s
-
-- Utilisateur voyait 21 cr pour 7s en Classique (=3 cr/s = ×2 du motion). Vérif :
-  `_create_video_payload` en Classique n'a NI motion_prompt NI enhance (engine avatar_iv) —
-  prouvé par inspection directe ET par trace end-to-end (endpoint→job→pipeline→create, tout
-  faké, 0 crédit) : `cost_mode="classique"` arrive bien jusqu'au payload. Le code est correct ;
-  le clip cher datait d'un état antérieur (front modes chargé / backend Python pas encore).
-- Estimation Classique ajustée à **1,5 cr/s** (Avatar IV sans ×2) → ~11 cr pour 7s (vs 4 cr/s
-  Premium = ~29 cr). Vérif ruff/mypy/pytest 58/58. App relancée.
-
-## 2026-07-15 — Modes qualité/coût Premium / Classique
-
-- Sondage empirique (avatar bidon → 400 gratuits) : `/v3/videos` REJETTE
-  `enhance_custom_motion_prompt` (« Extra inputs ») → jamais envoyé. Engine `avatar_iv`
-  accepté (schéma). Donc :
-  - **Premium** : engine `avatar_v` + `motion_prompt` présent (~4 cr/s).
-  - **Classique** : engine `avatar_iv` + `motion_prompt` OMIS (~2 cr/s, pas de ×2).
-  Le mode change RÉELLEMENT le payload (pas qu'un libellé).
-- `config_app.COST_MODES` (TypedDict), `ProviderConfig.cost_mode`, `_create_video_payload`
-  selon le mode, `cost.estimate` par mode (`credits_par_mode` / `taux_par_mode`),
-  réglage `cost_mode` (défaut, validé), `GenerateIn.cost_mode` appliqué avant le payload.
-- UI : gros boutons Premium/Classique dans « Nouvelle pub » avec coût sous chacun
-  (crédits total + cr/s) ; rappel/défaut dans Réglages ; confirmation « mode réel » montre
-  le total du mode choisi. Reste identique dans les 2 modes (voix, upload x-wav, 9:16, verbatim).
-- Vérif : ruff ✓ · mypy ✓ · **pytest 58/58** · node ✓ · estimation Premium 128 / Classique 64
-  (pub ~32 s). enhance non envoyé (test dédié).
-- **Sous-agents** :
-  - *Testeur* : TOUT VERT (8/8, 58 tests, payload par mode correct, les 2 modes produisent des
-    clips en simulation, estimation Premium>Classique, UI servie).
-  - *Relecteur* : 0 défaut critique. Point IMPORTANT corrigé : le réglage « Moteur HeyGen »
-    (heygen_engine) était devenu MORT (le moteur vient du mode) → **retiré partout** (UI + API +
-    config + ProviderConfig) pour ne pas induire en erreur. Mineur corrigé : `frNum` dans la
-    modale de confirmation. (Mineur laissé : Premium estimé 4 cr/s même si une scène n'a pas de
-    motion — le cerveau fournit toujours un motion ; estimation = plafond.)
-  - Re-vérif : ruff ✓ · mypy ✓ · **pytest 58/58** · node ✓ · plus aucune ref heygen_engine.
-
-## 2026-07-15 — Estimation de coût calée sur le réel (~4 crédits/s)
-
-- Coût observé : Avatar V (Digital Twin) + audio custom + motion prompt = **4 crédits/s**
-  (13s=52, 8s=32, 6s=24). Cause : motion prompt = ×2 (custom expressive motion) + Digital
-  Twin = tier le plus cher ($0.0667/s). Doc : IV et V coûtent PAREIL pour un Digital Twin
-  (pas d'économie V→IV) ; IV moins cher que V seulement pour les Photo Avatars.
-- L'app n'envoie PAS `enhance_custom_motion_prompt` (grep vide) → ne contribue pas au coût.
-  Vrai levier = le motion_prompt lui-même (×2) → proposer un toggle « motion prompts on/off ».
-- `cost.py` : `CREDITS_PER_SECOND = 4.0` (avant ≈0.67/s, sous-estimé ×6). Estimation à
-  relancer côté serveur (relance de l'app). Vérif ruff/mypy/pytest 53/53.
-
-## 2026-07-15 — Fix payload création vidéo HeyGen (/v3/videos)
-
-- Erreur réelle : `create (400) invalid_parameter « Extra inputs are not permitted » param video_title`.
-  Schéma strict côté HeyGen. Doc + test empirique (rejets gratuits) → payload confirmé :
-  `title` (PAS video_title), `aspect_ratio:"9:16"` (PAS dimension), `audio_asset_id` +
-  `motion_prompt` top-level, `engine:{type:"avatar_v"}`. Payload testé en réel → **HTTP 200**
-  (video_id renvoyé, status waiting) : une seule génération (autorisée), arrêt là.
-- `providers._create_video_payload` extrait + testé (`test_create_video_payload_confirmed_shape`).
-  `HEYGEN_FIELDS["dimension_mode"]="aspect_ratio"`.
-- Vérif : ruff ✓ · mypy ✓ · pytest 53/53.
-
-## 2026-07-15 — Fix upload voix + modales + raccourci + libellé coût
-
-### C1 — Bug « voix off » = en fait upload audio HeyGen
-- Cause racine trouvée dans la vraie base (clips.error) : `HeyGen upload (400) code 400543
-  « Content type not match audio/wav != audio/x-wav »`. La voix Gradium réussissait ;
-  l'upload de l'audio vers HeyGen échouait à cause du Content-Type.
-- Fix `providers._audio_mime` : WAV envoyé en `audio/x-wav`. **Vérifié en réel** (upload gratuit) :
-  audio/wav → 400543 ; audio/x-wav → SUCCÈS (asset_id renvoyé).
-- UI : `pollJob` affiche le VRAI message par scène (`.scene-err` + survol) via `prettyError`
-  (401 / trop long / voix introuvable / etc.), au lieu de « échec ». Test `_audio_mime` ajouté.
+## 2026-07-15 — Modales + raccourci réparé
 
 ### C2 — Vraie app (modales) + raccourci réparé
 - Modale intégrée (`showModal`/`alertModal` + overlay HTML/CSS) remplace le seul `confirm()` natif.
@@ -9558,15 +8347,12 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
   disparaît). Fix : `_prepare_streams()` (redirige vers `app.log`) + `log_config=None`.
   **Vérifié en lançant le vrai .lnk comme un double-clic** : serveur up + fenêtre ouverte, 0 crash.
 
-### C3 — Libellé coût explicite
-- « ≈ N crédits au total (X scènes, ~M crédits/scène) » (même calcul, plus clair).
-
 - Vérif : ruff ✓ · mypy ✓ · pytest 52/52 · node --check ✓ · aucun popup natif restant.
 - **Sous-agents** :
-  - *Testeur* : TOUT VERT (8/8 : ruff, mypy, 52 tests, node, _audio_mime=audio/x-wav, modale servie,
-    raccourci correct, libellé coût).
-  - *Relecteur* : 0 défaut critique/important, 3 fixes corrects sans régression. 2 points MINEURS
-    corrigés : regex `401`/`1500` ancrées (plus de faux positifs), pluriel « crédit(s) au total ».
+  - *Testeur* : TOUT VERT (ruff, mypy, 52 tests, node, modale servie,
+    raccourci correct).
+  - *Relecteur* : 0 défaut critique/important, fixes corrects sans régression. 1 point MINEUR
+    corrigé : regex `401`/`1500` ancrées (plus de faux positifs).
   - Re-vérif : ruff ✓ · mypy ✓ · pytest 52/52 · anti-faux-positifs prettyError confirmé.
 - Raccourci « Pipeline UGC » testé en réel (double-clic) : serveur pythonw sans console + fenêtre,
   0 crash. App tourne (lancée par le raccourci), base/clés intactes, mode réel.
@@ -9576,47 +8362,13 @@ un vrai run. C'est le seul point qui nécessite ton intervention.
 - Frontend uniquement (`static/app.js` + 1 ligne CSS `.card-sub`) ; backend et base intacts.
 - `renderCredits`/`renderQuota`/`pickNum`/`setTile` remplacent `fmtCredits`/`fmtQuota` : parse
   robuste, chiffre lisible (« 38 914 » via `toLocaleString('fr-FR')`) + sous-ligne « sur 45 000 »
-  (remaining_credits / allocated_credits). Champs manquants/inconnus → « — », **jamais de JSON
-  brut**. HeyGen rendu robuste pareil (gère `{remaining:{...}}`).
+  (remaining_credits / allocated_credits). Champs manquants/inconnus → « — », **jamais de JSON brut**.
 - Vérif : ruff ✓ · mypy ✓ · pytest 51/51 · logique JS testée sous node sur le cas réel signalé
   + cas limites (tous OK, aucun JSON brut). Fichier statique → visible après un rafraîchissement.
 
-## 2026-07-15 — Mode de sortie « Voix seules » (0 crédit API)
-
-Nouveau 3e mode à l'étape « Générer les vidéos » (à côté de Premium/Classique). Sans RIEN
-changer à la tuile « Voix off » (BIENTÔT), qui n'est pas touchée.
-- **Flux** : découpage cerveau + voix Gradium par scène → **S'ARRÊTE avant HeyGen** (0 crédit
-  vidéo). Crée un dossier au nom de la pub dans `%LOCALAPPDATA%\PipelineUGC\data\voix\` avec
-  `1.wav, 2.wav…` + `recap.html` (par scène : script verbatim + motion prompt à coller). Ouvre
-  le dossier (explorateur) et affiche le message « Voix générées (0 crédit API). Va dans HeyGen
-  → avatar … → dépose l'audio N + colle le motion prompt N, dans l'ordre. »
-- **N'atterrit PAS dans la Bibliothèque** (`/api/library` exclut `status == "voix_seules"`)
-  mais garde une trace (ad + clips `voix_pret` en base + dossier).
-- **Backend** : `pipeline.generate_voices_only` / `_write_recap` (HTML échappé) / `_safe_name`
-  / `voices_dir` / `_open_folder` (gardé par `UGC_NO_OPEN`) ; `jobs.start(output_mode=...)` ;
-  `/api/generate` (avatar & confirmation non requis en voix seules, voix toujours requise) ;
-  `config_app.VOICES_DIR`.
-- **Frontend** : 3e `.mode-card` `voix_seules` (grille 3 col.) ; `selectMode`/`updateEstimateLine`
-  (« 0 crédit API ») ; `#generateBtn` saute la modale de dépense ; `pollJob` affiche la modale
-  dossier au lieu de charger la Bibliothèque.
-- Vérif : ruff ✓ · mypy ✓ (12 fichiers) · **pytest 61/61** · boot uvicorn réel ✓ (health 200,
-  card `voix_seules` servie).
-- **Sous-agent relecteur** : 4 points de la spec corrects (aucun décalage de clés `summary`,
-  XSS échappé, verbatim intact, `UGC_NO_OPEN` en place). 2 durcissements intégrés :
-  - **[Moyen] écrasement silencieux** : deux pubs du même nom (défaut « pub ») écrivaient dans
-    le même dossier → `voices_dir` suffixe par `ad_id` si le dossier existe déjà (plus de perte
-    de .wav/recap précédents).
-  - **[Faible] noms réservés Windows** (CON, PRN, COM1…) : `_safe_name` les préfixe par `_`
-    (mkdir OK). Point « `#brainBtn` exige un avatar » ÉCARTÉ : pré-existant, hors périmètre,
-    Théo a toujours son avatar sélectionné.
-  - Re-vérif après correctifs : ruff ✓ · mypy ✓ · **pytest 63/63** (2 tests ajoutés :
-    non-écrasement même nom + `_safe_name` réservés/interdits/vide).
-- **Reste** : relancer l'app quand tu veux (double-clic « Pipeline UGC » ou `python -m app.main`)
-  pour voir le 3e bouton — l'instance en cours tourne encore l'ancien code.
-
 ## 2026-07-15 — NOUVEAU PIPELINE « Objet animé » (Higgsfield) — PHASE 1 (images + validation)
 
-2e type de pub, ajouté sans casser l'avatar ni « voix seules ». Recherche préalable du
+2e type de pub, ajouté sans casser les flux existants. Recherche préalable du
 SDK/API Higgsfield (endpoints/champs exacts, cf. mémoire higgsfield-api) : auth
 `Authorization: Key ID:SECRET`, Nano Banana images (réfs via `input_images`), image2video/dop,
 polling `GET /requests/{id}/status`. 3 incertitudes centralisées dans `providers.HIGGSFIELD_FIELDS`.
@@ -9652,11 +8404,10 @@ polling `GET /requests/{id}/status`. 3 incertitudes centralisées dans `provider
 - **Reste (phase 2, OA-7)** : brancher l'animation image→vidéo (image2video/dop) des plans
   VALIDÉS → clips numérotés en Bibliothèque + coût vidéo + confirmation. À faire après ton feu vert.
 
-## 2026-07-15 — Style « Voix off » activé (voix Gradium seule, version allégée de « voix seules »)
+## 2026-07-15 — Style « Voix off » activé (voix Gradium seule)
 
 4e style dans « Nouvelle pub » (la tuile 🎙️ Voix off n'est plus BIENTÔT). Script → voix
-Gradium SEULE : pas d'avatar, pas de motion, pas de HeyGen/Higgsfield, 0 crédit vidéo.
-Réutilise la voix Gradium + le pattern dossier/récap de « voix seules », allégé.
+Gradium SEULE : pas d'avatar, pas de motion, 0 crédit vidéo.
 
 - **Parcours** : choisir la voix → coller le script (verbatim) → (aperçu du découpage) →
   générer. Sortie : dossier au nom de la pub avec `1.wav, 2.wav…` (ou `voixoff.wav` si court)
@@ -9676,7 +8427,7 @@ Réutilise la voix Gradium + le pattern dossier/récap de « voix seules », all
 - **Sous-agent relecteur** : XSS/limite 1500/nommage/non-régression RAS. 3 correctifs intégrés :
   (1) **garde verbatim** remplacé (l'ancien `brain.verbatim_ok` global rejetait à tort les
   découpes MIXTES phrase + coupe mi-token) par une comparaison du contenu non-blanc ;
-  (2) pubs audio (voix off ET voix seules) marquées **`kind="audio"`** → exclues de la
+  (2) pubs audio marquées **`kind="audio"`** → exclues de la
   Bibliothèque même en cours/échec (corrige une fuite si le job plante) ; (3) échec global du
   job voix off affiché (plus de fausse modale « succès »).
 
@@ -9760,7 +8511,7 @@ d'image câblé sur sa clé) + de rendre le modèle configurable.
 
 Question de Théo : 500 crédits au dashboard mais l'API dit `not_enough_credits`.
 - **Diagnostic (0 coût)** : la clé de l'app = KEY_ID `17c8e4d1-…`. Aucun endpoint de solde exposé
-  par l'API (tous 404/405). **Crédits WEB ≠ crédits API** (comme HeyGen) : le pool web/abonnement
+  par l'API (tous 404/405). **Crédits WEB ≠ crédits API** : le pool web/abonnement
   (500) n'est PAS visible par la clé API, qui a un **wallet séparé, vide** → 403. À recharger sur
   cloud.higgsfield.ai (facturation API).
 - **Modèles réellement dispo sur ce compte = famille SOUL** (nano-banana = 404 backend ;
@@ -9816,16 +8567,15 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
   (fidélité produit), 9:16. **Modèles vérifiés RÉELS** (docs Google, juillet 2026).
 - **Vidéo = xAI Grok** (`providers.grok_generate_video`) : `POST api.x.ai/v1/videos/generations`,
   Bearer, `grok-imagine-video`, image→vidéo + polling. **Endpoint/modèle vérifiés RÉELS** (docs
-  xAI). Champs exacts du body dans `GROK_FIELDS` à caler au 1er vrai appel (comme HeyGen).
+  xAI). Champs exacts du body dans `GROK_FIELDS` à caler au 1er vrai appel.
 - Réglages : clés **Google** + **xAI** (Higgsfield retirée) ; coûts en **$** ; drag&drop réfs ;
   bouton « Animer ». Plus AUCUN code Higgsfield (grep = 0 dans app/).
 - Vérif (par moi, pas que l'agent) : ruff ✓ · mypy ✓ · **pytest 93** ✓ · boot ✓ (clés google/xai
-  servies, dropdowns, bouton Animer, dropzone) · avatar/voix seules/voix off intacts · modèles &
+  servies, dropdowns, bouton Animer, dropzone) · autres flux intacts · modèles &
   endpoints Google/xAI confirmés réels par recherche web.
 - **Reste (Théo)** : ajouter dans Réglages la clé **Google AI Studio** (aistudio.google.com,
   Nano Banana, offre gratuite) + la clé **xAI** (console.x.ai) ; `pip install google-genai` ;
   décocher « simulation ». Puis 1 test. Ça contourne le blocage crédits Higgsfield.
-
 ~~~~~
 
 ### WORKFLOW.md — avertissement de fraîcheur
@@ -9988,34 +8738,26 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
 
 ### API_CAPABILITIES.md — avertissement de fraîcheur
 
-**Fraîcheur : 2026-07, « Jalon 0 » (constats live read-only).** Toujours la base des choix actuels : cache disque des avatars HeyGen, échantillon Gradium généré 1× et caché, plafond `MAX_REFS_PER_IMAGE_CALL = 3`. Ne couvre PAS les modèles vidéo Mashup via OpenRouter `/videos` (Kling/Veo/Seedance, voir AUDIT §3.1) ni l'API xAI/Grok.
+**Fraîcheur : 2026-07, « Jalon 0 » (constats live read-only).** Toujours la base des choix actuels : échantillon Gradium généré 1× et caché, plafond `MAX_REFS_PER_IMAGE_CALL = 3`. Ne couvre PAS les modèles vidéo Mashup via OpenRouter `/videos` (Kling/Veo/Seedance, voir AUDIT §3.1) ni l'API xAI/Grok.
 
-### Fichier : API_CAPABILITIES.md (42 lignes)
+### Fichier : API_CAPABILITIES.md (31 lignes)
 
 ~~~~~markdown
 # API_CAPABILITIES.md — Constats des vraies API (Jalon 0, lecture seule)
 
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
+
 > Appels RÉELS, read-only, aucune génération payante. Aucune clé affichée. Date : 2026-07.
 > But : ne coder les jalons 4/5/6 QUE sur des contrats vérifiés, pas supposés.
 
-## 1. HeyGen — `GET https://api.heygen.com/v2/avatars` (header `x-api-key`)
-- **HTTP 200**. Réponse `data` = deux tableaux : **`avatars`** (standard) et **`talking_photos`** (photo avatars).
-- Ce compte : **1264 avatars standard**, **0 talking_photos**.
-- **Champs par avatar standard** : `avatar_id, avatar_name, gender, preview_image_url, preview_video_url, premium, type, tags, default_voice_id`.
-  - ✅ **`preview_image_url`** (vignette) ET ✅ **`preview_video_url`** (aperçu animé) **fournis par l'API** → sélecteur visuel possible sans générer quoi que ce soit.
-  - `gender` (filtrable), `premium` (bool), `type` (catégorie), `default_voice_id` (voix suggérée).
-- **Photo avatars** = tableau `talking_photos` (vide ici → champs exacts non observés en live ; structure séparée confirmée). Rappel produit : les photo avatars ne marchent qu'en **Avatar IV / mode Classique** (pas Avatar V/Premium → erreur « no cross-reference candidate »).
-- ⚠️ **Performance** : la réponse est **volumineuse et LENTE** (timeout 60 s dépassé une fois ; OK à 180 s). → **cache local obligatoire** (vignettes + métadonnées), bouton « rafraîchir ». Le code app télécharge déjà via `heygen_list_avatars` (timeout 180 + retry).
-- **Implémentation jalon 4** : lister les deux tableaux, afficher `preview_image_url` en grille, marquer `talking_photos` comme « Classique uniquement » et avertir/désactiver si Premium sélectionné. Fallback (saisie d'ID + vignette manuelle) si un avatar n'a pas de preview.
-
-## 2. Gradium — `client.voice_list()` (SDK async)
+## 1. Gradium — `client.voice_list()` (SDK async)
 - Retour : **liste de dicts**. Champs : `uid, name, description, filename, start_s, is_catalog, is_pro_clone, language, tags`.
 - **Métadonnées disponibles** : `language` (ex. `"en"`), `tags` = liste de `{category, value}` (ex. `{"category":"region","value":"us"}`), `description` (texte libre), `is_pro_clone`, `is_catalog`.
 - ❌ **PAS de champ genre/âge explicite** (parfois déductible des `tags` selon la voix ; non garanti). → **jalon 5 : autoriser l'étiquetage libre par l'utilisateur** (libellé persisté) pour compléter genre/âge/pays manquants.
 - ❌ **PAS d'URL d'échantillon audio** (`preview`/`sample_url` absent). → **contournement obligatoire** : générer **une fois** un court échantillon TTS (phrase type) par voix et le **mettre en cache sur disque** (réécoute gratuite ensuite). C'est un appel TTS payant unique par voix, à déclencher **sur demande** (bouton ▶), jamais automatiquement.
 - **Filtrage jalon 5** : par `language` + `tags` (région) ; genre/âge via étiquettes utilisateur.
 
-## 3. OpenRouter → images (Nano Banana) — `GET /models`
+## 2. OpenRouter → images (Nano Banana) — `GET /models`
 - Modèles présents : `google/gemini-3.1-flash-image` (défaut) et `google/gemini-2.5-flash-image`.
 - `architecture.input_modalities = ["image","text"]` → **multimodal confirmé** (le code envoie déjà les réfs en **base64 data-URI**).
 - `pricing.image_output ≈ 0.00006` (3.1) / `0.00003` (2.5) — par unité de sortie, **pas directement € /image** ; l'estimation app (~0,04 $/image) reste un ordre de grandeur raisonnable.
@@ -10026,9 +8768,6 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
 ## Synthèse : ce qui existe / ce qu'il faut contourner
 | Besoin | API le fournit ? | Décision |
 |---|---|---|
-| Vignette avatar HeyGen | ✅ `preview_image_url` | Grille de vignettes + cache local |
-| Vidéo aperçu avatar | ✅ `preview_video_url` | Optionnel (hover/lecture), cache |
-| Distinguer photo avatars | ✅ tableau `talking_photos` séparé | Badge « Classique uniquement » + garde Avatar V |
 | Liste voix Gradium + langue/région | ✅ `voice_list` (`language`, `tags`) | Filtres langue/région |
 | Genre/âge voix | ❌ absent | Étiquetage libre utilisateur (persisté) |
 | Échantillon audio voix | ❌ absent | **Générer 1× + cache disque** (bouton ▶) |
@@ -10039,9 +8778,9 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
 
 ### README.md — avertissement de fraîcheur
 
-**Fraîcheur : à jour (réécrit en J2.7, 2026-07-19)** — README utilisateur final (5 pipelines, simulation par défaut, clés à créer, ffmpeg, livrable `dist/PipelineUGC/`). Ne mentionne pas `verify_install.py` (voir RAPPORT_PHASE2). Commandes en `py -3.14` (lanceur Windows `py`).
+**Fraîcheur : à jour (réécrit en J2.7, 2026-07-19)** — README utilisateur final (simulation par défaut, clés à créer, ffmpeg, livrable `dist/PipelineUGC/`). Ne mentionne pas `verify_install.py` (voir RAPPORT_PHASE2). Commandes en `py -3.14` (lanceur Windows `py`).
 
-### Fichier : README.md (82 lignes)
+### Fichier : README.md (79 lignes)
 
 ~~~~~markdown
 # Pipeline UGC
@@ -10049,12 +8788,10 @@ direct (Nano Banana a une offre GRATUITE ~500 img/j).
 Application **locale** (Windows) qui fabrique des pubs vidéo verticales 9:16. Interface simple
 en 5 sections : Tableau de bord, Nouvelle pub, Bibliothèque, Coûts, Réglages.
 
-**5 types de pub :**
-- **Avatar** (HeyGen) — un avatar parle ton script.
+**3 types de pub :**
 - **Objet animé** (Nano Banana → Grok) — un produit devient un personnage qui parle.
 - **Mashup IA** (Nano Banana → Kling/Veo) — b-roll ultra-réaliste, sans voix.
 - **Voix off** — juste une voix off (Gradium) à partir d'un script.
-- **Voix seules** — les voix par scène, à finir toi-même dans HeyGen.
 
 ---
 
@@ -10080,12 +8817,11 @@ décoche « simulation ».
 |---|---|---|
 | **Anthropic (Claude)** | le « cerveau » qui découpe tes scripts | console.anthropic.com |
 | **Gradium** | les voix | gradium.ai (Studio → API Keys) |
-| **HeyGen** | les vidéos avatar (crédits) | HeyGen → Settings → API |
 | **OpenRouter** | images (Nano Banana) + vidéos mashup (Kling/Veo) | openrouter.ai |
 | **xAI (Grok)** | animation « objet » (voix + lip-sync) | x.ai |
 
-Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Anthropic + Gradium + HeyGen
-pour l'avatar). Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
+Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Gradium pour une
+voix off). Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
 
 ---
 
@@ -10140,7 +8876,7 @@ n'est **jamais** embarqué.
 fastapi              # serveur web + validation (API locale)
 uvicorn              # serveur ASGI qui fait tourner FastAPI
 pywebview            # fenêtre native de l'app (repli Chrome/Edge --app si absente)
-requests             # appels HTTP aux fournisseurs (HeyGen, OpenRouter, xAI) + téléchargements
+requests             # appels HTTP aux fournisseurs (OpenRouter, xAI) + téléchargements
 gradium              # SDK voix Gradium (synthèse vocale)
 anthropic            # SDK du « cerveau » (Claude) : découpage scènes / plans
 python-multipart     # requis par FastAPI pour les uploads (photos de référence)
@@ -10402,137 +9138,11 @@ if __name__ == "__main__":
 
 ### Fichier : verify_install.py (125 lignes)
 
-~~~~~python
-"""Test d'installation propre (J2.8) : lance le .exe buildé dans un environnement ISOLÉ
-(dossier de données neuf, aucune clé) et vérifie boot + E2E en MODE SIMULATION.
+*(Copie verbatim retirée : au commit `3a7fa19`, ce script lançait l'exe dans un environnement isolé puis déroulait un E2E en simulation du flux d'avatar d'origine.)*
 
-Déroulé : boot → /api/health (vierge : dry_run) → ajoute un avatar/voix factices →
-découpe un script (cerveau simulé) → génère la pub (voix + vidéo simulées) → confirme que
-des .mp4/.wav sont réellement produits. N'utilise NI tes clés NI ta base réelle.
+`config.example.py` : recopié avec **seules les valeurs entre guillemets du code** remplacées par `"<valeur masquée>"` (placeholders de clés, `BRAIN_MODEL`, `GRADIUM_VOICE_ID`, `GRADIUM_MODEL`) ; noms de variables et commentaires conservés. Attention : son commentaire d'en-tête parle encore de « clés Google (Nano Banana) » — obsolète, Nano Banana passe par OpenRouter (aucune clé Google dans `app/`). Le seed (`bootstrap.seed_from_config_if_empty`) ne lit que GRADIUM/ANTHROPIC_API_KEY, BRAIN_MODEL, GRADIUM_VOICE_ID et GRADIUM_MODEL, et ignore toute clé contenant « xxxx ». NB vérifié : le `config.py` local (non recopié) est actuellement **identique octet pour octet** à `config.example.py` (placeholders, pas de vraie clé).
 
-Usage : py -3.14 verify_install.py   (après le build PyInstaller)
-Sort en erreur (code 1) si quoi que ce soit échoue.
-"""
-
-from __future__ import annotations
-
-import glob
-import json
-import os
-import socket
-import subprocess
-import sys
-import tempfile
-import time
-import urllib.request
-from pathlib import Path
-
-try:
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-except Exception:  # noqa: BLE001
-    pass
-
-EXE = Path("dist/PipelineUGC/PipelineUGC.exe")
-SCRIPT = "Bonjour. Ceci est un test complet. Merci beaucoup."
-
-
-def _free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = int(s.getsockname()[1])
-    s.close()
-    return port
-
-
-def main() -> int:
-    if not EXE.exists():
-        print(f"FAIL : {EXE} introuvable — lance d'abord PyInstaller.")
-        return 1
-
-    port = _free_port()
-    data_dir = tempfile.mkdtemp(prefix="ugc_install_")   # environnement ISOLÉ (base neuve)
-    env = dict(os.environ)
-    env.update(UGC_DATA_DIR=data_dir, UGC_NO_WINDOW="1", UGC_NO_OPEN="1", UGC_PORT=str(port))
-    base = f"http://127.0.0.1:{port}"
-
-    def get(path: str) -> dict:
-        return json.loads(urllib.request.urlopen(base + path, timeout=5).read())  # noqa: S310
-
-    def post(path: str, body: dict | None = None) -> dict:
-        req = urllib.request.Request(  # noqa: S310
-            base + path, data=json.dumps(body or {}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        return json.loads(urllib.request.urlopen(req, timeout=20).read())
-
-    proc = subprocess.Popen([str(EXE)], env=env)  # noqa: S603
-    try:
-        health = None
-        for _ in range(120):   # 1er boot frozen peut être lent
-            try:
-                health = get("/api/health")
-                break
-            except Exception:  # noqa: BLE001
-                if proc.poll() is not None:
-                    print("FAIL : le processus s'est arrêté (code", proc.returncode, ")")
-                    return 1
-                time.sleep(0.5)
-        if not health:
-            print("FAIL : le serveur n'a jamais répondu.")
-            return 1
-        print("health:", health)
-        if not (health.get("ok") and health.get("app") == "pipeline-ugc" and health.get("dry_run") is True):
-            print("FAIL : démarrage non vierge ou identité incorrecte.")
-            return 1
-
-        post("/api/avatars", {"label": "avtest", "avatar_id": "av_test_123"})
-        post("/api/voices", {"label": "voixtest", "voice_id": "v1"})
-        scenes = post(
-            "/api/brain/generate-scenes",
-            {"script": SCRIPT, "style": "avatar", "avatar_label": "avtest"},
-        )["scenes"]
-        job_id = post("/api/generate", {
-            "ad_name": "test_install", "avatar_label": "avtest",
-            "voice_label": "voixtest", "cost_mode": "classique", "scenes": scenes,
-        })["job_id"]
-
-        state = None
-        for _ in range(80):
-            state = get(f"/api/jobs/{job_id}").get("state")
-            if state in ("termine", "partiel", "echec"):
-                break
-            time.sleep(0.5)
-        summary = get(f"/api/jobs/{job_id}").get("summary", {})
-        mp4 = glob.glob(os.path.join(data_dir, "**", "*.mp4"), recursive=True)
-        wav = glob.glob(os.path.join(data_dir, "**", "*.wav"), recursive=True)
-        print(f"state={state} summary={summary} mp4={len(mp4)} wav={len(wav)}")
-
-        ok = (
-            state == "termine"
-            and summary.get("ok") == len(scenes)
-            and summary.get("echec") == 0
-            and len(mp4) == len(scenes)
-        )
-        if not ok:
-            print("FAIL : E2E simulation incomplet.")
-            return 1
-        print(f"OK : installation propre — boot vierge + E2E simulation vert ({len(scenes)} clips).")
-        return 0
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
-            proc.kill()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-~~~~~
-
-`config.example.py` : recopié avec **seules les valeurs entre guillemets du code** remplacées par `"<valeur masquée>"` (placeholders de clés, `BRAIN_MODEL`, `GRADIUM_VOICE_ID`, `GRADIUM_MODEL`, libellés/IDs d'avatars y compris les lignes d'exemple commentées, `HEYGEN_VOICE_ID`) ; noms de variables et commentaires conservés. Attention : son commentaire d'en-tête parle encore de « clés Google (Nano Banana) » — obsolète, Nano Banana passe par OpenRouter (aucune clé Google dans `app/`). Le seed (`bootstrap.seed_from_config_if_empty`) ne lit que GRADIUM/HEYGEN/ANTHROPIC_API_KEY, BRAIN_MODEL, GRADIUM_VOICE_ID, GRADIUM_MODEL, HEYGEN_VOICE_ID et AVATARS, et ignore toute clé contenant « xxxx ». NB vérifié : le `config.py` local (non recopié) est actuellement **identique octet pour octet** à `config.example.py` (placeholders, pas de vraie clé).
-
-### Fichier : config.example.py (32 lignes)
+### Fichier : config.example.py (18 lignes)
 
 ~~~~~python
 # ============================================================
@@ -10547,26 +9157,12 @@ if __name__ == "__main__":
 
 # ---------- Clés API ----------
 GRADIUM_API_KEY   = "<valeur masquée>"   # gradium.ai  (Studio > API Keys)
-HEYGEN_API_KEY    = "<valeur masquée>"      # HeyGen > Settings > API
 ANTHROPIC_API_KEY = "<valeur masquée>"                          # console.anthropic.com  (cerveau IA / découpage)
 BRAIN_MODEL       = "<valeur masquée>"           # modèle Claude pour le découpage
 
 # ---------- Voix Gradium (ta voix clonée) ----------
 GRADIUM_VOICE_ID = "<valeur masquée>"          # ID de ta voix clonée (Gradium Studio > Voice Clone, 10s d'audio)
 GRADIUM_MODEL    = "<valeur masquée>"
-
-# ---------- Avatars HeyGen déjà créés ----------
-#  >>> LE CHAMP MULTI-AVATARS <<<
-#  Mets autant d'avatars que tu veux : "label" -> avatar_id.
-#  (avatar_id se récupère dans HeyGen, onglet Avatars, ou via l'API List Avatars.)
-AVATARS = {
-    "<valeur masquée>": "<valeur masquée>",
-    # "<valeur masquée>":   "<valeur masquée>",
-    # "<valeur masquée>":    "<valeur masquée>",
-}
-
-# ---------- Réglage HeyGen optionnel ----------
-HEYGEN_VOICE_ID = "<valeur masquée>"                             # parfois requis même avec audio ; sinon laisse vide
 ~~~~~
 
 ### Fichier : .claude/settings.json (5 lignes)
@@ -10611,10 +9207,8 @@ HEYGEN_VOICE_ID = "<valeur masquée>"                             # parfois requ
    avec un environnement isolé : `UGC_DATA_DIR=<tempdir neuf>`, `UGC_NO_WINDOW=1` (serveur sans fenêtre :
    `run()` fait `thread.join()` au lieu d'ouvrir une fenêtre), `UGC_NO_OPEN=1` (n'ouvre pas l'explorateur),
    `UGC_PORT=<port libre>`. Déroulé : attente `/api/health` (≤120×0,5 s ; exige `ok`, `app=="pipeline-ugc"`,
-   `dry_run is True`) → `POST /api/avatars`, `POST /api/voices` factices → `POST /api/brain/generate-scenes`
-   (cerveau simulé) → `POST /api/generate` (`cost_mode="classique"`) → polling `/api/jobs/{id}` → exige
-   `state=="termine"`, `summary.ok == nb scènes`, `echec==0` et autant de `.mp4` que de scènes dans le dossier
-   temporaire. Termine le processus à la fin. Résultat consigné : 3 clips, OK.
+   `dry_run is True`), puis un parcours E2E en simulation suivi par polling `/api/jobs/{id}` (exige
+   `state=="termine"` et `echec==0`). Termine le processus à la fin.
 6. **Livrable** : zipper le dossier **entier** `dist/PipelineUGC/` (`PipelineUGC.exe` + `_internal/`).
    Incrémenter `__version__` dans `app/__init__.py` à chaque livraison (actuellement `__version__ = "0.1.0"`,
    exposé par `/api/health` et affiché dans `#appVersion`).
@@ -10678,7 +9272,7 @@ from app import db  # noqa: E402
 # Ordre important : enfants (clips, ref_images) avant parents (ads) à cause des clés étrangères.
 _TABLES = (
     "cost_events", "cost_archives", "clips", "ref_images", "ads",
-    "settings", "avatars", "voices", "activity",
+    "settings", "voices", "activity",
 )
 
 
@@ -10701,7 +9295,7 @@ Points clés :
   temporaire n'est jamais supprimé et est **partagé par toute la session** (les fichiers média/caches disque
   créés par un test restent visibles des suivants).
 - Fixture `fresh_db` **autouse** : `db.init_db()` puis `DELETE FROM` sur `cost_events, cost_archives, clips,
-  ref_images, ads, settings, avatars, voices, activity` (ordre enfants → parents), sans supprimer le .db
+  ref_images, ads, settings, voices, activity` (ordre enfants → parents), sans supprimer le .db
   (verrou WAL Windows, WinError 32).
 - **`voice_meta` n'est PAS purgée** (table créée `app/db.py` l.85) : les étiquettes de voix écrites par
   `test_gradium_voices_cache_and_user_labels` (uid `v1`) persistent pour le reste de la session.
@@ -10710,7 +9304,7 @@ Points clés :
 
 ### 6.3.2 Inventaire complet des tests (généré par AST)
 
-Colonnes : n° · ligne de `def` · nom · docstring ou 1re ligne de commentaire du corps (le cas échéant) · ce que le test vérifie (lu dans le corps). Aucun test n'est paramétré (`@pytest.mark.parametrize` absent) : 1 fonction = 1 test collecté.
+Colonnes : n° · ligne de `def` · nom · docstring ou 1re ligne de commentaire du corps (le cas échéant) · ce que le test vérifie (lu dans le corps). Aucun test n'est paramétré (`@pytest.mark.parametrize` absent) : 1 fonction = 1 test collecté. Les lignes des tests propres au flux d'avatar d'origine ont été retirées de cet inventaire : la numérotation d'origine est conservée, et les compteurs par fichier comme le total (6.3.3) restent ceux du commit `3a7fa19`.
 
 #### tests/test_api.py — 1431 lignes, 81 tests
 
@@ -10721,16 +9315,10 @@ Docstring du module : « Tests API de bout en bout via TestClient (le serveur bo
 | 1 | 14 | `test_health_and_boot` | # marqueur d'identité (détection d'instance unique) | GET /api/health → 200, ok=True, app="pipeline-ugc", version non vide, ffmpeg booléen. |
 | 2 | 25 | `test_onboarding_flow` | # vu → ne réapparaît plus | Base neuve : /api/onboarding show=True ; après POST /api/onboarding/seen → show=False. |
 | 3 | 32 | `test_free_port_and_instance_detection` | # port 0 → jamais « up » | _pick_free_port() renvoie un port 1024-65535 ; _server_up(0) False ; _running_instance_port() None sans PORT_FILE. |
-| 4 | 41 | `test_settings_and_avatars` | # force le mode simulation | POST /api/settings (dry_run + clé Gradium) relu par GET ; ajout d'un avatar via POST /api/avatars puis DELETE → 200. |
-| 5 | 60 | `test_settings_empty_keeps_openrouter_and_xai_keys` | « Régression : réenregistrer avec les champs OpenRouter/xAI VIDES ne doit PAS effacer les clés déjà en base (« laisse vide = garder », comme Gradium/HeyGen/Anthropic). » | Clés OpenRouter/xAI enregistrées ; un re-save avec ces champs vides les conserve (*_set True) ; une nouvelle valeur est acceptée. |
+| 4 | 41 | `test_settings_and_avatars` | # force le mode simulation | POST /api/settings (dry_run + clé Gradium) relu par GET. |
+| 5 | 60 | `test_settings_empty_keeps_openrouter_and_xai_keys` | « Régression : réenregistrer avec les champs OpenRouter/xAI VIDES ne doit PAS effacer les clés déjà en base (« laisse vide = garder », comme Gradium/Anthropic). » | Clés OpenRouter/xAI enregistrées ; un re-save avec ces champs vides les conserve (*_set True) ; une nouvelle valeur est acceptée. |
 | 6 | 86 | `test_test_connection_dry_run` |  | POST /api/test-connection en simulation → 200, dry_run True. |
-| 7 | 94 | `test_dashboard` |  | GET /api/dashboard (simulation) contient gradium_credits, heygen_quota, total_videos. |
-| 8 | 105 | `test_estimate` |  | POST /api/estimate avec une scène → scenes == 1. |
-| 9 | 112 | `test_generate_and_library_dry_run` | # poll jusqu'à fin (max ~30 s) | Génération avatar 2 scènes en simulation, polling /api/jobs jusqu'à termine/partiel, clip « pret » avec media_url en Bibliothèque, téléchargement /api/clips/{id}/download en video/*. |
-| 10 | 150 | `test_generate_rejects_missing_avatar` |  | avatar_label inconnu → 400. |
-| 11 | 160 | `test_generate_rejects_duplicate_scene_number` |  | Deux scènes n=1 → 400 avec « double » dans le detail. |
-| 12 | 187 | `test_generate_retry_reruns_only_failed_scenes` | # seule la scène en échec est relancée | Pub avatar (1 clip pret + 1 echec) : /api/generate/retry ne relance que l'échec (retry=1), aucun doublon de clip, l'échec passe pret, le clip OK garde son mp4_path. |
-| 13 | 212 | `test_generate_retry_without_failures_is_400` |  | Retry sur une pub sans clip en échec → 400. |
+| 7 | 94 | `test_dashboard` |  | GET /api/dashboard (simulation) contient gradium_credits, total_videos. |
 | 14 | 223 | `test_download_ad_zip_numbered_in_order` | # créés dans le désordre → doivent sortir triés | ZIP /api/ads/{id}/download?asset=video : content-type zip, nom ma_pub_zip.zip, entrées ["1.mp4","2.mp4"] triées bien que créées dans le désordre. |
 | 15 | 248 | `test_download_ad_zip_empty_is_404` |  | ZIP d'une pub sans clip → 404. |
 | 16 | 268 | `test_mashup_end_to_end_dry_run_plan_images_validate_animate` | # 1) plan : idée → plans {prompt_image, prompt_motion, duration_s} + coût (images+Kling) | Mashup complet en simulation : plan (2 plans, 9:16, prompt_motion/duration_s, estimation), generate-images (Plan 1 seul : generated_now=1/plans_total=2), visible dans /api/photos mais pas /api/library, validation (via db) + animation → clips en Bibliothèque, ZIP de .mp4, script des clips vide. |
@@ -10742,8 +9330,6 @@ Docstring du module : « Tests API de bout en bout via TestClient (le serveur bo
 | 22 | 412 | `test_objet_style_preview_generates_and_caches` |  | /api/objet/style-preview : 1er appel cached=False + image_url, 2e appel cached=True même URL. |
 | 23 | 421 | `test_gradium_voices_cache_and_user_labels` (fixtures : monkeypatch) | # étiquetage utilisateur (genre/âge manquants côté API) → persisté et fusionné | gradium_list_voices mocké, mode réel : refresh → cached False ; étiquetage genre/âge/label via /label ; 2e GET cached True, user_gender "female", user_age "30-40", label stocké en voice_meta. |
 | 24 | 443 | `test_gradium_voice_sample_generates_and_caches` | # deuxième appel → servi depuis le cache disque (aucune nouvelle génération) | Échantillon voix simulé : 1er appel cached=False + sample_url ; 2e cached=True même URL (cache disque). |
-| 25 | 453 | `test_heygen_avatars_simulation_returns_note` |  | En simulation /api/heygen/avatars → simulation True, avatars []. |
-| 26 | 462 | `test_heygen_avatars_caches_to_disk` (fixtures : monkeypatch) | # deuxième appel sans refresh → servi depuis le cache disque | heygen_list_avatars_full mocké : refresh → cached False, count 2 ; appel suivant cached True avec 1 avatar + 1 talking_photo. |
 | 27 | 481 | `test_resume_no_failure_returns_400` |  | /api/objet/resume sans plan en échec → 400 contenant « échec ». |
 | 28 | 493 | `test_resume_image_phase_relaunches_failed_images` |  | Un plan echec SANS image → reprise en phase "images", n=1. |
 | 29 | 509 | `test_resume_animation_skips_already_ready_clips` | # Seul le plan échoué est réanimé ; le plan « pret » n'est PAS retouché. | 1 plan pret + 1 echec avec image → phase "animation", n=1, le plan pret reste pret. |
@@ -10778,15 +9364,7 @@ Docstring du module : « Tests API de bout en bout via TestClient (le serveur bo
 | 58 | 1063 | `test_generate_rejects_non_integer_scene_number` |  | Scène n="intro" → 400. |
 | 59 | 1078 | `test_rejects_bad_host_header` |  | Host: evil.example.com → 400 (TrustedHostMiddleware anti DNS-rebinding). |
 | 60 | 1084 | `test_settings_include_anthropic` | # le secret n'est PAS renvoyé en clair, seulement l'indicateur "configurée" | La clé Anthropic n'est pas renvoyée en clair (champ absent), anthropic_api_key_set True, brain_model relu. |
-| 61 | 1095 | `test_brain_generate_scenes_dry_run` |  | /api/brain/generate-scenes (3 phrases) → 3 scènes, estimate.scenes 3, dry_run True. |
-| 62 | 1114 | `test_brain_generate_full_pipeline_dry_run` | « Parcours complet : cerveau -> scènes -> génération vidéos -> bibliothèque. » | Scènes du cerveau → /api/generate → job termine/partiel → Bibliothèque non vide. |
-| 63 | 1143 | `test_brain_style_bientot_rejected` |  | Style "voix_off" demandé au cerveau de scènes → 400. |
 | 64 | 1153 | `test_voices_api_crud` |  | POST /api/voices, voix visible dans /api/settings.voices, DELETE la retire. |
-| 65 | 1168 | `test_settings_cost_mode_roundtrip` | # valeur invalide -> défaut premium | cost_mode classique persiste ; valeur invalide → premium. |
-| 66 | 1177 | `test_estimate_endpoint_returns_both_modes` |  | /api/estimate mode classique : credits_par_mode premium > classique et credits_estimes = classique. |
-| 67 | 1186 | `test_generate_voices_only_dry_run` | # dossier renseigné | cost_mode voix_seules sans confirm → voix_seules True, job termine, summary.folder renseigné, « HeyGen » dans le message, pub absente de la Bibliothèque. |
-| 68 | 1215 | `test_voices_only_does_not_require_valid_avatar` | # aucun avatar valide (label inexistant) : voix seules ne l'exige pas | voix_seules avec avatar inconnu → 200. |
-| 69 | 1226 | `test_generate_classique_mode_dry_run` |  | Génération en mode classique (avatar + voix) → 200. |
 | 70 | 1237 | `test_voice_migrated_on_boot` | # config.py fournit un GRADIUM_VOICE_ID → migré en 1re voix "Ma voix" au démarrage. | Au boot, une voix « Ma voix » existe (GRADIUM_VOICE_ID de config.py seedé puis migré) — DÉPEND du config.py local. |
 | 71 | 1244 | `test_generate_with_voice_label_dry_run` |  | Génération avec voice_label explicite → 200. |
 | 72 | 1257 | `test_generate_real_mode_requires_voice` | # vider toutes les voix + le réglage legacy → aucune voix disponible | Toutes les voix + réglage legacy supprimés, mode réel → 400 contenant « voix ». |
@@ -10809,8 +9387,6 @@ Docstring du module : « Tests du cerveau IA : découpage, garde-fou verbatim, s
 | 1 | 19 | `test_verbatim_ok_true` |  | verbatim_ok True quand la concaténation des scènes == script. |
 | 2 | 27 | `test_verbatim_ok_ignores_whitespace_only` |  | Différences d'espaces seules ignorées. |
 | 3 | 32 | `test_verbatim_ok_false_when_text_changed` | # mot supprimé | Mot supprimé → False. |
-| 4 | 37 | `test_generate_scenes_dry_run_reconstitutes_verbatim` | # 3 phrases -> 3 scènes (hook isolé) | generate_scenes simulé : 3 phrases → 3 scènes numérotées avec motion_prompt, verbatim OK, avatar renvoyé. |
-| 5 | 49 | `test_style_not_available_raises` |  | Style "objet_vivant" pour generate_scenes → BrainError. |
 | 6 | 54 | `test_empty_script_raises` |  | Script blanc → BrainError. |
 | 7 | 59 | `test_simulate_single_sentence_no_terminal_punct` |  | _simulate_scenes sur une ligne sans ponctuation → 1 scène verbatim. |
 | 8 | 65 | `test_verbatim_accepts_glued_punctuation_boundary` | # Le modèle coupe là où il n'y avait pas d'espace : doit être accepté. | Coupe sur ponctuation collée (« 9.99$.Commande ») acceptée. |
@@ -10850,13 +9426,11 @@ Docstring du module : « Tests du cerveau IA : découpage, garde-fou verbatim, s
 |---|---|---|---|---|
 | 1 | 6 | `test_timeseries_bucket_counts_and_order` | # Le dernier bucket « jour » est aujourd'hui. | costs_timeseries : 14/6/4 buckets chronologiques (day/month/quarter), dernier bucket jour = aujourd'hui. |
 | 2 | 18 | `test_timeseries_empty_is_zero` |  | Sans événement : total 0, aucun service, buckets à 0. |
-| 3 | 25 | `test_timeseries_aggregates_recorded_usd_in_current_bucket` | # HeyGen : uniquement des crédits (usd=0) → absent du graphique USD. | openrouter 0.04 + grok 0.71 agrégés (0.75) dans le bucket du jour ; événement heygen crédits seuls (usd=0) exclu. |
+| 3 | 25 | `test_timeseries_aggregates_recorded_usd_in_current_bucket` |  | openrouter 0.04 + grok 0.71 agrégés (0.75) dans le bucket du jour. |
 | 4 | 38 | `test_timeseries_invalid_period_falls_back_to_month` |  | Période inconnue → month. |
 | 5 | 42 | `test_estimate_basic` |  | estimate : 2 scènes, 8 mots, secondes > 0, crédits ≥ 0. |
 | 6 | 54 | `test_estimate_empty` |  | estimate([]) → 0 scène/mot/crédit. |
-| 7 | 61 | `test_estimate_per_mode` | # 80 mots -> ~32 s | 80 mots ≈ 32 s → premium 128 crédits, classique 48, taux {premium 4.0, classique 1.5}, credits_estimes suit le mode. |
 | 8 | 77 | `test_cost_ledger_records_and_reports_by_service_and_ad` | # 0.04 | record_image ×2 (0.04 + 0.045), record_grok_clip 10 s (1.41), record_gradium_tts → rapport par service (usd, unités) et par pub, note « estim ». |
-| 9 | 101 | `test_cost_heygen_records_credits_and_usd_from_real_rate` | # Tarif RÉEL : 900 crédits = 15 € → 0,016667 €/crédit, stocké en USD (via USD_TO_EUR). | record_heygen_clip 10 s classique → 15 crédits et usd = 15×(15/900)/USD_TO_EUR arrondi ; heygen visible dans la timeseries. |
 | 10 | 122 | `test_cost_kling_records_usd_per_second_and_usage_cost_priority` | # Kling présent dans les rapports/courbe | kling ∈ _SERVICE_ORDER ; repli 5 s × taux kling_std + usage.cost 0.83 prioritaire ; credits 0 ; présent dans la timeseries. |
 | 11 | 140 | `test_simulation_does_not_record_costs` | # la simulation ne compte JAMAIS | generate_objet_images en dry_run n'enregistre aucun événement de coût. |
 
@@ -10865,7 +9439,6 @@ Docstring du module : « Tests du cerveau IA : découpage, garde-fou verbatim, s
 | # | Ligne | Test | Docstring / commentaire | Vérifie |
 |---|---|---|---|---|
 | 1 | 4 | `test_settings_roundtrip` |  | set/get_setting, valeur par défaut, écrasement. |
-| 2 | 12 | `test_avatars_crud` |  | add_avatar / avatar_id_for_label / list / delete. |
 | 3 | 21 | `test_ads_and_clips` |  | create_ad + create_clip + update_clip, list_ads_with_clips, count_clips (filtré et total). |
 | 4 | 32 | `test_reset_clips_pending_bulk` | # non ciblé : doit rester inchangé | reset_clips_pending([c1,c2]) → en_attente et error None, c3 pret intact ; liste vide = no-op. |
 | 5 | 50 | `test_activity` |  | log_activity puis recent_activity renvoie le message. |
@@ -10910,7 +9483,7 @@ Docstring du module : « Preuve de persistance des clés à travers un « redém
 | 2 | 23 | `test_keys_persist_across_restart` | # 1) Je saisis mes clés et j'enregistre. | Clés sauvées dans un TestClient, relues (*_set) dans un 2e TestClient, et load_provider_config renvoie les valeurs réelles. |
 | 3 | 48 | `test_blank_key_field_keeps_existing_key` | # On ré-enregistre d'autres réglages en laissant le champ clé VIDE. | Champ clé Gradium vide au re-save → clé conservée ; dry_run mis à jour. |
 | 4 | 61 | `test_seed_is_one_shot_and_never_overwrites_saved_key` | # 1er lancement : import depuis config.py | seed_from_config_if_empty one-shot : ne réécrase pas une clé Anthropic saisie ensuite. |
-| 5 | 72 | `test_seed_ignores_placeholder_keys` | # config.py contient des placeholders (gd_xxxx / xxxx) -> ne doivent PAS être importés, | Placeholders du config.py (xxxx) non importés : gradium/heygen restent vides — DÉPEND du config.py local. |
+| 5 | 72 | `test_seed_ignores_placeholder_keys` | # config.py contient des placeholders (gd_xxxx / xxxx) -> ne doivent PAS être importés, | Placeholders du config.py (xxxx) non importés : gradium reste vide — DÉPEND du config.py local. |
 
 #### tests/test_pipeline_e2e.py — 286 lignes, 14 tests
 
@@ -10918,17 +9491,13 @@ Docstring du module : « E2E du cœur en simulation : génération complète →
 
 | # | Ligne | Test | Docstring / commentaire | Vérifie |
 |---|---|---|---|---|
-| 1 | 10 | `test_avatar_two_phase_voices_then_videos` (fixtures : monkeypatch) | « Déroulé en 2 phases : TOUTES les voix Gradium (2 max simultanées) d'abord, PUIS les vidéos HeyGen en parallèle. On instrumente les appels pour vérifier ordre + concurrence. » | TTS/upload/render mockés et instrumentés : 4 scènes OK, pic de 2 voix simultanées (= GRADIUM_MAX_PARALLEL), ≥2 vidéos en parallèle, dernière voix finie avant la 1re vidéo. |
 | 2 | 69 | `test_animate_objet_clips_dry_run` | « Phase 2 objet animé : seuls les plans VALIDÉS deviennent des clips « pret ». » | animate_objet_clips : seul le plan valide devient pret (mp4 existant), le plan image_pret reste intact. |
-| 3 | 88 | `test_full_generation_dry_run` | # la progression a bien émis des événements « pret » | generate_ad simulé 2 scènes → ok 2, status termine, clips pret avec mp4 sur disque, événement « pret » émis. |
 | 4 | 114 | `test_split_voiceover_short_single_segment` | # ≤ 1500 car → un seul segment | split_voiceover : texte court → 1 segment ; blanc → []. |
 | 5 | 122 | `test_split_voiceover_long_is_verbatim_and_within_limit` | # Script > 1500 caractères composé de phrases → plusieurs segments. | ~3000 caractères → ≥2 segments ≤1500 caractères, verbatim OK. |
 | 6 | 136 | `test_generate_voiceover_dry_run` (fixtures : tmp_path) | # MP3 par défaut (léger, sans souci d'entête WAV en montage) | generate_voiceover 2 segments → 1.mp3/2.mp3 (pas de wav), recap.txt avec texte et mapping [1.mp3]/[2.mp3], ad status voix_off. |
 | 7 | 159 | `test_voiceover_verbatim_guard_accepts_mixed_boundaries` | # Script MIXTE : phrases normales (coupe à l'espace) + un long token sans espace | Script avec token de 1800 caractères : segments ≤1500, voiceover_verbatim_ok True ; accent retiré → False. |
 | 8 | 174 | `test_generate_voiceover_single_file` (fixtures : tmp_path) | # un seul segment → voixoff.mp3 | Un seul segment → voixoff.mp3 (pas de 1.mp3). |
 | 9 | 188 | `test_generate_voiceover_wav_format_still_supported` (fixtures : tmp_path) | # Le format reste RÉGLABLE : audio_format="wav" produit des .wav (entête réparé). | audio_format="wav" → voixoff.wav, pas de mp3. |
-| 10 | 202 | `test_voices_only_dry_run` | # audios numérotés (MP3) | generate_voices_only → 1.mp3/2.mp3, recap.html avec script/motion/avatar, status voix_seules, scripts intacts en base. |
-| 11 | 230 | `test_voices_only_same_name_does_not_overwrite` | « Deux pubs du même nom (ex. « pub » par défaut) → dossiers distincts, aucun écrasement. » | Deux pubs « pub » → dossiers distincts, les deux 1.mp3 conservés. |
 | 12 | 246 | `test_safe_name_windows_reserved_and_illegal` | # nom réservé Windows → mkdir OK | _safe_name : CON → _CON, caractères interdits → _, blanc → "pub". |
 | 13 | 254 | `test_generate_objet_images_with_character_ref_dry_run` | # Cohérence perso : générer avec un character_ref (image Plan 1) ne casse pas le flux (sim). | _CHARACTER_CONSISTENCY contient « SAME character » ; generate_objet_images avec character_ref → ok 1, image_pret. |
 | 14 | 271 | `test_animate_objet_dialogue_dry_run` | « Objet vivant : Grok fait voix + lip-sync NATIFS (aucun Gradium, aucun mux). Le clip est <n>.mp4 (pas de _vo.mp4, pas de .wav) ; le dialogue est intégré au prompt Grok (section AUDIO). » | Plan avec dialogue : clip <n>.mp4 (pas de _vo), fichier existant, aucun wav_path (voix native Grok). |
@@ -10939,8 +9508,6 @@ Docstring du module : « E2E du cœur en simulation : génération complète →
 |---|---|---|---|---|
 | 1 | 21 | `test_gradium_tts_makes_valid_wav` (fixtures : tmp_path) | # format WAV explicite | gradium_tts simulé en WAV → fichier WAV lisible avec frames > 0. |
 | 2 | 29 | `test_gradium_tts_mp3_by_default` (fixtures : tmp_path) | # Défaut = MP3 : l'extension est forcée en .mp3 même si on passe un chemin .wav. | Format par défaut mp3 : extension forcée .mp3 même si chemin .wav demandé. |
-| 3 | 36 | `test_heygen_dry_run_flow` (fixtures : tmp_path) |  | heygen_upload_audio → SIMU_ASSET_ID ; heygen_create_video → SIMU_VIDEO…. |
-| 4 | 44 | `test_heygen_render_makes_mp4` (fixtures : tmp_path) | # ffmpeg requis pour un vrai mp4 ; sinon on ne teste pas la lecture | heygen_render_to_file simulé → mp4 > 500 octets (le test RETOURNE sans rien vérifier si ffmpeg absent). |
 | 5 | 52 | `test_gradium_credits_simulation` |  | gradium_credits en simulation → simulation True. |
 | 6 | 73 | `test_fix_wav_repairs_streaming_data_size` | # Reproduit le bug Gradium : taille du chunk `data` factice (0x7FFFFFFF) → durée aberrante. | fix_wav_bytes corrige des tailles RIFF/data 0xFFFFFFFF (≈12 h annoncées) → 48000 frames réelles ; idempotent. |
 | 7 | 90 | `test_fix_wav_leaves_valid_file_playable` | # inchangé côté durée | WAV valide inchangé côté durée. |
@@ -10949,10 +9516,7 @@ Docstring du module : « E2E du cœur en simulation : génération complète →
 | 10 | 109 | `test_is_network_hiccup_classifies_correctly` | # Une vraie erreur applicative (clé invalide) n'est PAS un hoquet réseau. | ReadTimeout/ConnectionError/texte « Read timed out » = hoquet réseau ; 401 et None non. |
 | 11 | 122 | `test_request_with_retries_uses_large_timeout_and_succeeds` (fixtures : monkeypatch) | # timeout large appliqué | requests.request mocké : timeout = CONNECTION_TEST_TIMEOUT, 200. |
 | 12 | 140 | `test_request_with_retries_retries_then_recovers` (fixtures : monkeypatch) | # neutralise les pauses de backoff | ReadTimeout une fois puis 200 → 2 appels (sleep neutralisé). |
-| 13 | 165 | `test_request_with_retries_clear_message_after_exhaustion` (fixtures : monkeypatch) |  | Timeouts permanents → ProviderError mentionnant HeyGen, « connexion instable », « pas forcément une clé invalide ». |
-| 14 | 187 | `test_audio_mime_wav_is_x_wav` | # HeyGen exige audio/x-wav pour un WAV (sinon 400 code 400543). | _audio_mime : .wav/.WAV → audio/x-wav, .mp3 → audio/mpeg. |
-| 15 | 196 | `test_create_video_payload_confirmed_shape` | # Payload /v3/videos confirmé accepté par HeyGen (schéma strict). | _create_video_payload premium : type avatar, avatar_id, audio_asset_id, motion_prompt, title (pas video_title), aspect_ratio 9:16 (pas dimension), engine avatar_v. |
-| 16 | 212 | `test_create_video_payload_modes` | # Le mode change RÉELLEMENT le payload (moteur + présence du motion). | Premium : avatar_v + motion + 1080p ; Classique : avatar_iv, sans motion_prompt, 720p ; jamais enhance_custom_motion_prompt. |
+| 13 | 165 | `test_request_with_retries_clear_message_after_exhaustion` (fixtures : monkeypatch) |  | Timeouts permanents → ProviderError mentionnant le service, « connexion instable », « pas forcément une clé invalide ». |
 | 17 | 234 | `test_nano_banana_generate_image_dry_run_makes_png` (fixtures : tmp_path) | # image 9:16 lisible | nano_banana_generate_image simulé → PNG de IMAGE_WIDTH×IMAGE_HEIGHT (1080×1920). |
 | 18 | 248 | `test_grok_generate_video_dry_run` (fixtures : tmp_path) | # Simulation : clip placeholder, aucun appel reseau, aucun cout. | grok_generate_video simulé → fichier mp4 non vide. |
 | 19 | 257 | `test_nano_banana_and_grok_check_simulation` |  | nano_banana_check / grok_check en simulation → simulation True. |
@@ -10988,7 +9552,7 @@ Docstring du module : « Jalon 2 — références intelligentes : sélection par
 
 #### tests/test_voices.py — 58 lignes, 6 tests
 
-Docstring du module : « Voix Gradium gérées par label (calquées sur les avatars) + migration. »
+Docstring du module : « Voix Gradium gérées par label + migration. »
 
 | # | Ligne | Test | Docstring / commentaire | Vérifie |
 |---|---|---|---|---|
@@ -11018,7 +9582,7 @@ Docstring du module : « Voix Gradium gérées par label (calquées sur les avat
 
 **Total : 216 tests** — identique au « **216 tests** » de RAPPORT_PHASE2.md (213 en fin de Phase 1 + 3 tests ajoutés en Phase 2 d'après `git diff 0cb96c6 HEAD -- tests` : `test_free_port_and_instance_detection`, `test_onboarding_flow`, `test_ffmpeg_error_is_actionable` ; `test_health_and_boot` a été enrichi). Décompte statique : pytest n'a PAS été exécuté pour ce dossier. `tests/conftest.py` : 36 lignes, 0 test, 1 fixture autouse.
 
-Fixtures pytest utilisées : `monkeypatch` (mocks réseau/SDK : `requests.post/get/request`, `_download`, `gradium_list_voices`, `heygen_list_avatars_full`, `kling_generate_video`, `_call_claude_*`, `_brain_backoff_sleep`, `time.sleep`, fonctions `gradium_tts`/`heygen_*` de `pipeline`) et `tmp_path`. Aucun plugin (pas de pytest-asyncio, pytest-cov, xdist). Les tests API passent par `fastapi.testclient.TestClient(app)` (host `testserver`, lifespan déclenché par `with`).
+Fixtures pytest utilisées : `monkeypatch` (mocks réseau/SDK : `requests.post/get/request`, `_download`, `gradium_list_voices`, `kling_generate_video`, `_call_claude_*`, `_brain_backoff_sleep`, `time.sleep`, fonction `gradium_tts` de `pipeline`) et `tmp_path`. Aucun plugin (pas de pytest-asyncio, pytest-cov, xdist). Les tests API passent par `fastapi.testclient.TestClient(app)` (host `testserver`, lifespan déclenché par `with`).
 
 ### 6.3.4 Commandes de vérification
 
@@ -11036,12 +9600,12 @@ REM après build : py -3.14 verify_build.py  puis  py -3.14 verify_install.py
 
 | Module | Couvert (fichiers de test) | Zones couvertes | Non couvert / seulement indirect |
 |---|---|---|---|
-| `app/main.py` (API, 59 routes) | test_api, test_persistence | santé/onboarding, réglages (clés « vide = garder », styles, débit, plafond, devise), avatars/voix CRUD, estimation, génération avatar + retry, voix seules, voix off, Bibliothèque/Photos/téléchargements/ZIP, Objet animé complet (plan, images, validation, consistency, animate, resume, dialogue, refs, ancre), Mashup (plan, generate-images, animate + test 1 plan, plafond), coûts (timeseries, archives), TrustedHost, `_pick_free_port`/`_server_up(0)`/`_running_instance_port` | routes **Mashup** `/estimate`, `/regenerate-image`, `/validate`, `/duration`, `/consistency`, `/resume`, `/ad/{id}` (aucune occurrence dans les tests) ; `run()`, `_open_window`, `_try_pywebview`, `_try_chromium_app`, `_prepare_streams`, `_log_launch_error`, mode `UGC_NO_WINDOW` ; `/api/dashboard` et `/api/test-connection` en mode réel |
-| `app/brain.py` | test_brain, test_objet_style, test_refs, test_error_messages, test_api | verbatim (scènes, dialogues, voix off), découpage auto/manuel, regroupement, mashup (style libre, ratio, count, durées), sous-lots de 10, cap 40, extraction/réparation JSON, retry 529/JSON tronqué, pas de retry 401, scrub marques, contraintes « pas de cils / pas d'écriture », `_friendly_anthropic` | appels Anthropic réels (SDK toujours simulé/mocké), `_call_claude_*` eux-mêmes, prompts système (contenu) |
-| `app/pipeline.py` | test_pipeline_e2e, test_api, test_cost, test_refs, test_error_messages | avatar 2 phases (ordre + concurrence), objet images/animation, mashup animation (coût Kling), voix off/voix seules (fichiers, récap, formats), `_safe_name`, `_select_clip_refs`, `_norm_refs_needed`, messages d'erreur | concurrence Grok/Kling (`GROK_MAX_PARALLEL`, `KLING_MAX_PARALLEL`), `open_folder` (neutralisé par `UGC_NO_OPEN`), échecs partiels en cours de lot |
-| `app/providers.py` | test_providers_dryrun, test_api | simulation de tous les fournisseurs, payload HeyGen par mode, corps Grok (image objet), payload Kling + download authentifié, retry/timeout des tests de connexion, `fix_wav`, MIME, parsing OpenRouter/Grok | **boucles de polling** HeyGen (`POLL_EVERY=10`, `POLL_TIMEOUT=900`), Grok (4 s/600 s), Kling (15 s/900 s) : jamais exécutées (le mock Kling répond `completed` dès la création) ; statuts `failed`, timeouts, erreurs HTTP ≥400 ; exceptions réseau pendant le polling (`requests.get` non protégé dans la boucle Kling) ; upload HeyGen réel |
-| `app/db.py` | test_db, test_voices, indirect partout | settings, avatars, voix, ads/clips, ref_images, activité, reset bulk, migration de colonnes | `voice_meta` (seulement via l'API, jamais purgée), `cost_archives` via API uniquement |
-| `app/cost.py` | test_cost, test_api | estimations avatar/objet/mashup, ledger par service/pub, HeyGen crédits→USD, Kling usage.cost prioritaire, timeseries, archives, simulation sans coût | `record_anthropic` (tokens) non vérifié en montant |
+| `app/main.py` (API, 59 routes) | test_api, test_persistence | santé/onboarding, réglages (clés « vide = garder », styles, débit, plafond, devise), voix CRUD, voix off, Bibliothèque/Photos/téléchargements/ZIP, Objet animé complet (plan, images, validation, consistency, animate, resume, dialogue, refs, ancre), Mashup (plan, generate-images, animate + test 1 plan, plafond), coûts (timeseries, archives), TrustedHost, `_pick_free_port`/`_server_up(0)`/`_running_instance_port` | routes **Mashup** `/estimate`, `/regenerate-image`, `/validate`, `/duration`, `/consistency`, `/resume`, `/ad/{id}` (aucune occurrence dans les tests) ; `run()`, `_open_window`, `_try_pywebview`, `_try_chromium_app`, `_prepare_streams`, `_log_launch_error`, mode `UGC_NO_WINDOW` ; `/api/dashboard` et `/api/test-connection` en mode réel |
+| `app/brain.py` | test_brain, test_objet_style, test_refs, test_error_messages, test_api | verbatim (dialogues, voix off), découpage auto/manuel, regroupement, mashup (style libre, ratio, count, durées), sous-lots de 10, cap 40, extraction/réparation JSON, retry 529/JSON tronqué, pas de retry 401, scrub marques, contraintes « pas de cils / pas d'écriture », `_friendly_anthropic` | appels Anthropic réels (SDK toujours simulé/mocké), `_call_claude_*` eux-mêmes, prompts système (contenu) |
+| `app/pipeline.py` | test_pipeline_e2e, test_api, test_cost, test_refs, test_error_messages | objet images/animation, mashup animation (coût Kling), voix off (fichiers, récap, formats), `_safe_name`, `_select_clip_refs`, `_norm_refs_needed`, messages d'erreur | concurrence Grok/Kling (`GROK_MAX_PARALLEL`, `KLING_MAX_PARALLEL`), `open_folder` (neutralisé par `UGC_NO_OPEN`), échecs partiels en cours de lot |
+| `app/providers.py` | test_providers_dryrun, test_api | simulation de tous les fournisseurs, corps Grok (image objet), payload Kling + download authentifié, retry/timeout des tests de connexion, `fix_wav`, MIME, parsing OpenRouter/Grok | **boucles de polling** Grok (4 s/600 s), Kling (15 s/900 s) : jamais exécutées (le mock Kling répond `completed` dès la création) ; statuts `failed`, timeouts, erreurs HTTP ≥400 ; exceptions réseau pendant le polling (`requests.get` non protégé dans la boucle Kling) |
+| `app/db.py` | test_db, test_voices, indirect partout | settings, voix, ads/clips, ref_images, activité, reset bulk, migration de colonnes | `voice_meta` (seulement via l'API, jamais purgée), `cost_archives` via API uniquement |
+| `app/cost.py` | test_cost, test_api | estimations objet/mashup, ledger par service/pub, Kling usage.cost prioritaire, timeseries, archives, simulation sans coût | `record_anthropic` (tokens) non vérifié en montant |
 | `app/jobs.py` | test_error_messages, indirect (polling `/api/jobs`) | messages d'erreur, cycle en_cours→termine/partiel | purge des jobs, perte au redémarrage, job inconnu 404 |
 | `app/media.py` | test_providers_dryrun, test_error_messages | `fix_wav_bytes`, `FFMPEG_MISSING_MSG`, placeholders (indirect) | chemins « ffmpeg absent » (replis), conversion MP3 en échec |
 | `app/bootstrap.py` / `settings_service.py` | test_persistence, test_voices, test_api | seed one-shot, placeholders ignorés, migration voix + flag, `load_provider_config` | seed depuis un `config.py` absent/cassé/contenant de vraies clés |
@@ -11053,8 +9617,8 @@ REM après build : py -3.14 verify_build.py  puis  py -3.14 verify_install.py
 
 1. **Aucun test réseau réel / contrat live.** Tous les appels externes sont soit en `dry_run`, soit
    mockés par `monkeypatch` (`requests.post/get/request`, SDK). `test_grok_body_sends_image_as_object_not_flat`
-   lève volontairement `STOP_NO_NETWORK`. Aucun test marqué « live »/opt-in ne vérifie les contrats HeyGen
-   `/v3/videos`, OpenRouter `/chat/completions` et `/videos`, xAI `/videos/generations`, Gradium, Anthropic.
+   lève volontairement `STOP_NO_NETWORK`. Aucun test marqué « live »/opt-in ne vérifie les contrats
+   OpenRouter `/chat/completions` et `/videos`, xAI `/videos/generations`, Gradium, Anthropic.
 2. **`run()` et la fenêtre** : seuls `_pick_free_port`, `_server_up(0)` et `_running_instance_port` (sans
    PORT_FILE) sont testés. Rien sur l'instance unique avec PORT_FILE présent, le mode `UGC_NO_WINDOW`, le repli
    pywebview → Chrome/Edge `--app` → navigateur, `_prepare_streams` (pythonw), l'effacement de PORT_FILE.
@@ -11076,7 +9640,7 @@ REM après build : py -3.14 verify_build.py  puis  py -3.14 verify_install.py
 7. **Front JS non testé** hors `node --check` (syntaxe) et un test de présence de chaînes
    (`test_library_has_mashup_subsection_front_and_backend`) : aucun test de comportement (`api()`, `prettyError`,
    polling UI, formulaires, galerie de validation, onboarding, bannière ffmpeg).
-8. **Polling fournisseurs** : les boucles HeyGen/Grok/Kling (`providers.py` l.522, 823, 965) ne sont jamais
+8. **Polling fournisseurs** : les boucles Grok/Kling (`providers.py` l.823, 965) ne sont jamais
    exécutées ; statuts d'échec, dépassement de `*_POLL_TIMEOUT`, erreurs HTTP et exceptions réseau pendant le
    sondage non testés.
 9. **Multipart / gros fichiers** : `_save_ref_images` lit chaque fichier entièrement en mémoire
@@ -11096,13 +9660,10 @@ REM après build : py -3.14 verify_build.py  puis  py -3.14 verify_install.py
     `GRADIUM_VOICE_ID` non vide lu dans `BASE_DIR/config.py` → échoue sur un clone propre sans `config.py` ;
     `test_seed_ignores_placeholder_keys` échoue si `config.py` contient de vraies clés (qui seraient alors
     importées dans la base de test). Aucun test n'isole `BASE_DIR`.
-14. **Tests vacuement verts** : `test_heygen_render_makes_mp4` fait `return` si ffmpeg est absent (aucune
-    assertion, compté comme réussi).
-15. **Isolation des fichiers** : le dossier `UGC_DATA_DIR` temporaire n'est ni vidé entre tests ni supprimé ;
-    les caches disque (aperçus de style, échantillons de voix, cache avatars HeyGen) persistent dans la session —
+14. **Isolation des fichiers** : le dossier `UGC_DATA_DIR` temporaire n'est ni vidé entre tests ni supprimé ;
+    les caches disque (aperçus de style, échantillons de voix) persistent dans la session —
     les assertions `cached is False` dépendent de l'ordre/unicité des tests.
-16. **Build non testé automatiquement** : `verify_build.py` et `verify_install.py` sont des scripts manuels
+15. **Build non testé automatiquement** : `verify_build.py` et `verify_install.py` sont des scripts manuels
     (hors pytest, nécessitent un build) ; aucun test ne vérifie le `.spec` (datas, excludes) ni `LANCER.bat`.
-17. **Concurrence hors avatar** : seul l'avatar vérifie le parallélisme borné ; `GROK_MAX_PARALLEL` et
-    `KLING_MAX_PARALLEL` ne sont pas vérifiés.
+16. **Concurrence** : le parallélisme borné (`GROK_MAX_PARALLEL`, `KLING_MAX_PARALLEL`) n'est pas vérifié.
 

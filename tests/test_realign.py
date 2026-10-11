@@ -219,41 +219,29 @@ def test_manual_blocks_multiline_collapsed_but_nbsp_kept():
     assert out == [f"Ligne un suite{NBSP}: fin.", f"Bloc{NNBSP}2"]
 
 
-# ============================================================ Avatar HeyGen (generate_scenes)
+# ============================================================ champ aligné configurable (key=)
 def _scenes(parts):
     return [{"n": i, "script": p, "motion_prompt": f"m{i}"} for i, p in enumerate(parts, 1)]
 
 
-def test_heygen_scenes_accept_flattened_typo_and_store_original(monkeypatch):
-    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
-    calls = []
-
-    def fake(cfg, script, brief, avatar_label, attempt=0):
-        calls.append(attempt)
-        return _scenes(FLAT)
-
-    monkeypatch.setattr(brain, "_call_claude", fake)
-    res = brain.generate_scenes(_cfg(), SCRIPT, "", "avatar", "av")
-    parts = [s["script"] for s in res["scenes"]]
-    assert calls == [0] and all(p in SCRIPT for p in parts)
+def test_realign_custom_key_accepts_flattened_typo_and_keeps_original():
+    res = brain._realign_shot_dialogues(SCRIPT, _scenes(FLAT), key="script")
+    parts = [s["script"] for s in res]
+    assert len(parts) == len(FLAT) and all(p in SCRIPT for p in parts)
     assert "’" in "".join(parts) and NNBSP in "".join(parts)
+    assert [s["motion_prompt"] for s in res] == ["m1", "m2", "m3", "m4"]   # autres champs intacts
 
 
-def test_heygen_scenes_maquilleuse_typo(monkeypatch):
-    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+def test_realign_custom_key_maquilleuse_typo():
     flat = _maq_flat_dialogues(MAQ_TYPO)
-    monkeypatch.setattr(brain, "_call_claude", lambda *a, **k: _scenes(flat))
-    res = brain.generate_scenes(_cfg(), MAQ_TYPO, "", "avatar", "av")
-    assert len(res["scenes"]) == 6 and all(s["script"] in MAQ_TYPO for s in res["scenes"])
+    res = brain._realign_shot_dialogues(MAQ_TYPO, _scenes(flat), key="script")
+    assert len(res) == 6 and all(s["script"] in MAQ_TYPO for s in res)
 
 
-def test_heygen_scenes_really_changed_word_is_refused(monkeypatch):
-    monkeypatch.setattr(brain, "_brain_backoff_sleep", lambda *_: None)
+def test_realign_custom_key_really_changed_word_is_refused():
     changed = list(FLAT)
-    changed[1] = 'On m\'appelle "la grande fée".'
-    monkeypatch.setattr(brain, "_call_claude", lambda *a, **k: _scenes(changed))
-    with pytest.raises(brain.BrainVerbatimError):
-        brain.generate_scenes(_cfg(), SCRIPT, "", "avatar", "av")
+    changed[1] = "On m'appelle \"la grande fée\"."
+    assert brain._realign_shot_dialogues(SCRIPT, _scenes(changed), key="script") is None
 
 
 # ============================================================ accent de la fiche voix

@@ -454,7 +454,7 @@ def _run_plan(plan: dict[str, Any], ad: dict[str, Any], clip: dict[str, Any]) ->
 
     try:
         job = jobs.manager.start(load_provider_config(), ad_id, str(ad.get("name") or ""),
-                                 [{"n": int(clip["scene_n"])}], "", output_mode="local_queue",
+                                 [{"n": int(clip["scene_n"])}], output_mode="local_queue",
                                  only_clip_id=clip_id, clip_ids=[clip_id], runner=runner)
     except jobs.ClipsBusy:
         with _lock:

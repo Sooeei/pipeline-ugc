@@ -87,7 +87,7 @@ def test_omni_first_turn_and_extension_recorded(tmp_path):
     assert abs(ext["usd_estimate"] - 5 * config_app.OMNI_COST_PER_SECOND_USD) < 1e-6
 
 
-def test_kling_and_heygen_recorded(tmp_path):
+def test_kling_recorded(tmp_path):
     img = _png(tmp_path / "s.png")
     with gen_trace.context(ad_id=1, clip_id=11, mode="mashup", step="video"):
         providers.kling_generate_video(_cfg(), img, "slow push in", tmp_path / "k.mp4",
@@ -96,10 +96,6 @@ def test_kling_and_heygen_recorded(tmp_path):
     assert k["model"] == "google/veo-3.1-fast" and k["prompt"] == "slow push in"
     assert json.loads(k["images"]) == [{"path": img, "role": ROLE_FIRST_FRAME}]
     assert abs(k["usd_estimate"] - 6 * 0.10) < 1e-6
-    with gen_trace.context(ad_id=2, clip_id=22, mode="avatar", step="video"):
-        providers.heygen_create_video(_cfg(), "AV", "SIMU_ASSET_ID", "smile", "pub_01", seconds=4)
-    (h,) = _gens(clip_id=22)
-    assert h["model"].startswith("heygen-") and h["usd_estimate"] > 0
 
 
 def test_avatar_v2_simulation_is_recorded(tmp_path):
@@ -170,7 +166,13 @@ def test_mode_of_ad():
     assert gen_trace.mode_of_ad({"kind": "avatar_omni", "pipeline_version": 2}) == "avatar_ia_v2"
     assert gen_trace.mode_of_ad({"kind": "avatar_omni"}) == "avatar_ia"
     assert gen_trace.mode_of_ad({"kind": "objet"}) == "objet"
-    assert gen_trace.mode_of_ad({"kind": "avatar"}) == "avatar"
+    assert gen_trace.mode_of_ad({"kind": "mashup"}) == "mashup"
+    assert gen_trace.mode_of_ad({"kind": "audio"}) == "audio"
+    # Repli neutre (« Hors pub ») : pub absente, sans kind, ou d'un ancien type d'avatar.
+    for ad in (None, {}, {"kind": ""}, {"kind": "avatar"}):
+        assert gen_trace.mode_of_ad(ad) == ""
+    assert gen_trace.MODE_LABELS[""] == "Hors pub"
+    assert "avatar" not in gen_trace.MODE_LABELS and not hasattr(gen_trace, "MODE_AVATAR")
 
 
 # ------------------------------------------------------------------ API + feedback + stats

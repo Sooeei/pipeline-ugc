@@ -412,7 +412,7 @@ def test_dashboard_without_keys_never_errors(monkeypatch):
         r = c.get("/api/dashboard")
         assert r.status_code == 200
         body = r.json()
-        assert "gradium_credits" not in body and "heygen_quota" not in body
+        assert "gradium_credits" not in body and not any("quota" in k for k in body)
         assert body["openrouter"] == {} and body["xai"] == {} and body["elevenlabs"] == {}
         c.post("/api/settings", json={"dry_run": True})
         body = c.get("/api/dashboard").json()

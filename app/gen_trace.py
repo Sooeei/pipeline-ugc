@@ -27,13 +27,12 @@ from app.prompt_profiles import PreflightIssue, SentImage
 _CTX: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("gen_trace_ctx", default=None)
 
 # ---------------------------------------------------------------- modes & étapes
-MODE_AVATAR = "avatar"              # Avatar historique (Gradium → HeyGen)
 MODE_OBJET = "objet"                # Objet animé (Nano Banana → Grok)
 MODE_MASHUP = "mashup"              # Mashup (Nano Banana → Kling / Veo / Seedance)
 MODE_AVATAR_IA = "avatar_ia"        # Avatar IA v1 (keyframe Nano Banana Pro → Omni)
 MODE_AVATAR_IA_V2 = "avatar_ia_v2"  # Avatar IA v2 audio-first (Grok / Kling / Omni)
 MODE_LABELS: dict[str, str] = {
-    MODE_AVATAR: "Avatar (HeyGen)", MODE_OBJET: "Objet animé", MODE_MASHUP: "Mashup",
+    MODE_OBJET: "Objet animé", MODE_MASHUP: "Mashup",
     MODE_AVATAR_IA: "Avatar IA v1", MODE_AVATAR_IA_V2: "Avatar IA v2", "": "Hors pub",
 }
 STEP_LABELS: dict[str, str] = {
@@ -59,13 +58,14 @@ REASONS: dict[str, str] = {
 
 
 def mode_of_ad(ad: dict[str, Any] | None) -> str:
-    """Mode de traçabilité d'une pub (kind + version du pipeline)."""
+    """Mode de traçabilité d'une pub (kind + version du pipeline). Pub absente, sans kind ou d'un
+    ancien type d'avatar (plus généré) → « » (« Hors pub »)."""
     kind = str((ad or {}).get("kind") or "")
     if kind == "avatar_omni":
         return MODE_AVATAR_IA_V2 if int((ad or {}).get("pipeline_version") or 1) == 2 else MODE_AVATAR_IA
     if kind in (MODE_OBJET, MODE_MASHUP):
         return kind
-    return MODE_AVATAR if kind in ("", "avatar") else kind
+    return "" if kind in ("", "avatar") else kind
 
 
 @contextlib.contextmanager

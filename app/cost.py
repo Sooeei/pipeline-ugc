@@ -1,10 +1,5 @@
-"""Estimation du coût d'une pub (crédits HeyGen), par mode qualité/coût.
-
-Taux calés sur le coût RÉEL observé : Premium (Avatar V + motion prompt) ≈ 4 crédits/s
-(mesuré 13s=52, 8s=32, 6s=24) ; Classique (Avatar IV, sans motion prompt) ≈ 1,5 crédit/s
-(le motion prompt applique un ×2 « custom expressive motion » ; Avatar IV sans motion évite
-ce ×2 et coûte le tarif de base).
-Durée de voix estimée à partir du nombre de mots (~2.5 mots/s en français).
+"""Coûts : estimations par flux (Objet animé, Mashup, Avatar IA…), comptabilisation des
+générations réelles (record_*) et rapports de la section « Coûts ».
 """
 
 from __future__ import annotations
@@ -14,33 +9,6 @@ from datetime import date, datetime
 from typing import Any
 
 from . import config_app, db
-
-WORDS_PER_SEC = 2.5
-
-
-def _spoken_seconds(scenes: list[dict[str, Any]]) -> tuple[int, float]:
-    total_words = sum(len(str(s.get("script", "")).split()) for s in scenes)
-    seconds = total_words / WORDS_PER_SEC if total_words else 0.0
-    return total_words, seconds
-
-
-def estimate(scenes: list[dict[str, Any]], mode: str = config_app.DEFAULT_COST_MODE) -> dict[str, Any]:
-    total_words, seconds = _spoken_seconds(scenes)
-    modes = config_app.COST_MODES
-    if mode not in modes:
-        mode = config_app.DEFAULT_COST_MODE
-    per_mode = {key: round(seconds * m["credits_per_sec"]) for key, m in modes.items()}
-    rates = {key: m["credits_per_sec"] for key, m in modes.items()}
-    return {
-        "scenes": len(scenes),
-        "words": total_words,
-        "seconds": round(seconds, 1),
-        "minutes": round(seconds / 60.0, 1),
-        "mode": mode,
-        "credits_estimes": per_mode[mode],   # coût du mode sélectionné
-        "credits_par_mode": per_mode,        # {"premium": .., "classique": ..}
-        "taux_par_mode": rates,              # crédits/seconde par mode
-    }
 
 
 def active_image_usd() -> float:
@@ -198,7 +166,7 @@ def generation_usd_estimate(
 ) -> float:
     """Coût ESTIMÉ ($) d'UNE génération du journal (app/gen_trace.py), d'après les tarifs de
     config_app — mêmes formules que les record_* : image = tarif du modèle ; vidéo = durée ×
-    tarif/s du modèle (+ image d'entrée Grok) ; HeyGen = crédits du mode × durée. 0 si inconnu."""
+    tarif/s du modèle (+ image d'entrée Grok). 0 si inconnu."""
     p = params or {}
     model = str(model or "")
     if kind == "image":
@@ -213,10 +181,6 @@ def generation_usd_estimate(
         return round(secs * rate + (config_app.GROK_COST_USD_PER_INPUT_IMAGE if n_images else 0.0), 4)
     if model == config_app.OMNI_MODEL or "omni" in model:
         return round(secs * config_app.OMNI_COST_PER_SECOND_USD, 4)
-    if model.startswith("heygen"):
-        m = config_app.COST_MODES.get(str(p.get("cost_mode") or ""),
-                                      config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
-        return round(secs * m["credits_per_sec"] * config_app.HEYGEN_USD_PER_CREDIT, 4)
     for spec in config_app.MASHUP_VIDEO_MODELS.values():
         if spec["model"] == model:
             return round(secs * spec["cost_per_second_usd"], 4)
@@ -299,16 +263,6 @@ def record_omni_clip(ad_id: int | None, seconds: float) -> None:
                       **_link("video", ad_id))
 
 
-def record_heygen_clip(ad_id: int | None, seconds: float, mode: str) -> None:
-    """HeyGen est natif en € (900 crédits = 15 €). On stocke le coût en USD (homogène en base,
-    via USD_TO_EUR) ET les crédits (pour l'unité affichée)."""
-    m = config_app.COST_MODES.get(mode, config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
-    credits = max(0.0, float(seconds)) * m["credits_per_sec"]
-    usd = credits * config_app.HEYGEN_USD_PER_CREDIT
-    db.add_cost_event("heygen", "credit", credits, usd=usd, credits=credits, ad_id=ad_id, detail=mode,
-                      **_link("video", ad_id))
-
-
 def record_gradium_tts(ad_id: int | None) -> None:
     db.add_cost_event("gradium", "generation", 1, ad_id=ad_id, **_link("voice", ad_id))
 
@@ -347,14 +301,15 @@ _SERVICE_LABELS = {
     "grok": "Grok / xAI — animation + voix",
     "kling": "Kling (OpenRouter) — animation Mashup",
     "gemini": "Google Gemini — Avatar IA Omni (vidéo + voix)",
-    "heygen": "HeyGen — avatar (crédits)",
+    # Historique : lignes d'un ancien fournisseur d'avatar, comptées en crédits (plus généré).
+    "ancien_fournisseur": "Ancien fournisseur — avatar (crédits)",
     "gradium": "Gradium — voix",
     "elevenlabs": "ElevenLabs — voix Avatar IA",
     "anthropic": "Anthropic — cerveau",
     "claude_code": "Claude Code (quota abonnement)",
 }
-_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "heygen", "gradium", "elevenlabs",
-                  "anthropic", "claude_code"]
+_SERVICE_ORDER = ["openrouter", "grok", "kling", "gemini", "ancien_fournisseur", "gradium",
+                  "elevenlabs", "anthropic", "claude_code"]
 
 
 def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
@@ -372,7 +327,7 @@ def _units_label(svc: str, units: dict[str, dict[str, Any]]) -> str:
         return f"{n('second')} clip(s) · {round(q('second'))} s"
     if svc == "gemini":
         return f"{n('second')} clip(s) · {round(q('second'))} s"
-    if svc == "heygen":
+    if svc == "ancien_fournisseur":
         return f"{n('credit')} clip(s) · {round(q('credit'))} crédits"
     if svc == "gradium":
         return f"{n('generation')} génération(s)"
@@ -434,8 +389,9 @@ def costs_timeseries(
 ) -> dict[str, Any]:
     """Évolution des coûts estimés (USD) dans le temps, ventilée par service (une courbe/service).
 
-    HeyGen est compté en crédits (usd=0) : il n'apparaît pas dans le graphique USD ; le détail
-    crédits reste visible dans la vue « classique ». Les services sans dépense sont omis.
+    L'ancien fournisseur (historique) est compté en crédits (usd=0) : il n'apparaît pas dans le
+    graphique USD ; le détail crédits reste visible dans la vue « classique ». Les services sans
+    dépense sont omis.
 
     `archive_id` : None = coûts actifs ; un entier = une période archivée. `anchor` cale la
     fenêtre de buckets (par défaut aujourd'hui ; pour une archive, sa date de clôture).
@@ -470,8 +426,8 @@ def costs_timeseries(
         "by_service_usd": {s: round(sum(per_service[s]), 2) for s in services},
         "usd_to_eur": config_app.USD_TO_EUR,
         "note": (
-            "Coûts estimés (stockés en USD). HeyGen est converti depuis les crédits "
-            "(900 crédits = 15 €). Affichage $/€ au choix."
+            "Coûts estimés (stockés en USD). L'ancien fournisseur (historique) est compté en "
+            "crédits, hors graphique. Affichage $/€ au choix."
         ),
     }
 
@@ -517,7 +473,7 @@ def costs_report(archive_id: int | None = None) -> dict[str, Any]:
         "usd_to_eur": config_app.USD_TO_EUR,
         "note": (
             "Coûts estimés (stockés en USD). Vérifie les montants réels sur chaque plateforme "
-            "(OpenRouter, xAI/Kling, HeyGen…). HeyGen : 900 crédits = 15 €."
+            "(OpenRouter, xAI/Kling…). L'ancien fournisseur (historique) reste compté en crédits."
         ),
     }
 

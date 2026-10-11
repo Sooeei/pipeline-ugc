@@ -1,5 +1,7 @@
 # PLAN — Distribution : audit du code (Phase 1) puis packaging .exe (Phase 2)
 
+> Note (2026-10-11) : le flux d'avatar d'origine et son fournisseur ont été retirés de l'app ; les passages qui le décrivaient ont été supprimés de ce document.
+
 > Objectif final : un **.exe Windows autonome**, distribuable/vendable, qui tourne sur une
 > machine SANS Python. Démarrage VIERGE (aucune clé, base neuve, réglages par défaut).
 > Aucune de mes clés API dans l'exe/le code/les fichiers livrés.
@@ -18,7 +20,7 @@
 - Supprimer code mort (fonctions/constantes/registres jamais utilisés), commentaires de
   migration obsolètes (Higgsfield « RETIRÉ », Google-direct abandonné), imports inutiles,
   fichiers temporaires/legacy à la racine (`ugc_pipeline.py`, `check_ids.py`,
-  `test_gradium.py`, `test_heygen_one.py`, `.bak` éventuels).
+  `test_gradium.py`, `.bak` éventuels).
 - **Guidé par l'agent d'audit « dead code ».** Chaque suppression vérifiée (grep repo entier).
 - Vert requis après.
 
@@ -89,5 +91,5 @@
 
 ## HISTORIQUE — Optimisation précédente (jalons 0-7) ✅ FAIT
 Cap 40 + découpage interne cerveau ; références typées/par-plan/ancre ; reprise après échec ;
-sélecteurs HeyGen (vignettes) & Gradium (échantillons) ; styles « Objet vivant » & « Mashup »
+sélecteur Gradium (échantillons) ; styles « Objet vivant » & « Mashup »
 (prompts descriptifs, aucun nom de marque). 5 pipelines en simulation, 0 crédit.

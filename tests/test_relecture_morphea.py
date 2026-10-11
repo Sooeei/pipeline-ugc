@@ -237,7 +237,7 @@ def test_resume_preview_restricted_to_failed(monkeypatch, no_assemble):
 def test_regenerate_image_refused_while_clip_video_running():
     ad_id, ids = _v2_ad(1)
     gate = threading.Event()
-    j = jobs.manager.start(jobs_cfg(), ad_id, "a", [{"n": 1}], "", output_mode="t",
+    j = jobs.manager.start(jobs_cfg(), ad_id, "a", [{"n": 1}], output_mode="t",
                            runner=lambda on_update: gate.wait(5) or {"ok": 1, "echec": 0}, clip_ids=[ids[0]])
     try:
         with TestClient(app) as c:

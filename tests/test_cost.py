@@ -25,11 +25,11 @@ def test_timeseries_empty_is_zero():
 def test_timeseries_aggregates_recorded_usd_in_current_bucket():
     db.add_cost_event("openrouter", "image", 1, usd=0.04)
     db.add_cost_event("grok", "second", 5, usd=0.71)
-    # HeyGen : uniquement des crédits (usd=0) → absent du graphique USD.
-    db.add_cost_event("heygen", "credit", 20, credits=20.0)
+    # Ancien fournisseur (historique) : uniquement des crédits (usd=0) → absent du graphique USD.
+    db.add_cost_event("ancien_fournisseur", "credit", 20, credits=20.0)
     d = cost.costs_timeseries("day")
     svc = {s["service"] for s in d["services"]}
-    assert svc == {"openrouter", "grok"}, "heygen (crédits seuls) exclu du graphique USD"
+    assert svc == {"openrouter", "grok"}, "ancien fournisseur (crédits seuls) exclu du graphique USD"
     assert d["total_usd"] == 0.75
     assert d["totals_per_bucket"][-1] == 0.75  # tout est daté d'aujourd'hui
     assert d["by_service_usd"]["openrouter"] == 0.04
@@ -37,41 +37,6 @@ def test_timeseries_aggregates_recorded_usd_in_current_bucket():
 
 def test_timeseries_invalid_period_falls_back_to_month():
     assert cost.costs_timeseries("bogus")["period"] == "month"
-
-
-def test_estimate_basic():
-    scenes = [
-        {"n": 1, "script": "un deux trois quatre cinq"},
-        {"n": 2, "script": "six sept huit"},
-    ]
-    e = cost.estimate(scenes)
-    assert e["scenes"] == 2
-    assert e["words"] == 8
-    assert e["seconds"] > 0
-    assert e["credits_estimes"] >= 0
-
-
-def test_estimate_empty():
-    e = cost.estimate([])
-    assert e["scenes"] == 0
-    assert e["words"] == 0
-    assert e["credits_estimes"] == 0
-
-
-def test_estimate_per_mode():
-    scenes = [{"n": 1, "script": " ".join(["mot"] * 80)}]  # 80 mots -> ~32 s
-    e = cost.estimate(scenes)  # premium par défaut
-    assert "premium" in e["credits_par_mode"] and "classique" in e["credits_par_mode"]
-    # Premium coûte plus cher que Classique
-    assert e["credits_par_mode"]["premium"] > e["credits_par_mode"]["classique"]
-    assert e["credits_estimes"] == e["credits_par_mode"]["premium"]
-    assert e["taux_par_mode"] == {"premium": 4.0, "classique": 1.5}
-    # mode Classique sélectionné
-    ec = cost.estimate(scenes, "classique")
-    assert ec["credits_estimes"] == ec["credits_par_mode"]["classique"]
-    # ~32 s : premium 128 (4 cr/s), classique 48 (1,5 cr/s)
-    assert e["credits_par_mode"]["premium"] == 128
-    assert e["credits_par_mode"]["classique"] == 48
 
 
 def test_cost_ledger_records_and_reports_by_service_and_ad():
@@ -98,25 +63,49 @@ def test_cost_ledger_records_and_reports_by_service_and_ad():
     assert "estim" in rep["note"].lower()
 
 
-def test_cost_heygen_records_credits_and_usd_from_real_rate():
-    from app import config_app, db
+def test_historical_credit_rows_stay_visible_in_costs_report():
+    """HISTORIQUE figé : les lignes d'un ancien fournisseur d'avatar (service
+    « ancien_fournisseur », comptées en crédits, usd=0) restent lisibles dans /api/costs —
+    libellé « Ancien fournisseur… », crédits par service / par pub / au total — alors que plus
+    aucun code n'en génère."""
+    from fastapi.testclient import TestClient
 
-    # Tarif RÉEL : 900 crédits = 15 € → 0,016667 €/crédit, stocké en USD (via USD_TO_EUR).
-    assert config_app.HEYGEN_EUR_PER_CREDIT == 15.0 / 900.0
-    ad = db.create_ad("avatar", "R", "[]", kind="avatar")
-    cost.record_heygen_clip(ad, 10, "classique")   # 10 * 1.5 crédits/s = 15 crédits
-    rep = cost.costs_report()
-    hey = next(s for s in rep["services"] if s["service"] == "heygen")
-    # crédits conservés (info) ET coût USD non nul (homogène en base)
-    assert hey["credits"] == 15.0
-    expected_eur = 15.0 * config_app.HEYGEN_EUR_PER_CREDIT          # ≈ 0,25 €
-    expected_usd = round(expected_eur / config_app.USD_TO_EUR, 2)   # → USD
-    assert hey["usd"] == expected_usd and hey["usd"] > 0
-    assert rep["totals"]["credits"] == 15.0 and rep["totals"]["usd"] == expected_usd
-    # HeyGen apparaît maintenant dans le graphique USD
-    ts = cost.costs_timeseries("day")
-    assert any(s["service"] == "heygen" for s in ts["services"])
+    from app import config_app, db
+    from app.main import app
+
+    assert "ancien_fournisseur" in cost._SERVICE_ORDER
+    assert db.COST_CATEGORY_BY_SERVICE["ancien_fournisseur"] == "video"
+    ad = db.create_ad("vieille_pub", "R", "[]", kind="avatar")   # pub historique (kind explicite)
+    db.add_cost_event("ancien_fournisseur", "credit", 15, credits=15.0, ad_id=ad, detail="classique")
+    db.add_cost_event("ancien_fournisseur", "credit", 32, credits=32.0, ad_id=ad, detail="premium")
+    db.add_cost_event("openrouter", "image", 1, usd=0.04, ad_id=ad)
+
+    with TestClient(app) as c:
+        rep = c.get("/api/costs").json()
+        ts = c.get("/api/costs/timeseries?period=day").json()
+    old = next(s for s in rep["services"] if s["service"] == "ancien_fournisseur")
+    assert old["label"] == "Ancien fournisseur — avatar (crédits)"
+    assert old["units"] == "2 clip(s) · 47 crédits"
+    assert old["credits"] == 47.0 and old["usd"] == 0
+    assert rep["totals"]["credits"] == 47.0 and rep["totals"]["usd"] == 0.04
+    row = next(a for a in rep["by_ad"] if a["ad_id"] == ad)
+    assert row["credits"] == 47.0 and row["usd"] == 0.04
     assert rep["usd_to_eur"] == config_app.USD_TO_EUR
+    # crédits seuls (usd=0) : hors graphique USD
+    assert {s["service"] for s in ts["services"]} == {"openrouter"}
+    # coût réel de la pub : le service historique y figure, avec son libellé
+    real = cost.ad_real_cost(ad)
+    svc = {s["service"]: s for s in real["services"]}
+    assert svc["ancien_fournisseur"]["label"].startswith("Ancien fournisseur")
+    assert "47 crédits" in svc["ancien_fournisseur"]["units"]
+    # rangé en catégorie « vidéo » (ventilation par poste)
+    con = db.connect()
+    try:
+        cats = {r[0] for r in con.execute(
+            "SELECT category FROM cost_events WHERE service='ancien_fournisseur'")}
+    finally:
+        con.close()
+    assert cats == {"video"}
 
 
 def test_cost_kling_records_usd_per_second_and_usage_cost_priority():

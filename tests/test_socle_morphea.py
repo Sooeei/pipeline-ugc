@@ -19,10 +19,10 @@ def test_clip_lock_refuses_second_job_and_releases_at_end():
         return {"ok": 1, "echec": 0}
 
     cfg = ProviderConfig(dry_run=True)
-    j1 = jobs.manager.start(cfg, 1, "a", [{"n": 1}], "", output_mode="t", runner=slow, clip_ids=[11, 12])
+    j1 = jobs.manager.start(cfg, 1, "a", [{"n": 1}], output_mode="t", runner=slow, clip_ids=[11, 12])
     assert jobs.manager.busy_clip_ids() == [11, 12] and jobs.manager.has_running()
     with pytest.raises(jobs.ClipsBusy) as ei:
-        jobs.manager.start(cfg, 1, "a", [{"n": 1}], "", output_mode="t", runner=slow, clip_ids=[12, 13])
+        jobs.manager.start(cfg, 1, "a", [{"n": 1}], output_mode="t", runner=slow, clip_ids=[12, 13])
     assert ei.value.clip_ids == [12]
     assert jobs.manager.busy_clip_ids() == [11, 12]          # rien de réservé par le refus
     gate.set()
@@ -38,7 +38,7 @@ def test_clip_lock_released_even_if_job_fails():
     def boom(on_update):
         raise RuntimeError("panne")
 
-    j = jobs.manager.start(ProviderConfig(dry_run=True), 1, "a", [{"n": 1}], "", output_mode="t",
+    j = jobs.manager.start(ProviderConfig(dry_run=True), 1, "a", [{"n": 1}], output_mode="t",
                            runner=boom, clip_ids=[21])
     for _ in range(100):
         if jobs.manager.get(j.id).state == "echec":

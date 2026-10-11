@@ -1,16 +1,16 @@
 # Pipeline UGC
 
 Application **locale** (Windows) qui fabrique des pubs vidéo verticales 9:16. Interface simple
-en 5 sections : Tableau de bord, Nouvelle pub, Bibliothèque, Coûts, Réglages.
+en 9 sections : Tableau de bord, Nouvelle pub, Bibliothèque, Local, Clients & persos, Coûts,
+Stats, Modèles, Réglages.
 
-**6 types de pub :**
-- **Avatar** (HeyGen) — un avatar parle ton script.
+**4 types de pub** (section « Nouvelle pub ») :
 - **Avatar IA (Omni)** (Nano Banana → Google Gemini Omni) — une personne UGC générée dit ton
   script face caméra (voix + lip-sync générés par Google). 🇫🇷 voix FR expérimentale.
+  C'est le style sélectionné par défaut.
 - **Objet animé** (Nano Banana → Grok) — un produit devient un personnage qui parle.
 - **Mashup IA** (Nano Banana → Kling/Veo) — b-roll ultra-réaliste, sans voix.
 - **Voix off** — juste une voix off (Gradium) à partir d'un script.
-- **Voix seules** — les voix par scène, à finir toi-même dans HeyGen.
 
 ---
 
@@ -35,14 +35,14 @@ décoche « simulation ».
 | Fournisseur | Sert à | Où créer la clé |
 |---|---|---|
 | **Anthropic (Claude)** | le « cerveau » qui découpe tes scripts | console.anthropic.com |
-| **Gradium** | les voix | gradium.ai (Studio → API Keys) |
-| **HeyGen** | les vidéos avatar (crédits) | HeyGen → Settings → API |
+| **Gradium** | les voix off | gradium.ai (Studio → API Keys) |
 | **OpenRouter** | images (Nano Banana) + vidéos mashup (Kling/Veo) | openrouter.ai |
 | **xAI (Grok)** | animation « objet » (voix + lip-sync) | x.ai |
 | **Google (Gemini)** | « Avatar IA (Omni) » : vidéo + voix + lip-sync | aistudio.google.com (tier **payant**) |
+| **ElevenLabs** | les voix « Avatar IA » | elevenlabs.io |
 
-Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Anthropic + Gradium + HeyGen
-pour l'avatar). Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
+Tu n'as besoin que des clés des pipelines que tu utilises (ex. juste Gradium pour une voix off).
+Les clés sont stockées **en local**, jamais renvoyées en clair par l'app.
 
 ---
 

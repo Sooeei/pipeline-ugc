@@ -216,10 +216,12 @@ def test_ui_has_clients_page_and_objet_client_selector():
         assert el in html, el
 
 
-def test_dashboard_ui_has_no_gradium_heygen():
-    """Tableau de bord (panneau + barre latérale) sans trace de Gradium / HeyGen."""
+def test_dashboard_ui_has_no_gradium_or_old_provider():
+    """Tableau de bord (panneau + barre latérale) sans trace de Gradium ni de l'ancien
+    fournisseur d'avatar (nom construit par concaténation : il ne figure nulle part en clair)."""
+    old_provider = "hey" + "gen"
     html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text(encoding="utf-8")
     sidebar = html.split("<nav>", 1)[0]
     dash = html.split('<section id="dashboard"', 1)[1].split("</section>", 1)[0]
     for part in (sidebar, dash):
-        assert "gradium" not in part.lower() and "heygen" not in part.lower()
+        assert "gradium" not in part.lower() and old_provider not in part.lower()

@@ -268,14 +268,12 @@ def create_app() -> FastAPI:
         # « clé enregistrée » et un champ vide = « garder la clé actuelle ».
         return {
             "gradium_api_key_set": bool(s.get("gradium_api_key", "").strip()),
-            "heygen_api_key_set": bool(s.get("heygen_api_key", "").strip()),
             "openrouter_api_key_set": bool(s.get("openrouter_api_key", "").strip()),
             "xai_api_key_set": bool(s.get("xai_api_key", "").strip()),
             "gemini_api_key_set": bool(s.get("gemini_api_key", "").strip()),
             "elevenlabs_api_key_set": bool(s.get("elevenlabs_api_key", "").strip()),
             "anthropic_api_key_set": bool(s.get("anthropic_api_key", "").strip()),
             "gradium_model": s.get("gradium_model", config_app.DEFAULT_GRADIUM_MODEL),
-            "heygen_voice_id": s.get("heygen_voice_id", ""),
             "brain_model": s.get("brain_model", config_app.DEFAULT_BRAIN_MODEL),
             # Moteur du cerveau : API Anthropic (défaut) ou Claude Code (abonnement). Le token
             # n'est JAMAIS renvoyé : seulement claude_code_token_set.
@@ -287,7 +285,6 @@ def create_app() -> FastAPI:
                 {"key": k, "label": v} for k, v in config_app.CLAUDE_CODE_MODELS.items()
             ],
             "claude_code_installed": claude_code.is_installed(),
-            "cost_mode": s.get("cost_mode", config_app.DEFAULT_COST_MODE),
             "objet_image_model": s.get("objet_image_model", config_app.DEFAULT_OBJET_IMAGE_MODEL),
             "objet_image_models": [
                 {"key": k, "label": m["label"]} for k, m in config_app.OBJET_IMAGE_MODELS.items()
@@ -344,7 +341,6 @@ def create_app() -> FastAPI:
                 s.get("drift_threshold", config_app.DRIFT_THRESHOLD_DEFAULT)
             ),
             "dry_run": s.get("dry_run", "1") == "1",
-            "avatars": db.list_avatars(),
             "voices": db.list_voices(),
             # Texte→image Qwen (création d'une pub en Qwen, avant que la pub existe) : cache,
             # vérification en arrière-plan sans bloquer → qwen_t2i_available, qwen_plan1_note.
@@ -356,8 +352,6 @@ def create_app() -> FastAPI:
         # Clés secrètes : on n'écrase QUE si un nouveau texte est fourni (champ vide = garder).
         if body.gradium_api_key.strip():
             db.set_setting("gradium_api_key", body.gradium_api_key.strip())
-        if body.heygen_api_key.strip():
-            db.set_setting("heygen_api_key", body.heygen_api_key.strip())
         # Objet animé : clés OpenRouter (Nano Banana) et xAI (Grok), nettoyées (espaces/invisibles).
         openrouter_key = prov._clean_key(body.openrouter_api_key)
         if openrouter_key:
@@ -391,7 +385,7 @@ def create_app() -> FastAPI:
         print(
             "[REGLAGES] reçu: "
             f"openrouter={_m(body.openrouter_api_key)} xai={_m(body.xai_api_key)} "
-            f"gradium={_m(body.gradium_api_key)} heygen={_m(body.heygen_api_key)} "
+            f"gradium={_m(body.gradium_api_key)} "
             f"anthropic={_m(body.anthropic_api_key)} gemini={_m(body.gemini_api_key)} "
             f"claude_code_token={_m(body.claude_code_token)} "
             f"elevenlabs={_m(body.elevenlabs_api_key)} | "
@@ -404,12 +398,9 @@ def create_app() -> FastAPI:
             f"gemini_set={bool((db.get_setting('gemini_api_key') or '').strip())}",
             flush=True,
         )
-        # La voix Gradium est gérée par label via /api/voices (comme les avatars).
+        # La voix Gradium est gérée par label via /api/voices.
         db.set_setting("gradium_model", body.gradium_model or config_app.DEFAULT_GRADIUM_MODEL)
-        db.set_setting("heygen_voice_id", body.heygen_voice_id)
         db.set_setting("brain_model", body.brain_model or config_app.DEFAULT_BRAIN_MODEL)
-        mode = body.cost_mode if body.cost_mode in config_app.COST_MODES else config_app.DEFAULT_COST_MODE
-        db.set_setting("cost_mode", mode)
         img_model = (
             body.objet_image_model if body.objet_image_model in config_app.OBJET_IMAGE_MODELS
             else config_app.DEFAULT_OBJET_IMAGE_MODEL
@@ -459,66 +450,6 @@ def create_app() -> FastAPI:
         db.set_setting("dry_run", "1" if body.dry_run else "0")
         db.log_activity("reglages", "Réglages enregistrés.")
         return {"ok": True}
-
-    @app.post("/api/avatars")
-    def add_avatar(body: AvatarIn) -> dict[str, Any]:
-        if not body.label.strip() or not body.avatar_id.strip():
-            raise HTTPException(400, "Label et avatar_id requis.")
-        new_id = db.add_avatar(body.label.strip(), body.avatar_id.strip())
-        return {"ok": True, "id": new_id, "avatars": db.list_avatars()}
-
-    @app.delete("/api/avatars/{row_id}")
-    def del_avatar(row_id: int) -> dict[str, Any]:
-        db.delete_avatar(row_id)
-        return {"ok": True, "avatars": db.list_avatars()}
-
-    @app.get("/api/heygen/avatars")
-    def heygen_avatars(refresh: bool = False) -> dict[str, Any]:
-        """JALON 4 — sélecteur visuel : liste HeyGen (vignettes + métadonnées), MISE EN CACHE
-        disque (l'appel est lent/volumineux). `refresh=true` force un rafraîchissement.
-        En simulation ou en cas d'échec réseau, on renvoie le cache s'il existe."""
-        import json
-        import time
-
-        cfg = load_provider_config()
-        cache = config_app.DATA_DIR / "heygen_avatars.json"
-
-        def _read_cache() -> dict[str, Any] | None:
-            try:
-                data = json.loads(cache.read_text(encoding="utf-8"))
-                data["cached"] = True
-                return dict(data)
-            except (ValueError, OSError):
-                return None
-
-        if not refresh:
-            hit = _read_cache()
-            if hit is not None:
-                return hit
-
-        res = prov.heygen_list_avatars_full(cfg)
-        if res.get("ok") and not res.get("simulation"):
-            payload: dict[str, Any] = {
-                "ok": True, "simulation": False,
-                "avatars": res.get("avatars", []),
-                "talking_photos": res.get("talking_photos", []),
-                "fetched_at": time.time(),
-                "count": len(res.get("avatars", [])) + len(res.get("talking_photos", [])),
-            }
-            try:
-                config_app.ensure_dirs()
-                cache.write_text(_json(payload), encoding="utf-8")
-            except OSError:
-                pass
-            payload["cached"] = False
-            return payload
-
-        # Échec réseau OU simulation : à défaut de fraîche, servir le cache disponible.
-        hit = _read_cache()
-        if hit is not None:
-            hit["note"] = res.get("message", "")
-            return hit
-        return {**res, "cached": False}
 
     # -------------------------------------------------- JALON 5 : sélecteur voix Gradium
     @app.get("/api/gradium/voices")
@@ -662,7 +593,6 @@ def create_app() -> FastAPI:
     def test_connection() -> dict[str, Any]:
         cfg = load_provider_config()
         gradium = prov.gradium_check(cfg)
-        heygen = prov.heygen_list_avatars(cfg)
         nano_banana = prov.nano_banana_check(cfg)
         grok = prov.grok_check(cfg)
         kling = prov.kling_check(cfg)
@@ -671,7 +601,6 @@ def create_app() -> FastAPI:
         return {
             "dry_run": cfg.dry_run,
             "gradium": gradium,
-            "heygen": heygen,
             "nano_banana": nano_banana,
             "grok": grok,
             "kling": kling,
@@ -710,118 +639,7 @@ def create_app() -> FastAPI:
             "activity": db.recent_activity(15),
         }
 
-    # -------------------------------------------------- CERVEAU IA (découpage)
-    @app.post("/api/brain/generate-scenes")
-    def brain_generate(body: BrainIn) -> dict[str, Any]:
-        cfg = load_provider_config()
-        try:
-            result = brain.generate_scenes(
-                cfg, body.script, body.brief, body.style, body.avatar_label
-            )
-        except brain.BrainProviderError as exc:
-            raise HTTPException(502, str(exc)) from exc  # panne fournisseur (réseau/auth/5xx)
-        except brain.BrainError as exc:
-            raise HTTPException(400, str(exc)) from exc  # entrée invalide / texte altéré
-        result["estimate"] = cost.estimate(result["scenes"])
-        result["dry_run"] = cfg.dry_run
-        db.log_activity("cerveau", f"Découpage : {len(result['scenes'])} scènes.")
-        return result
-
-    # -------------------------------------------------- NOUVELLE PUB
-    @app.post("/api/estimate")
-    def estimate(body: ScenesIn) -> dict[str, Any]:
-        return cost.estimate(body.scenes, body.mode or config_app.DEFAULT_COST_MODE)
-
-    @app.post("/api/generate")
-    def generate(body: GenerateIn) -> dict[str, Any]:
-        cfg = load_provider_config()
-        scenes = body.scenes
-        if not scenes:
-            raise HTTPException(400, "Aucune scène fournie.")
-        _validate_scenes(scenes)
-
-        # Mode de SORTIE « Voix seules » : voix Gradium uniquement, aucun appel vidéo HeyGen.
-        voix_seules = body.cost_mode == "voix_seules"
-
-        # Avatar : label -> avatar_id (requis pour la vidéo ; en voix seules on garde juste
-        # le label pour le récap, l'avatar n'est pas appelé).
-        avatar_id = db.avatar_id_for_label(body.avatar_label) if body.avatar_label else None
-        if not voix_seules and (not avatar_id or avatar_id.startswith("AVATAR_ID")):
-            raise HTTPException(
-                400,
-                f"Avatar « {body.avatar_label} » non configuré (renseigne un avatar_id "
-                "valide dans Réglages).",
-            )
-
-        # Voix Gradium choisie par label (menu déroulant) -> voice_id interne (les deux modes
-        # génèrent des voix). Repli : voix par défaut déjà chargée dans cfg (1re de la liste).
-        if body.voice_label:
-            resolved = db.voice_id_for_label(body.voice_label)
-            if resolved:
-                cfg.gradium_voice_id = resolved
-
-        # Mode qualité/coût vidéo (Premium / Classique) → change le payload (ignoré en voix seules).
-        if not voix_seules and body.cost_mode in config_app.COST_MODES:
-            cfg.cost_mode = body.cost_mode
-
-        # En mode réel, une voix est indispensable (les deux modes en produisent).
-        if not cfg.dry_run and not cfg.gradium_voice_id:
-            raise HTTPException(
-                400, "Aucune voix Gradium configurée (ajoutes-en une dans Réglages)."
-            )
-
-        # Confirmation crédits : uniquement pour la vidéo (voix seules = 0 crédit API HeyGen).
-        if not voix_seules and not cfg.dry_run and not body.confirm:
-            raise HTTPException(400, "Confirmation requise avant un vrai run (crédits).")
-
-        # Les pubs « voix seules » sont de l'audio → kind="audio" (hors Bibliothèque vidéo,
-        # même en cours ou en cas d'échec).
-        ad_id = db.create_ad(
-            body.ad_name, body.avatar_label, _json(scenes),
-            kind="audio" if voix_seules else "avatar",
-        )
-        job = jobs.manager.start(
-            cfg, ad_id, body.ad_name, scenes, avatar_id or "",
-            output_mode="voix_seules" if voix_seules else "video",
-            avatar_label=body.avatar_label,
-        )
-        return {
-            "ok": True, "job_id": job.id, "ad_id": ad_id,
-            "dry_run": cfg.dry_run, "voix_seules": voix_seules,
-        }
-
-    @app.post("/api/generate/retry/{ad_id}")
-    def generate_retry(ad_id: int, body: RetryIn) -> dict[str, Any]:
-        """Relance UNIQUEMENT les scènes en échec d'une pub avatar, en parallèle (réutilise les
-        clips existants → pas de doublon en Bibliothèque)."""
-        cfg = load_provider_config()
-        ad = db.get_ad(ad_id)
-        if ad is None:
-            raise HTTPException(404, "Pub introuvable.")
-        if ad.get("kind") != "avatar":
-            raise HTTPException(400, "La relance des échoués concerne les pubs avatar.")
-        failed = [c for c in db.clips_for_ad(ad_id, status="echec")]
-        if not failed:
-            raise HTTPException(400, "Aucune scène en échec à relancer.")
-        avatar_label = str(ad.get("avatar_label") or "")
-        avatar_id = db.avatar_id_for_label(avatar_label) if avatar_label else None
-        if not avatar_id or avatar_id.startswith("AVATAR_ID"):
-            raise HTTPException(400, f"Avatar « {avatar_label} » non configuré (Réglages).")
-        if not cfg.dry_run and not cfg.gradium_voice_id:
-            raise HTTPException(400, "Aucune voix Gradium configurée (Réglages).")
-        if not cfg.dry_run and not body.confirm:
-            raise HTTPException(400, "Confirmation requise avant un vrai run (crédits).")
-        scenes = [
-            {"n": c["scene_n"], "script": c["script"],
-             "motion_prompt": c.get("motion_prompt", ""), "clip_id": c["id"]}
-            for c in failed
-        ]
-        job = jobs.manager.start(
-            cfg, ad_id, str(ad["name"]), scenes, avatar_id,
-            output_mode="video", avatar_label=avatar_label, is_retry=True,
-        )
-        return {"ok": True, "job_id": job.id, "ad_id": ad_id, "retry": len(scenes)}
-
+    # -------------------------------------------------- SUIVI DES JOBS
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict[str, Any]:
         job = jobs.manager.get(job_id)
@@ -1041,7 +859,7 @@ def create_app() -> FastAPI:
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
         job = _start_reserved(
             [int(c["id"]) for c in candidates],
-            cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="objet_animate",
+            cfg, ad_id, str(ad["name"]), anim_scenes, output_mode="objet_animate",
         )
         return {
             "ok": True, "job_id": job.id, "ad_id": ad_id, "dry_run": cfg.dry_run,
@@ -1099,7 +917,7 @@ def create_app() -> FastAPI:
             _check_spend_cap(cfg, usd, body.confirm_over_cap)
             job = _start_reserved(
                 [int(clip_id)],
-                cfg, int(ad["id"]), str(ad["name"]), [{"n": int(clip["scene_n"])}], "",
+                cfg, int(ad["id"]), str(ad["name"]), [{"n": int(clip["scene_n"])}],
                 output_mode="objet_animate", only_clip_id=clip_id,
             )
             return {"ok": True, "job_id": job.id, "ad_id": int(ad["id"]), "dry_run": cfg.dry_run,
@@ -1733,7 +1551,7 @@ def create_app() -> FastAPI:
                            if pipeline.clip_segments(relaunch) else relaunch.get("segments"))
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
         job = _start_reserved(
-            clip_ids, cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="avatar_omni_animate",
+            clip_ids, cfg, ad_id, str(ad["name"]), anim_scenes, output_mode="avatar_omni_animate",
             only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
         )
         return {
@@ -1866,7 +1684,7 @@ def create_app() -> FastAPI:
         anim_scenes = [{"n": int(c["scene_n"])} for c in candidates]
         job = _start_reserved(
             [int(c["id"]) for c in candidates],
-            cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode="mashup_animate",
+            cfg, ad_id, str(ad["name"]), anim_scenes, output_mode="mashup_animate",
             only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
         )
         return {
@@ -1923,7 +1741,7 @@ def create_app() -> FastAPI:
         # kind="audio" : exclu de la Bibliothèque vidéo même si le job échoue (statut non terminal).
         ad_id = db.create_ad(body.ad_name, "", _json(scenes), kind="audio")
         job = jobs.manager.start(
-            cfg, ad_id, body.ad_name, scenes, "",
+            cfg, ad_id, body.ad_name, scenes,
             output_mode="voix_off", full_script=body.script,
         )
         return {
@@ -1934,20 +1752,18 @@ def create_app() -> FastAPI:
     # -------------------------------------------------- BIBLIOTHÈQUE
     @app.get("/api/library")
     def library() -> dict[str, Any]:
-        # Les pubs « voix seules » n'apparaissent pas ici (finies à la main dans HeyGen).
         # Les pubs « Objet animé » n'y apparaissent qu'une fois ANIMÉES (au moins un clip
         # vidéo prêt) : tant qu'on est à l'étape images/validation, elles restent hors biblio.
         def _has_video(ad: dict[str, Any]) -> bool:
             return any(c.get("mp4_path") and c.get("status") == "pret" for c in ad["clips"])
 
-        # Les pubs audio (voix seules / voix off) ne sont pas des vidéos → hors bibliothèque.
-        # On filtre par kind="audio" (robuste même en cours/échec) ET par statut terminal
-        # (rétro-compat avec les anciennes bases où kind valait « avatar »).
+        # Les pubs audio (voix off) ne sont pas des vidéos → hors bibliothèque : seuls les kinds
+        # vidéo sont listés (robuste même en cours/échec), statut « voix_off » exclu par sûreté.
         # Objet/Mashup/Avatar IA n'entrent en Bibliothèque vidéo qu'une fois animés (≥ 1 clip prêt).
         ads = [
             a for a in db.list_ads_with_clips()
-            if a.get("kind") in ("avatar", "objet", "mashup", "avatar_omni")
-            and a.get("status") not in ("voix_seules", "voix_off")
+            if a.get("kind") in ("objet", "mashup", "avatar_omni")
+            and a.get("status") != "voix_off"
             and not (a.get("kind") in ("objet", "mashup", "avatar_omni") and not _has_video(a))
         ]
         for ad in ads:
@@ -2005,7 +1821,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/library/voices")
     def library_voices() -> dict[str, Any]:
-        """Sous-section « Voix off » : pubs AUDIO (Voix seules + Voix off), groupées par pub,
+        """Sous-section « Voix off » : pubs AUDIO (Voix off), groupées par pub,
         avec le fichier .wav lisible/téléchargeable (Gradium)."""
         out: list[dict[str, Any]] = []
         for a in db.list_ads_with_clips():
@@ -2169,19 +1985,16 @@ def create_app() -> FastAPI:
 # ------------------------------------------------------------------ modèles
 class SettingsIn(BaseModel):
     gradium_api_key: str = ""
-    heygen_api_key: str = ""
     openrouter_api_key: str = ""
     xai_api_key: str = ""
     gemini_api_key: str = ""   # Avatar IA (Omni) — clé Google AI Studio
     elevenlabs_api_key: str = ""   # Avatar IA v2 — voix ElevenLabs ; vide = garder
     gradium_model: str = ""
-    heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = ""
     brain_engine: str = ""        # "anthropic_api" | "claude_code" ; "" = ne pas changer
     claude_code_token: str = ""   # token `claude setup-token` ; vide = garder
     claude_code_model: str = ""   # sonnet | opus | haiku ; "" = ne pas changer
-    cost_mode: str = ""
     objet_image_model: str = ""
     nb_image_size: str = ""   # « 2K » | « 4K » ; "" = ne pas changer ; valeur inconnue → 2K
     objet_video_model: str = ""
@@ -2196,42 +2009,12 @@ class SettingsIn(BaseModel):
     avatar_video_model: str = ""   # Avatar IA v2 : grok | kling | omni ; "" = ne pas changer
     drift_threshold: float | None = None   # seuil de dérive 0..1 ; None = ne pas changer
     dry_run: bool = True
-    # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices (comme les avatars).
-
-
-class RetryIn(BaseModel):
-    confirm: bool = False
-
-
-class BrainIn(BaseModel):
-    script: str = ""
-    brief: str = ""
-    style: str = "avatar"
-    avatar_label: str = ""
-
-
-class AvatarIn(BaseModel):
-    label: str
-    avatar_id: str
+    # NB : la voix Gradium n'est plus ici — gérée par label via /api/voices.
 
 
 class VoiceIn(BaseModel):
     label: str
     voice_id: str
-
-
-class ScenesIn(BaseModel):
-    scenes: list[dict[str, Any]] = []
-    mode: str = ""
-
-
-class GenerateIn(BaseModel):
-    ad_name: str = "pub"
-    avatar_label: str = ""
-    voice_label: str = ""
-    cost_mode: str = ""
-    scenes: list[dict[str, Any]] = []
-    confirm: bool = False
 
 
 class VoiceoverIn(BaseModel):
@@ -2404,31 +2187,6 @@ class AvatarOmniAnimateIn(BaseModel):
 
 
 # ------------------------------------------------------------------ util
-def _validate_scenes(scenes: list[dict[str, Any]]) -> None:
-    """Valide et normalise les scènes en place : script présent, n entier et unique."""
-    seen: set[int] = set()
-    for i, s in enumerate(scenes, 1):
-        if "script" not in s or not str(s.get("script", "")).strip():
-            raise HTTPException(400, f"Scène #{i} : champ « script » manquant.")
-        if s.get("n") in (None, ""):
-            s["n"] = i
-        try:
-            n = int(s["n"])
-        except (ValueError, TypeError):
-            raise HTTPException(
-                400,
-                f"Scène #{i} : le numéro « n » doit être un entier (reçu : {s.get('n')!r}).",
-            ) from None
-        s["n"] = n
-        if n in seen:
-            raise HTTPException(
-                400,
-                f"Numéro de scène en double : n={n}. Chaque scène doit avoir un numéro unique "
-                "(sinon les clips s'écraseraient).",
-            )
-        seen.add(n)
-
-
 def _media_url(mp4_path: str | None) -> str | None:
     """URL /media/… (images, vidéos, audio) + cache-buster ?v=<date de modif> : helper UNIQUE
     media.media_url (un média régénéré sous le même nom s'affiche à jour)."""
@@ -3282,7 +3040,7 @@ async def _start_plan_images(
     # génèrent APRÈS validation du Plan 1, à partir de son image (« Générer les plans suivants »).
     first_only = job_shots[:1]
     job = jobs.manager.start(
-        cfg, ad_id, ad_name, first_only, "",
+        cfg, ad_id, ad_name, first_only,
         output_mode="objet_images", ref_paths=ref_paths, character_ref="",
     )
     return {
@@ -3454,7 +3212,7 @@ def _regenerate_image(
             "refs_needed": clip.get("refs_needed"), "correction": fix}
     job = _start_reserved(
         [int(clip_id)],
-        cfg, int(ad["id"]), str(ad["name"]), [shot], "",
+        cfg, int(ad["id"]), str(ad["name"]), [shot],
         output_mode="objet_images", ref_paths=db.list_ref_images(int(ad["id"])),
         character_ref=character_ref,
     )
@@ -3507,7 +3265,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
         _raise_if_clips_busy(ad_id, img_ids)
         db.reset_clips_pending(img_ids)
         job = _start_reserved(
-            img_ids, cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
+            img_ids, cfg, ad_id, str(ad["name"]), shots, output_mode="objet_images",
             ref_paths=db.list_ref_images(ad_id),
             character_ref=str(ref["image_path"]) if ref else "",
         )
@@ -3555,7 +3313,7 @@ def _resume_ad(ad_id: int, body: AnimateIn, kind: str) -> dict[str, Any]:
     anim_scenes = [{"n": int(c["scene_n"])} for c in to_anim]
     anim_ids = [int(c["id"]) for c in to_anim]
     _raise_if_clips_busy(ad_id, anim_ids)
-    job = _start_reserved(anim_ids, cfg, ad_id, str(ad["name"]), anim_scenes, "", output_mode=mode)
+    job = _start_reserved(anim_ids, cfg, ad_id, str(ad["name"]), anim_scenes, output_mode=mode)
     return {"ok": True, "job_id": job.id, "ad_id": ad_id, "phase": "animation",
             "n": len(to_anim), "dry_run": cfg.dry_run}
 
@@ -3603,7 +3361,7 @@ def _run_consistency(
     db.reset_clips_pending([c["id"] for c in targets])
     job = _start_reserved(
         [int(c["id"]) for c in targets],
-        cfg, ad_id, str(ad["name"]), shots, "", output_mode="objet_images",
+        cfg, ad_id, str(ad["name"]), shots, output_mode="objet_images",
         ref_paths=db.list_ref_images(ad_id), character_ref=str(ref["image_path"]),
     )
     return {"ok": True, "job_id": job.id, "ad_id": ad_id, "n": len(targets),

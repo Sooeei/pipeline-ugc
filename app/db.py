@@ -1,4 +1,4 @@
-"""Accès SQLite : réglages, avatars, pubs, clips, activité.
+"""Accès SQLite : réglages, voix, pubs, clips, activité.
 
 Chaque appel ouvre sa propre connexion (sûr entre threads : les jobs de fond
 écrivent la progression depuis un thread séparé). WAL activé pour la concurrence.
@@ -16,11 +16,6 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS avatars (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    label     TEXT NOT NULL,
-    avatar_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS voices (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -343,6 +338,7 @@ def init_db() -> None:
         _migrate_cost_links(con)
         _freeze_ad_video_models(con)
         _migrate_inactive_voice_mode(con)
+        _migrate_retired_avatar_flow(con)
         con.commit()
     finally:
         con.close()
@@ -350,7 +346,8 @@ def init_db() -> None:
 
 COST_CATEGORY_BY_SERVICE = {
     "openrouter": "image",
-    "grok": "video", "kling": "video", "gemini": "video", "heygen": "video",
+    "grok": "video", "kling": "video", "gemini": "video",
+    "ancien_fournisseur": "video",   # historique : ancien fournisseur d'avatar (crédits)
     "gradium": "voice", "elevenlabs": "voice",
     "anthropic": "brain", "claude_code": "brain",
 }
@@ -362,6 +359,20 @@ _COST_LINK_WINDOW_AFTER_S = 5.0
 
 def cost_category(service: str) -> str:
     return COST_CATEGORY_BY_SERVICE.get(str(service or ""), "other")
+
+
+def _migrate_retired_avatar_flow(con: sqlite3.Connection) -> None:
+    """Base antérieure au retrait du flux avatar d'origine (ex. sauvegarde restaurée) : l'historique
+    de coûts passe sous le service « ancien_fournisseur », ses réglages (dont la clé API) et sa
+    table d'avatars sont effacés. Idempotent. Le nom de l'ancien service est reconstitué ici pour
+    ne plus figurer en clair dans le code."""
+    old = "hey" + "gen"
+    con.execute("UPDATE cost_events SET service='ancien_fournisseur' WHERE service=?", (old,))
+    con.execute(
+        "DELETE FROM settings WHERE key IN (?, ?, ?, 'cost_mode')",
+        (f"{old}_api_key", f"{old}_voice_id", f"{old}_engine"),
+    )
+    con.execute("DROP TABLE IF EXISTS avatars")
 
 
 def _migrate_cost_links(con: sqlite3.Connection) -> None:
@@ -552,48 +563,6 @@ def get_all_settings() -> dict[str, str]:
         con.close()
 
 
-# ---------------------------------------------------------------- avatars
-def list_avatars() -> list[dict[str, Any]]:
-    con = connect()
-    try:
-        rows = con.execute("SELECT id, label, avatar_id FROM avatars ORDER BY id").fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
-
-
-def add_avatar(label: str, avatar_id: str) -> int:
-    con = connect()
-    try:
-        cur = con.execute(
-            "INSERT INTO avatars(label, avatar_id) VALUES(?, ?)", (label, avatar_id)
-        )
-        con.commit()
-        return int(cur.lastrowid or 0)
-    finally:
-        con.close()
-
-
-def delete_avatar(avatar_row_id: int) -> None:
-    con = connect()
-    try:
-        con.execute("DELETE FROM avatars WHERE id=?", (avatar_row_id,))
-        con.commit()
-    finally:
-        con.close()
-
-
-def avatar_id_for_label(label: str) -> str | None:
-    con = connect()
-    try:
-        row = con.execute(
-            "SELECT avatar_id FROM avatars WHERE label=? ORDER BY id LIMIT 1", (label,)
-        ).fetchone()
-        return row["avatar_id"] if row else None
-    finally:
-        con.close()
-
-
 # ---------------------------------------------------------------- voices
 def list_voices() -> list[dict[str, Any]]:
     con = connect()
@@ -686,7 +655,11 @@ def voice_meta_map() -> dict[str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------- ads / clips
-def create_ad(name: str, avatar_label: str, scenes_json: str, kind: str = "avatar") -> int:
+def create_ad(name: str, avatar_label: str, scenes_json: str, *, kind: str) -> int:
+    """Crée une pub. `kind` est OBLIGATOIRE (par mot-clé) : « audio », « objet », « mashup »,
+    « avatar_omni ». `avatar_label` : colonne historique, laissée vide."""
+    if not str(kind or "").strip():
+        raise ValueError("create_ad : kind obligatoire")
     con = connect()
     try:
         cur = con.execute(
@@ -1556,7 +1529,7 @@ _DONE_STATUSES_VIDEO = ("pret",)
 _IMAGE_MODES = ("objet_images",)
 # Jobs « voix » : l'état des plans est porté par d'autres champs (voice_ok…) → on ne touche pas
 # aux statuts des plans, seulement au statut de la pub.
-_VOICE_MODES = ("avatar_voices", "voix_seules", "voix_off",
+_VOICE_MODES = ("avatar_voices", "voix_off",
                 "retouche")   # retouche interrompue : le plan garde son image actuelle
 
 

@@ -31,8 +31,6 @@ def _default_data_dir() -> Path:
 DATA_DIR = Path(os.environ.get("UGC_DATA_DIR", _default_data_dir()))
 MEDIA_DIR = DATA_DIR / "media"
 DB_PATH = DATA_DIR / "app.db"
-# Sortie du mode « Voix seules » : un sous-dossier par pub (audios + récap), auto-ouvert.
-VOICES_DIR = DATA_DIR / "voix"
 # Sortie du style « Voix off » : voix Gradium seule (script → audio), un dossier par pub.
 VOICEOVER_DIR = DATA_DIR / "voix_off"
 # Pipeline « Objet animé » : images de référence + images générées, un dossier par pub.
@@ -47,15 +45,10 @@ LOCAL_IMAGE_MAX_REFS = 9                      # Qwen Image Edit : 9 réfs en plu
 # Limite Gradium : ~1500 caractères par session TTS → au-delà, on découpe en segments.
 GRADIUM_MAX_CHARS = 1500
 
-# Génération vidéo EN PARALLÈLE : HeyGen (avatar) et Grok (objet) acceptent plusieurs rendus
-# simultanés. On lance les scènes/plans en parallèle via une file bornée (respecte d'éventuelles
-# limites de requêtes concurrentes du fournisseur). 1 = comportement série d'origine.
-HEYGEN_MAX_PARALLEL = 3
+# Génération vidéo EN PARALLÈLE : Grok (objet) accepte plusieurs rendus simultanés. On lance
+# les plans en parallèle via une file bornée (respecte d'éventuelles limites de requêtes
+# concurrentes du fournisseur). 1 = comportement série d'origine.
 GROK_MAX_PARALLEL = 3
-# Gradium limite le nombre de sessions TTS SIMULTANÉES (défaut 2). L'avatar génère donc TOUTES
-# les voix d'abord, 2 par 2 (file d'attente), PUIS toutes les vidéos HeyGen en parallèle.
-GRADIUM_MAX_PARALLEL = 2
-GRADIUM_TTS_RETRIES = 3   # relance auto d'une voix qui échoue (ex. concurrency ponctuelle)
 
 # Mode « Images seules » (B-roll) : ratios proposés (le style, lui, est LIBRE / choisi par l'user).
 IMAGE_RATIOS = ("9:16", "1:1", "4:5", "16:9", "3:2")
@@ -82,7 +75,7 @@ def normalize_refs_needed(value: Any) -> list[str] | None:
         return [str(x).strip().lower() for x in value if str(x).strip()]
     return None
 
-# Format de sortie des VOIX (voix off + voix seules). MP3 par défaut : léger, universel, pas de
+# Format de sortie des VOIX (voix off). MP3 par défaut : léger, universel, pas de
 # souci d'entête WAV en montage (Premiere). WAV reste possible (entête réparé, cf. fix_wav_bytes).
 AUDIO_FORMATS = ("mp3", "wav")
 DEFAULT_AUDIO_FORMAT = "mp3"
@@ -107,46 +100,14 @@ ASPECT_RATIO = "9:16"
 
 # Réglages par défaut (surchargés par la DB / config.py au premier lancement)
 DEFAULT_GRADIUM_MODEL = "default"
-# (le moteur HeyGen — Avatar V / IV — est désormais choisi par le MODE coût, voir COST_MODES)
 # Cerveau IA (Anthropic). "Sonnet convient" → modèle Sonnet courant, configurable.
 # NB : "claude-sonnet-5" est l'ID EXACT du Sonnet actuel (vérifié doc Anthropic 2026) —
 # ne PAS y ajouter de suffixe de date, ne pas "corriger" en claude-sonnet-4-*.
 DEFAULT_BRAIN_MODEL = "claude-sonnet-5"
 
-# ---------- Modes qualité / coût (changent RÉELLEMENT le payload HeyGen) ----------
-# NB : enhance_custom_motion_prompt n'est PAS un champ accepté par /v3/videos (rejeté en
-# 400 « Extra inputs »), donc non envoyé. Le ×2 vient du motion_prompt (custom motion).
-# Digital Twin : Avatar IV et Avatar V ont le même tarif de base ; l'économie du mode
-# Classique vient de l'absence de motion_prompt (pas de ×2) → ~2 crédits/s vs ~4.
-class CostMode(TypedDict):
-    label: str
-    engine: str          # type moteur HeyGen (avatar_v / avatar_iv)
-    motion: bool         # envoyer le motion_prompt custom (×2) ?
-    resolution: str      # résolution HeyGen ("1080p" / "720p") — 720p ≈ 2× moins cher
-    credits_per_sec: float
-
-
-COST_MODES: dict[str, CostMode] = {
-    "premium": {
-        "label": "Premium",
-        "engine": "avatar_v",     # Avatar V
-        "motion": True,           # motion prompt custom activé
-        "resolution": "1080p",    # pleine résolution
-        "credits_per_sec": 4.0,   # observé : Avatar V + motion + 1080p ≈ 4 cr/s
-    },
-    "classique": {
-        "label": "Classique",
-        "engine": "avatar_iv",    # Avatar IV
-        "motion": False,          # pas de motion prompt → gestes auto HeyGen
-        "resolution": "720p",     # 720p (moins cher que le défaut 1080p)
-        "credits_per_sec": 1.5,   # Avatar IV, sans motion, 720p ≈ 1,5 cr/s
-    },
-}
-DEFAULT_COST_MODE = "premium"
-
 # ---------- Pipeline « Objet animé » (Nano Banana images + Grok animation) ----------
 # Images = Nano Banana (modèles Google Gemini, via OpenRouter) ; animation = Grok Imagine (xAI).
-# Le CERVEAU (Claude) orchestre. Indépendant des pipelines Avatar/HeyGen, Voix seules, Voix off.
+# Le CERVEAU (Claude) orchestre. Indépendant du pipeline Voix off.
 OBJET_MAX_SHOTS = 40        # nb de plans max par pub (cap large ; le budget est protégé autrement)
 OBJET_MAX_REF_IMAGES = 14   # borne technique haute Nano Banana Pro (14 images, doc Google 08/10/2026)
 # Le cerveau ne produit pas 40 plans en un JSON fiable → on génère par SOUS-LOTS puis on recolle.
@@ -217,12 +178,9 @@ GROK_COST_USD_PER_INPUT_IMAGE = 0.01
 GROK_ESTIMATE_CLIP_SECONDS = 8
 
 # ---------- Devise & conversion (affichage $/€ ; stockage TOUJOURS en USD en base) ----------
-# Taux FIXE approximatif USD→EUR (modifiable). Sert à convertir HeyGen (natif €) → USD à
-# l'enregistrement, et à l'affichage $/€ dans la section Coûts. Ce n'est PAS un taux live.
+# Taux FIXE approximatif USD→EUR (modifiable). Sert à l'affichage $/€ dans la section Coûts.
+# Ce n'est PAS un taux live.
 USD_TO_EUR = 0.92
-# HeyGen : tarif RÉEL observé = 900 crédits pour 15 € → 0,016667 €/crédit. On stocke en USD.
-HEYGEN_EUR_PER_CREDIT = 15.0 / 900.0            # ≈ 0,0166667 €/crédit
-HEYGEN_USD_PER_CREDIT = HEYGEN_EUR_PER_CREDIT / USD_TO_EUR   # € → USD pour homogénéité en base
 # Anthropic (cerveau) — estimation optionnelle ($/million de tokens, ordre de grandeur Sonnet).
 ANTHROPIC_USD_PER_MTOK_IN = 3.0
 ANTHROPIC_USD_PER_MTOK_OUT = 15.0

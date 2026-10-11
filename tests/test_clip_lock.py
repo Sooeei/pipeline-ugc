@@ -157,7 +157,7 @@ def test_clip_released_even_if_job_crashes(monkeypatch):
         raise RuntimeError("plantage inattendu")
 
     monkeypatch.setattr(avatar_video, "animate_blocks", boom)
-    job = jobs.manager.start(ProviderConfig(dry_run=True), ad_id, "x", [{"n": 1}], "",
+    job = jobs.manager.start(ProviderConfig(dry_run=True), ad_id, "x", [{"n": 1}],
                              output_mode="avatar_video", clip_ids=ids)
     j = _wait_job(job.id)
     assert j.state == "echec"

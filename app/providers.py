@@ -1,19 +1,14 @@
-"""Encapsulation des fournisseurs : Gradium (voix), HeyGen (vidéo avatar),
+"""Encapsulation des fournisseurs : Gradium (voix),
 Nano Banana / OpenRouter (images), Grok / xAI et Kling / OpenRouter (animation),
 Google Gemini Omni (Avatar IA : vidéo + voix).
 
 Tout est paramétré par les réglages (DB) et pilotable en MODE SIMULATION (dry_run)
 pour tout tester sans clé et sans crédit.
-
-⚠️  CHAMPS HEYGEN INCERTAINS — TOUT EST CENTRALISÉ ICI (voir HEYGEN_FIELDS).
-    Si HeyGen renvoie une erreur de champ au premier vrai appel, on ajuste seulement
-    ce dictionnaire, nulle part ailleurs.
 """
 
 from __future__ import annotations
 
 import asyncio
-import mimetypes
 import re
 import time
 from dataclasses import dataclass
@@ -23,17 +18,6 @@ from typing import Any
 import requests
 
 from . import config_app, gen_trace, lipsync_rules, media, prompt_profiles
-
-HEYGEN_API = "https://api.heygen.com"
-HEYGEN_UPLOAD = "https://upload.heygen.com/v1/asset"
-POLL_EVERY = 10
-POLL_TIMEOUT = 900
-
-# --- Les seuls noms de champs à ajuster si HeyGen râle au premier vrai appel ---
-HEYGEN_FIELDS = {
-    "audio_field": "audio_asset_id",   # confirmé accepté par /v3/videos
-    "motion_field": "motion_prompt",   # confirmé accepté
-}
 
 # ============================================================ OBJET ANIMÉ (Nano Banana + Grok)
 # Pipeline « Objet animé » : images via NANO BANANA (modèles Google Gemini image) appelé
@@ -76,7 +60,6 @@ class ProviderConfig:
     """Réglages passés aux fournisseurs (issus de la DB)."""
 
     gradium_api_key: str = ""
-    heygen_api_key: str = ""
     openrouter_api_key: str = ""  # Nano Banana via OpenRouter (images « Objet animé »)
     xai_api_key: str = ""         # Grok Imagine / xAI (animation « Objet animé »)
     gemini_api_key: str = ""      # Google Gemini Omni (vidéo + voix « Avatar IA »)
@@ -91,13 +74,11 @@ class ProviderConfig:
     gradium_voice_id: str = ""
     gradium_model: str = config_app.DEFAULT_GRADIUM_MODEL
     audio_format: str = config_app.DEFAULT_AUDIO_FORMAT   # "mp3" (défaut) | "wav"
-    heygen_voice_id: str = ""
     anthropic_api_key: str = ""
     brain_model: str = config_app.DEFAULT_BRAIN_MODEL
     brain_engine: str = config_app.DEFAULT_BRAIN_ENGINE   # "anthropic_api" | "claude_code"
     claude_code_token: str = ""                            # token `claude setup-token` (secret)
     claude_code_model: str = config_app.DEFAULT_CLAUDE_CODE_MODEL
-    cost_mode: str = config_app.DEFAULT_COST_MODE
     avatar_video_model: str = config_app.DEFAULT_AVATAR_VIDEO_MODEL  # Avatar IA v2 : grok|kling|omni
     drift_threshold: float = config_app.DRIFT_THRESHOLD_DEFAULT      # seuil du contrôle de dérive
     dry_run: bool = True
@@ -116,7 +97,6 @@ class ProviderError(RuntimeError):
 
 # Noms « grand public » des fournisseurs (là où l'utilisateur va chercher clé / crédits).
 _PROVIDER_ACCOUNT = {
-    "HeyGen": "HeyGen",
     "Gradium": "Gradium",
     "OpenRouter": "OpenRouter",
     "xAI": "xAI (Grok)",
@@ -167,7 +147,7 @@ def _friendly_network(service: str, exc: BaseException | None = None) -> str:
 # Les TESTS de connexion (« Tester la clé ») tolèrent les serveurs lents : timeout large +
 # petit retry sur les hoquets réseau ponctuels (Read timed out, connection reset). Ceci ne
 # concerne PAS les vraies générations (leurs timeouts/polling restent inchangés).
-CONNECTION_TEST_TIMEOUT = 180   # s — 3 min, pour tolérer un serveur lent (HeyGen & co.)
+CONNECTION_TEST_TIMEOUT = 180   # s — 3 min, pour tolérer un serveur lent
 CONNECTION_TEST_RETRIES = 3     # tentatives avant d'abandonner sur un hoquet réseau
 _RETRY_BACKOFF = 1.5            # s — pause croissante entre deux tentatives
 
@@ -222,7 +202,7 @@ def _request_with_retries(method: str, url: str, *, service: str, **kwargs: Any)
 # ============================================================ GRADIUM (voix)
 def gradium_tts(cfg: ProviderConfig, text: str, out_path: str | Path, fmt: str | None = None) -> str:
     """Texte → fichier audio (MP3 par défaut, WAV possible). Le format vient de `cfg.audio_format`,
-    ou de `fmt` s'il est forcé (ex. la voix intermédiaire de l'avatar reste WAV pour HeyGen).
+    ou de `fmt` s'il est forcé.
 
     L'extension de `out_path` est alignée sur le format ; renvoie le CHEMIN réel écrit. En
     simulation : silence valide. Réel : SDK gradium (WAV) → entête réparé → format cible."""
@@ -396,245 +376,6 @@ async def _gradium_check_real(cfg: ProviderConfig) -> dict:
     client = gradium.client.GradiumClient(api_key=cfg.gradium_api_key)
     voice = await client.voice_get(voice_uid=cfg.gradium_voice_id)
     return {"ok": True, "simulation": False, "message": "Voix trouvée.", "voice": voice}
-
-
-# ============================================================ HEYGEN (vidéo)
-def _audio_mime(path: str) -> str:
-    """Content-Type EXACT attendu par HeyGen à l'upload.
-
-    HeyGen renifle le contenu : un WAV est détecté comme "audio/x-wav". Envoyer
-    "audio/wav" déclenche un 400 (code 400543 « Content type not match »). On force
-    donc le bon type par extension.
-    """
-    ext = Path(path).suffix.lower()
-    return {".wav": "audio/x-wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}.get(
-        ext, mimetypes.guess_type(path)[0] or "application/octet-stream"
-    )
-
-
-def heygen_upload_audio(cfg: ProviderConfig, wav_path: str | Path) -> str:
-    """Upload de l'audio → asset_id. Simulation : id factice."""
-    if cfg.dry_run:
-        return "SIMU_ASSET_ID"
-    wav_path = str(wav_path)
-    mime = _audio_mime(wav_path)
-    with open(wav_path, "rb") as f:
-        blob = f.read()
-    r = requests.post(
-        HEYGEN_UPLOAD,
-        headers={"x-api-key": cfg.heygen_api_key, "Content-Type": mime},
-        data=blob,
-        timeout=120,
-    )
-    if r.status_code >= 400:
-        _log_detail(f"HeyGen upload {r.status_code} : {r.text[:400]}")
-        raise ProviderError(_friendly_http("HeyGen", r.status_code))
-    d = r.json().get("data", {})
-    asset_id = d.get("id") or d.get("asset_id")
-    if not asset_id:
-        _log_detail(f"HeyGen upload : asset id absent dans {r.text[:300]}")
-        raise ProviderError("HeyGen n'a pas accepté l'audio — réessaie ; si ça persiste, vérifie ta clé HeyGen (Réglages).")
-    return str(asset_id)
-
-
-def _create_video_payload(
-    cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str
-) -> dict:
-    """Payload POST /v3/videos (type avatar). Champs CONFIRMÉS acceptés par HeyGen
-    (schéma strict) : title (PAS video_title), aspect_ratio "9:16" (PAS dimension),
-    audio_asset_id + motion_prompt top-level, engine {type}.
-
-    Le MODE COÛT change réellement le payload :
-    - Premium  : engine "avatar_v" + motion_prompt présent.
-    - Classique: engine "avatar_iv" + motion_prompt OMIS (gestes auto).
-    (enhance_custom_motion_prompt n'est jamais envoyé : rejeté par HeyGen.)
-    """
-    mode = config_app.COST_MODES.get(cfg.cost_mode, config_app.COST_MODES[config_app.DEFAULT_COST_MODE])
-    payload: dict = {
-        "type": "avatar",
-        "avatar_id": avatar_id,
-        "engine": {"type": mode["engine"]},
-        HEYGEN_FIELDS["audio_field"]: audio_asset_id,
-        "title": title,
-    }
-    if mode["motion"] and motion_prompt:
-        payload[HEYGEN_FIELDS["motion_field"]] = motion_prompt
-    payload["resolution"] = mode["resolution"]  # 720p (Classique) / 1080p (Premium)
-    payload["aspect_ratio"] = "9:16"             # confirmé : PAS "dimension" {width,height}
-    if cfg.heygen_voice_id:
-        payload["voice_id"] = cfg.heygen_voice_id
-    return payload
-
-
-def heygen_create_video(
-    cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str,
-    seconds: float = 0.0,
-) -> str:
-    """Crée la vidéo HeyGen + journal de la génération (gen_trace), simulation comprise.
-    `seconds` (optionnel) = durée parlée estimée, pour l'estimation de coût du journal."""
-    vid = _heygen_create_video(cfg, avatar_id, audio_asset_id, motion_prompt, title)
-    payload = _create_video_payload(cfg, avatar_id, audio_asset_id, motion_prompt, title)
-    gen_trace.record(
-        kind="video", model=f"heygen-{payload['engine']['type']}",
-        prompt=str(payload.get(HEYGEN_FIELDS["motion_field"]) or ""), images=[],
-        params={"seconds": round(float(seconds or 0), 1), "resolution": payload.get("resolution"),
-                "avatar_id": avatar_id, "cost_mode": cfg.cost_mode, "video_id": vid},
-        dry_run=cfg.dry_run,
-    )
-    return vid
-
-
-def _heygen_create_video(
-    cfg: ProviderConfig, avatar_id: str, audio_asset_id: str, motion_prompt: str, title: str
-) -> str:
-    """Crée la vidéo (avatar + audio + motion). Simulation : video_id factice."""
-    if cfg.dry_run:
-        return f"SIMU_VIDEO_{title}"
-
-    payload = _create_video_payload(cfg, avatar_id, audio_asset_id, motion_prompt, title)
-
-    r = requests.post(
-        f"{HEYGEN_API}/v3/videos",
-        headers={"x-api-key": cfg.heygen_api_key, "Content-Type": "application/json"},
-        json=payload,
-        timeout=120,
-    )
-    if r.status_code >= 400:
-        _log_detail(f"HeyGen create {r.status_code} : {r.text[:400]}")
-        raise ProviderError(_friendly_http("HeyGen", r.status_code))
-    d = r.json().get("data", {})
-    vid = d.get("video_id") or d.get("id")
-    if not vid:
-        _log_detail(f"HeyGen create : video_id absent dans {r.text[:300]}")
-        raise ProviderError("HeyGen n'a pas pu lancer la vidéo — réessaie.")
-    return str(vid)
-
-
-def heygen_render_to_file(
-    cfg: ProviderConfig, video_id: str, out_mp4: str | Path, scene_label: str = ""
-) -> str:
-    """Attend le rendu et télécharge le .mp4. Simulation : génère un clip placeholder."""
-    out_mp4 = str(out_mp4)
-    if cfg.dry_run:
-        return media.make_placeholder_mp4(
-            out_mp4, seconds=1.5, label=f"SIMULATION {scene_label}".strip()
-        )
-
-    import time
-
-    t0 = time.time()
-    while True:
-        r = requests.get(
-            f"{HEYGEN_API}/v3/videos/{video_id}",
-            headers={"x-api-key": cfg.heygen_api_key},
-            timeout=60,
-        )
-        if r.status_code >= 400:
-            _log_detail(f"HeyGen status {r.status_code} : {r.text[:400]}")
-            raise ProviderError(_friendly_http("HeyGen", r.status_code))
-        d = r.json().get("data", {})
-        status = d.get("status")
-        if status in ("completed", "success"):
-            url = d.get("video_url") or d.get("url")
-            if not url:
-                _log_detail(f"HeyGen : url de vidéo absente ({str(d)[:300]})")
-                raise ProviderError("HeyGen n'a pas renvoyé la vidéo finie — réessaie.")
-            _download(url, out_mp4)
-            return out_mp4
-        if status in ("failed", "error"):
-            _log_detail(f"HeyGen échec vidéo : {d.get('error') or d.get('failure_message') or status}")
-            raise ProviderError(
-                "HeyGen n'a pas pu finir la vidéo — réessaie ; si ça persiste, l'avatar ou la "
-                "voix pose peut-être problème."
-            )
-        if time.time() - t0 > POLL_TIMEOUT:
-            _log_detail(f"HeyGen délai dépassé (video_id={video_id})")
-            raise ProviderError("La vidéo HeyGen met trop de temps — réessaie plus tard.")
-        time.sleep(POLL_EVERY)
-
-
-def heygen_list_avatars(cfg: ProviderConfig) -> dict:
-    """Liste les avatars du compte. Simulation : liste vide + note."""
-    if cfg.dry_run:
-        return {"ok": True, "simulation": True, "avatars": [], "message": "Simulation."}
-    try:
-        r = _request_with_retries(
-            "GET", f"{HEYGEN_API}/v2/avatars",
-            service="HeyGen", headers={"x-api-key": cfg.heygen_api_key},
-        )
-        if r.status_code >= 400:
-            _log_detail(f"HeyGen avatars {r.status_code} : {r.text[:300]}")
-            return {"ok": False, "message": _friendly_http("HeyGen", r.status_code)}
-        data = r.json().get("data", {})
-        avatars = data.get("avatars") or data.get("list") or []
-        simple = [
-            {"avatar_id": a.get("avatar_id") or a.get("id"),
-             "name": a.get("avatar_name") or a.get("name") or ""}
-            for a in avatars
-        ]
-        return {"ok": True, "simulation": False, "avatars": simple}
-    except Exception as exc:  # noqa: BLE001
-        _log_detail(f"HeyGen avatars : {exc}")
-        return {"ok": False, "message": _friendly_network("HeyGen", exc)}
-
-
-def heygen_list_avatars_full(cfg: ProviderConfig) -> dict:
-    """JALON 4 — liste RICHE des avatars pour le sélecteur visuel : vignettes + métadonnées.
-
-    Renvoie deux tableaux (`avatars` standard, `talking_photos` = photo avatars) avec, par item :
-    avatar_id, name, gender, preview_image_url, preview_video_url, premium, type, default_voice_id.
-    L'appel HeyGen est LENT et volumineux (cache géré côté endpoint). Simulation → note + vides."""
-    if cfg.dry_run:
-        return {"ok": True, "simulation": True, "avatars": [], "talking_photos": [],
-                "message": "Simulation : liste HeyGen indisponible (aucune clé requise)."}
-    try:
-        r = _request_with_retries(
-            "GET", f"{HEYGEN_API}/v2/avatars",
-            service="HeyGen", headers={"x-api-key": cfg.heygen_api_key}, timeout=180,
-        )
-        if r.status_code >= 400:
-            _log_detail(f"HeyGen avatars(full) {r.status_code} : {r.text[:300]}")
-            return {"ok": False, "message": _friendly_http("HeyGen", r.status_code)}
-        data = r.json().get("data", {})
-
-        def _std(a: dict, is_photo: bool) -> dict:
-            return {
-                "avatar_id": a.get("avatar_id") or a.get("id") or a.get("talking_photo_id"),
-                "name": a.get("avatar_name") or a.get("name") or a.get("talking_photo_name") or "",
-                "gender": a.get("gender") or "",
-                "preview_image_url": a.get("preview_image_url") or a.get("image_url") or "",
-                "preview_video_url": a.get("preview_video_url") or "",
-                "premium": bool(a.get("premium")),
-                "type": a.get("type") or "",
-                "default_voice_id": a.get("default_voice_id") or "",
-                "is_photo": is_photo,   # photo avatar → « Classique uniquement » (garde Avatar V)
-            }
-
-        avatars = [_std(a, False) for a in (data.get("avatars") or data.get("list") or [])]
-        photos = [_std(a, True) for a in (data.get("talking_photos") or [])]
-        return {"ok": True, "simulation": False, "avatars": avatars, "talking_photos": photos}
-    except Exception as exc:  # noqa: BLE001
-        _log_detail(f"HeyGen avatars(full) : {exc}")
-        return {"ok": False, "message": _friendly_network("HeyGen", exc)}
-
-
-def heygen_quota(cfg: ProviderConfig) -> dict:
-    """Quota / crédits restants HeyGen. Simulation : factice."""
-    if cfg.dry_run:
-        return {"simulation": True, "remaining": "—"}
-    try:
-        r = _request_with_retries(
-            "GET", f"{HEYGEN_API}/v2/user/remaining_quota",
-            service="HeyGen", headers={"x-api-key": cfg.heygen_api_key},
-        )
-        if r.status_code >= 400:
-            _log_detail(f"HeyGen quota {r.status_code} : {r.text[:200]}")
-            return {"ok": False, "message": _friendly_http("HeyGen", r.status_code)}
-        d = r.json().get("data", {})
-        return {"ok": True, "simulation": False, "remaining": d}
-    except Exception as exc:  # noqa: BLE001
-        _log_detail(f"HeyGen quota : {exc}")
-        return {"ok": False, "message": _friendly_network("HeyGen", exc)}
 
 
 # ============================================================ OBJET ANIMÉ — clés

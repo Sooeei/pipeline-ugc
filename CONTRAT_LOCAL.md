@@ -1,6 +1,6 @@
 # Contrat — section « Local » (ComfyUI sur le PC)
 
-Règles générales : ne touche PAS à HeyGen ni aux flux Avatar IA / Objet animé / Mashup / Voix off.
+Règles générales : ne touche PAS aux flux Avatar IA / Objet animé / Mashup / Voix off.
 Migrations SQLite additives uniquement. Coût 0 $ : le flux Local n'appelle JAMAIS `cost.*` ni
 `gen_trace.record`. Aucune étiquette / aucun avertissement de licence dans l'UI. UI en français.
 Pas de nouvelle dépendance dans requirements.txt (`websockets` peut être utilisé SI importable,
@@ -108,7 +108,7 @@ Décisions du lead (fixées) :
 - Valeurs : `ads.image_engine` ∈ {"nano","qwen_local"} (défaut "nano") ; `ads.shoot_style` ∈
   {"pose","selfie"} (défaut "pose") ; `ads.local_video_quality` ∈ {0.4, 0.6, 0.9} (défaut 0.9) ;
   `ads.local_video_turbo` défaut 1 ; modèle vidéo Avatar IA v2 `"minimax_local"`.
-- Aucune mention de licence dans l'UI. Migrations SQLite additives uniquement. HeyGen et les flux
+- Aucune mention de licence dans l'UI. Migrations SQLite additives uniquement. Les flux
   Omni / Grok / Kling / Nano Banana gardent un comportement IDENTIQUE.
 
 ## Propriété des fichiers — phase 2 (un seul propriétaire)

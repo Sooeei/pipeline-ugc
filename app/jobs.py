@@ -36,7 +36,7 @@ class Job:
         self.ad_name = ad_name
         self.total = len(scenes)
         self.state = "en_attente"          # en_attente | en_cours | termine | echec
-        self.phase = ""                    # "" | "voix" (phase 1) | "videos" (phase 2)
+        self.phase = ""                    # "" | phase annoncée par le pipeline (ex. "voix")
         self.started_at = time.time()
         self.finished_at: float | None = None
         # état par scène : n -> {phase, status, mp4, voice_ok}
@@ -47,7 +47,7 @@ class Job:
         self._lock = threading.Lock()
 
     def on_update(self, ev: dict[str, Any]) -> None:
-        # Bannière de phase (avatar en 2 temps) : "voix" puis "videos".
+        # Bannière de phase annoncée par le pipeline (événement `job_phase`).
         if "job_phase" in ev:
             with self._lock:
                 self.phase = str(ev["job_phase"])
@@ -77,10 +77,10 @@ class Job:
                 "ad_id": self.ad_id,
                 "ad_name": self.ad_name,
                 "state": self.state,
-                "phase": self.phase,          # "voix" (phase 1) | "videos" (phase 2)
+                "phase": self.phase,          # phase annoncée par le pipeline ("" si aucune)
                 "total": self.total,
                 "done": done,
-                "voices_done": voices_done,   # nb de voix Gradium déjà prêtes (phase 1)
+                "voices_done": voices_done,   # nb de voix déjà prêtes
                 "scenes": [
                     {"n": n, **v} for n, v in sorted(self.scenes.items())
                 ],
@@ -95,6 +95,13 @@ class ClipsBusy(RuntimeError):
     def __init__(self, clip_ids: list[int]):
         self.clip_ids = sorted(int(c) for c in clip_ids)
         super().__init__("Plan(s) déjà en cours de génération : " + ", ".join(map(str, self.clip_ids)))
+
+
+# Modes de sortie PRÉDÉFINIS (sans `runner`) : chacun correspond à une branche de `_run_inner`.
+OUTPUT_MODES = frozenset({
+    "voix_off", "objet_images", "objet_animate", "mashup_animate", "avatar_omni_animate",
+    "avatar_voices", "avatar_video",
+})
 
 
 class JobManager:
@@ -120,23 +127,25 @@ class JobManager:
         ad_id: int,
         ad_name: str,
         scenes: list[dict[str, Any]],
-        avatar_id: str,
-        output_mode: str = "video",
-        avatar_label: str = "",
+        *,
+        output_mode: str,
         ref_paths: list[str] | None = None,
         full_script: str = "",
         character_ref: str = "",
-        is_retry: bool = False,
         only_clip_id: int | None = None,
         runner: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any] | None] | None = None,
         clip_ids: list[int] | None = None,
     ) -> Job:
-        """`runner(on_update)` : tâche PONCTUELLE (ex. « Retoucher » un plan) exécutée en fond à la
+        """`output_mode` (obligatoire) : mode de sortie prédéfini (voir OUTPUT_MODES) ; inconnu et
+        sans `runner` → ValueError, rien n'est lancé.
+        `runner(on_update)` : tâche PONCTUELLE (ex. « Retoucher » un plan) exécutée en fond à la
         place d'un mode prédéfini ; son échec n'est jamais reporté sur le statut de la pub.
         `clip_ids` : plans RÉSERVÉS par ce job (réservation atomique) ; si l'un d'eux est déjà pris
         par un autre job en cours → ClipsBusy, rien n'est lancé. Libérés à la fin du job, même s'il
         plante. Animation Avatar IA (avatar_video / avatar_omni_animate) : seuls ces plans sont
         animés (jamais un plan réservé par un autre job)."""
+        if runner is None and output_mode not in OUTPUT_MODES:
+            raise ValueError(f"mode de sortie inconnu : {output_mode!r}")
         job = Job(ad_id, ad_name, scenes)
         reserved = [int(c) for c in clip_ids or []]
         with self._lock:
@@ -175,13 +184,8 @@ class JobManager:
             try:
                 if runner is not None:
                     summary = runner(job.on_update) or {}
-                elif output_mode == "voix_seules":
-                    summary = pipeline.generate_voices_only(
-                        cfg, ad_id, ad_name, scenes, on_update=job.on_update,
-                        avatar_label=avatar_label,
-                    )
                 elif output_mode == "voix_off":
-                    # « Voix off » : voix Gradium seule (script → audio), sans avatar ni vidéo.
+                    # « Voix off » : voix Gradium seule (script → audio), sans vidéo.
                     summary = pipeline.generate_voiceover(
                         cfg, ad_id, ad_name, [str(s["script"]) for s in scenes],
                         full_script=full_script, on_update=job.on_update,
@@ -228,10 +232,7 @@ class JobManager:
                         clip_ids=reserved if clip_ids is not None else None,
                     ) or {}
                 else:
-                    summary = pipeline.generate_ad(
-                        cfg, ad_id, ad_name, scenes, avatar_id,
-                        on_update=job.on_update, is_retry=is_retry,
-                    )
+                    raise ValueError(f"mode de sortie inconnu : {output_mode!r}")
                 job.set_state(
                     "termine" if summary.get("echec", 0) == 0 else "partiel", summary
                 )

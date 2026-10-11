@@ -68,11 +68,6 @@ def test_no_plain_text_paid_video_modal_left():
         assert first_modal == -1 or "plafond" in body[first_modal - 200:first_modal + 200], marker
 
 
-def test_heygen_flow_untouched():
-    gen = _block('$("generateBtn").addEventListener(') if '$("generateBtn").addEventListener(' in JS else ""
-    assert "confirmPaidVideo" not in gen
-
-
 def test_mash_estimate_memorized():
     assert "lastMashEstimate = est" in _block("function renderMashPlan(")
 

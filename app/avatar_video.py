@@ -1427,7 +1427,7 @@ def video_animate(ad_id: int, body: VideoAnimateIn) -> Any:
                 db.set_ad_fields(ad_id, final_path="", final_audio_path="")
         try:
             job = jobs.manager.start(
-                cfg, ad_id, str(ad["name"]), [{"n": int(c["scene_n"])} for c in candidates], "",
+                cfg, ad_id, str(ad["name"]), [{"n": int(c["scene_n"])} for c in candidates],
                 output_mode="avatar_video",
                 only_clip_id=int(body.clip_id) if body.clip_id is not None else None,
                 clip_ids=ids,

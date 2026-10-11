@@ -42,3 +42,29 @@ def fresh_db():
     if lr is not None:
         lr._launch_at[0] = 0.0
     yield
+
+
+@pytest.fixture(autouse=True)
+def _local_test_safety():
+    """Jamais le vrai PC en test (même si un module redéfinit `fresh_db`) : pas de délai de grâce
+    implicite, pas de vérification t2i réseau, pas de lecture des processus Comfy, pas d'appel
+    Windows anti-veille, réessais d'annulation rapides."""
+    cq = sys.modules.get("app.comfy_queue")
+    if cq is not None:
+        cq.INTERACTIVE_GRACE_S = 0.0             # délai de grâce interactif : testé explicitement
+    lr = sys.modules.get("app.local_routes")
+    if lr is not None:
+        lr.CANCEL_RETRY_S = 0.05                # réessais de l'annulation des orphelins : rapides
+    li = sys.modules.get("app.local_images")   # vérification t2i en arrière-plan : jamais en test
+    if li is not None:
+        li.T2I_CHECK = False
+    cl = sys.modules.get("app.comfy_local")    # anti-2e instance : jamais le vrai Comfy du PC
+    if cl is not None:
+        cl.__dict__.setdefault("_pid_alive_orig", cl._pid_alive)   # testable via _pid_alive_orig
+        cl._pid_alive = lambda pid: False
+        cl._image_running = lambda image=cl.DESKTOP_IMAGE: False
+    lq = sys.modules.get("app.local_queue")    # anti-veille : jamais d'appel Windows en test
+    if lq is not None:
+        lq.__dict__.setdefault("_exec_state_orig", lq._exec_state)
+        lq._exec_state = lambda flags: None
+    yield

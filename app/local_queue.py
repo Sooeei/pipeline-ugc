@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import sys
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ router = APIRouter()
 STATE_KEY = "local_queue_state"
 COMFY_RECHECK_S = 30.0            # re-détection de Comfy quand il ne répond pas
 COMFY_MAX_WAIT_S = 30 * 60.0      # au-delà : pause « Comfy indisponible »
+FREE_WAIT_S = 120.0               # annulation : attente max de l'arrêt du worker avant /free
 AUTO_LAUNCH = True                # 1 lancement auto de Comfy Desktop par attente (garde-fou K4)
 MAX_CONSECUTIVE_FAILS = 3         # coupe-circuit
 MAX_ATTEMPTS = 3                  # interruptions (Comfy arrêté / app redémarrée) d'un même plan
@@ -258,7 +260,39 @@ def _should_run() -> bool:
             and _next_plan(str(st["run_id"])) is not None)
 
 
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def _exec_state(flags: int) -> None:
+    """SetThreadExecutionState (Windows) pour le thread APPELANT. No-op ailleurs (tests : neutralisé
+    par conftest)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetThreadExecutionState(ctypes.c_uint(flags))  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - confort : jamais bloquant
+        _log(f"anti-veille : {exc!r}")
+
+
+def _keep_awake(on: bool) -> None:
+    """Nuit sans surveillance : Windows ne se met PAS en veille tant que le worker tourne
+    (ES_SYSTEM_REQUIRED ; l'écran peut s'éteindre). Le réglage est PAR THREAD : appelé depuis le
+    thread worker au démarrage (on) et à l'arrêt (off → ES_CONTINUOUS seul)."""
+    _exec_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED if on else ES_CONTINUOUS)
+
+
 def _worker() -> None:
+    _keep_awake(True)
+    try:
+        _worker_loop()
+    finally:
+        _keep_awake(False)
+
+
+def _worker_loop() -> None:
     try:
         while True:
             if _step():
@@ -433,7 +467,18 @@ def _run_plan(plan: dict[str, Any], ad: dict[str, Any], clip: dict[str, Any]) ->
     exc = result.get("exc")
     with _lock:
         reason = str(_cur.get("cancel_reason") or "")
-        _cur.clear()
+    try:   # statut du plan écrit AVANT d'oublier le plan courant (vue jamais incohérente)
+        _plan_outcome(plan, job, exc, reason, ad_id, clip_id)
+    finally:
+        with _lock:
+            if _cur.get("plan_id") == pid:
+                _cur.clear()
+
+
+def _plan_outcome(plan: dict[str, Any], job: Any, exc: BaseException | None, reason: str,
+                  ad_id: int, clip_id: int) -> None:
+    """Issue d'un plan de la file : terminé / annulé / remis en attente / échec (+ coupe-circuit)."""
+    pid = int(plan["id"])
     attempts = int(plan.get("attempts") or 0)
     if exc is None and job.state == "termine":
         _fails[0] = 0
@@ -545,8 +590,14 @@ def _pl(n: int, word: str) -> str:
     return f"{n} {word}{'s' if n > 1 else ''}"
 
 
-def _free_async(reason: str) -> None:
+def _free_async(reason: str, wait_for: threading.Thread | None = None) -> None:
+    """Libère la mémoire de Comfy en arrière-plan ; `wait_for` : attend d'abord la fin de ce
+    thread (worker arrêté → plus de rendu de la file)."""
     def run() -> None:
+        if wait_for is not None and wait_for is not threading.current_thread():
+            wait_for.join(FREE_WAIT_S)
+            if comfy_queue.snapshot()["last_kind"] is None:
+                return   # aucun modèle chargé par un rendu depuis la dernière libération
         try:
             comfy_queue.free_now(reason)
         except Exception as exc:  # noqa: BLE001
@@ -929,6 +980,10 @@ def queue_cancel() -> dict[str, Any]:
             ev.set()
     _cancel_file_tickets()
     _wake.set()
+    # Mémoire Comfy libérée une fois le worker arrêté (plan en cours annulé).
+    worker = _thread[0]
+    if worker is not None:
+        _free_async("annulation", wait_for=worker)
     db.log_activity("file_locale", "File locale annulée.")
     return _view()
 

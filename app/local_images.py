@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import random
 import re
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -93,6 +95,65 @@ def check_t2i() -> bool | None:
         return None
 
 
+# Vérification du t2i pour l'UI (création de pub) : en arrière-plan, vol unique, au plus une
+# tentative par T2I_RECHECK_S tant que le résultat est inconnu. Tests : T2I_CHECK = False
+# (conftest) → aucun appel réseau, cache seulement.
+T2I_CHECK = True
+T2I_RECHECK_S = 60.0
+_t2i_lock = threading.Lock()
+_t2i_inflight: list[threading.Event | None] = [None]
+_t2i_last_try = [0.0]
+
+
+def _start_t2i_check() -> threading.Event | None:
+    with _t2i_lock:
+        ev = _t2i_inflight[0]
+        if ev is not None:
+            return ev
+        if time.monotonic() - _t2i_last_try[0] < T2I_RECHECK_S and _t2i_last_try[0] > 0:
+            return None
+        _t2i_last_try[0] = time.monotonic()
+        ev = threading.Event()
+        _t2i_inflight[0] = ev
+
+    def run() -> None:
+        try:
+            check_t2i()
+        except Exception as exc:  # noqa: BLE001 - vérification facultative
+            comfy_local._log_detail(f"[QWEN] vérification t2i : {exc!r}")
+        finally:
+            with _t2i_lock:
+                _t2i_inflight[0] = None
+            ev.set()
+
+    threading.Thread(target=run, name="qwen-t2i-check", daemon=True).start()
+    return ev
+
+
+def t2i_status(wait_s: float = 0.0) -> bool:
+    """Disponibilité du texte→image pour l'UI SANS bloquer longtemps : dernier résultat connu ;
+    sinon vérification auprès de Comfy en arrière-plan (jamais pendant un rendu), attendue au plus
+    `wait_s` secondes. Inconnu → `t2i_available()` (template présent)."""
+    if not _template_present():
+        return False
+    cached = comfy_local.t2i_ready_cached()
+    if cached is not None:
+        return bool(cached)
+    if T2I_CHECK and not comfy_queue.busy():
+        ev = _start_t2i_check()
+        if ev is not None and wait_s > 0:
+            ev.wait(wait_s)
+    return t2i_available()
+
+
+def t2i_fields(wait_s: float = 0.0) -> dict[str, Any]:
+    """{qwen_t2i_available, qwen_plan1_note} pour /api/settings, /api/local/status et la réponse
+    du plan (création d'une pub, avant que la pub existe). Note vide si le t2i est disponible."""
+    available = t2i_status(wait_s)
+    return {"qwen_t2i_available": available,
+            "qwen_plan1_note": "" if available else T2I_FALLBACK_NOTE}
+
+
 def needs_nano(ad: dict[str, Any] | None, has_images: bool) -> bool:
     """Vrai si l'image d'un plan passera par Nano Banana (payant) : pub en Nano, ou pub en Qwen
     pour un plan SANS image alors que le texte→image est absent de Comfy. Comfy injoignable →
@@ -115,11 +176,12 @@ def plan1_engine(ad: dict[str, Any], refs: list[Any]) -> str:
 def ad_fields(ad: dict[str, Any] | None) -> dict[str, Any]:
     """Champs JSON du moteur d'images pour la page de la pub (zone D)."""
     available = t2i_available()
+    # Listes de choix : UNE seule forme, celle d'avatar_video.local_options ([{value, label}]).
     return {
         "image_engine": image_engine_of(ad),
-        "image_engines": dict(config_app.IMAGE_ENGINES),
+        "image_engines": [{"value": k, "label": lbl} for k, lbl in config_app.IMAGE_ENGINES.items()],
         "shoot_style": config_app.normalize_shoot_style((ad or {}).get("shoot_style")),
-        "shoot_styles": dict(config_app.SHOOT_STYLES),
+        "shoot_styles": [{"value": k, "label": lbl} for k, lbl in config_app.SHOOT_STYLES.items()],
         "qwen_t2i_available": available,
         "qwen_plan1_note": "" if available or not is_local(ad) else T2I_FALLBACK_NOTE,
     }
@@ -235,7 +297,8 @@ def _render(ad: dict[str, Any], clip: dict[str, Any], images: list[str], prompt:
             tw, th = size or QWEN_SIZE
             wf = comfy_local.build_t2i_workflow(prompt, width=tw, height=th, seed=seed, steps=T2I_STEPS)
         out = comfy_local.run(url, wf, dest_dir=dest.parent, stem=dest.stem, on_progress=_prog,
-                              should_cancel=ticket.cancel.is_set)
+                              should_cancel=ticket.cancel.is_set,
+                              timeout_s=config_app.LOCAL_IMAGE_TIMEOUT_S)
     return Path(out)
 
 

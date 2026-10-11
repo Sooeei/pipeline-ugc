@@ -53,6 +53,7 @@ DEFAULT_DIRECTION = "sits comfortably in a bright, cozy room"
 SPEAK_LINE = "speaks French with a natural accent, soft-spoken, lips perfectly synced"
 AUDIO_SPOKEN = "Audio: clean close-mic voice, quiet room, no music."
 AUDIO_MUTE = "Audio: quiet room tone, no music."
+POSE_VIDEO_LINE = "Static, steady eye-level framing."   # style « pose » (sans matériel nommé)
 SEED_MAX = 2**31 - 1
 MODEL_ID = config_app.AVATAR_VIDEO_MODELS[config_app.LOCAL_VIDEO_MODEL]["model"]
 
@@ -84,6 +85,14 @@ def _others_in_frame(ad: dict[str, Any], clip: dict[str, Any], sp: int) -> int:
         return 0
 
 
+def shoot_style_video_line(style: str | None) -> str:
+    """Style de tournage du prompt MiniMax : selfie = prompt_profiles.shoot_style_line ; pose =
+    POSE_VIDEO_LINE (jamais « tripod » : aucun matériel à l'image, règle brain.NO_CAMERA_GEAR)."""
+    if config_app.normalize_shoot_style(style) == "pose":
+        return POSE_VIDEO_LINE
+    return prompt_profiles.shoot_style_line(style, "video")
+
+
 def block_prompt(ad: dict[str, Any], clip: dict[str, Any]) -> str:
     """Prompt ANGLAIS MiniMax d'un bloc : scène UGC + direction du plan (anglais, gestes de tête
     retirés si parlé) + style de tournage (K9) + réplique FR VERBATIM nettoyée (brain.spoken_clean)
@@ -101,14 +110,17 @@ def block_prompt(ad: dict[str, Any], clip: dict[str, Any]) -> str:
         motion, _removed = lipsync_rules.strip_lipsync_gestures(motion)
     direction = _clean_direction(motion) or DEFAULT_DIRECTION
     hands = re.search(r"\b(hand|hands|holds?|holding)\b", direction, re.I)
+    # Direction qui parle déjà de sourire (« smiles warmly ») : pas de 2e phrase de sourire.
+    smiles = re.search(r"\bsmil(?:e|es|ed|ing)\b", direction, re.I)
     parts = ["UGC vertical video filmed on a smartphone."]
     if off:
         parts.append(f"The person from Picture 1 {direction}, mouth closed, does not speak, "
                      "listening naturally.")
     else:
-        parts.append(f"The person from Picture 1 {direction}, looking straight into the camera "
-                     f"with a warm natural smile{'' if hands else ', hands resting calmly'}.")
-    parts.append(prompt_profiles.shoot_style_line(ad.get("shoot_style"), "video"))
+        parts.append(f"The person from Picture 1 {direction}, looking straight into the camera"
+                     f"{'' if smiles else ' with a warm natural smile'}"
+                     f"{'' if hands else ', hands resting calmly'}.")
+    parts.append(shoot_style_video_line(ad.get("shoot_style")))
     if spoken:
         sheet = voice_i18n.clean_sheet(pipeline.ad_voice_sheet_for(ad)(sp))
         if off:
@@ -257,8 +269,11 @@ def animate_plan(ad: dict[str, Any], clip: dict[str, Any], raw: Path, *, seconds
                                               if k in ev})
             _notify(ev)
 
+        # Rendu long en HD : délai = max(1 h, 3 × l'estimation) (le défaut 1 h tuait un 15 s 0,9 MP).
         out = comfy_local.run(url, wf, dest_dir=raw.parent, stem=f"{raw.stem}_comfy",
-                              on_progress=_progress, should_cancel=_cancelled)
+                              on_progress=_progress, should_cancel=_cancelled,
+                              timeout_s=config_app.local_video_timeout_s(
+                                  float(seconds), float(megapixels), bool(turbo)))
     out = Path(out)
     if out != raw:
         shutil.copyfile(out, raw)

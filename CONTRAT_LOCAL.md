@@ -325,7 +325,42 @@ erreurs 400/404/409 avec `detail` en français) :
   composition. » ; pose vidéo « Static framing, phone on a tripod. » ; selfie vidéo « Handheld
   selfie framing at arm's length, subtle natural camera shake, lively framing. ».
 - Appliqué par B aux prompts IMAGE (Nano et Qwen) et par A aux prompts VIDÉO (Omni / Grok /
-  MiniMax). Jamais de mention d'audio dégradé (le son reste « clean »). La règle
+  MiniMax). EXCEPTION MiniMax en « pose » : `avatar_minimax.POSE_VIDEO_LINE` = « Static, steady
+  eye-level framing. » (jamais « tripod » dans le prompt vidéo ; Omni / Grok en pose : rien). Jamais de mention d'audio dégradé (le son reste « clean »). La règle
   `brain.NO_CAMERA_GEAR` reste vraie (le pied / le téléphone ne sont jamais à l'image).
 - Presets client : `local_video_quality`, `shoot_style`, `image_engine` normalisés
   (`presets.clean_preset_settings`) et copiés sur la pub Avatar IA comme les autres réglages.
+
+## K10 — Correctifs de la relecture v2 (tests : tests/test_local_v2_relecture.py, tests/test_local_v2_e2e.py)
+- Délais de rendu : `config_app.local_video_timeout_s(seconds, mp, turbo)` = max(3600,
+  3 × 60 × `local_video_minutes`) passé en `timeout_s` à `comfy_local.run` (MiniMax des pubs /
+  file et vidéo de la section Local) ; images Qwen (section Local et pubs) :
+  `config_app.LOCAL_IMAGE_TIMEOUT_S` = 3600.
+- `comfy_local.LOST_JOB_S = 30` : job accepté puis inconnu de Comfy (404 /api/jobs, /history
+  vide, absent de /queue running+pending) pendant 30 s → `ComfyOffline(LOST_JOB_MSG)` « Rendu
+  perdu par Comfy (redémarrage ?) — il sera repris. » (la file remet le plan en attente).
+- `comfy_queue.INTERACTIVE_GRACE_S = 20` : après la FIN d'un rendu de priorité < PRIO_BATCH, un
+  ticket BATCH en tête attend 20 s sans nouveau rendu interactif (un ticket interactif arrivé
+  entre-temps passe avant et relance le délai) → une cohérence Qwen de N images passe d'un bloc
+  (V I I I V…, un /free à l'aller, un au retour). Tests : conftest le met à 0 (testé à part).
+- `local_routes.cancel_interrupted` : détection `comfy_queue.DETECT_TIMEOUT_S` (10 s),
+  `CANCEL_DETECT_TRIES = 3` tentatives espacées de `CANCEL_RETRY_S = 10` s.
+- Texte→image Qwen connu AVANT la pub : `local_images.t2i_fields(wait_s)` →
+  `{qwen_t2i_available: bool, qwen_plan1_note: str}` (note vide si disponible) ajouté à
+  `GET /api/settings` (wait 0), `GET /api/local/status` (wait 0) et aux réponses de
+  `POST /api/avatar-omni/plan` / `validate-doc` (attente ≤ `main.PLAN_T2I_WAIT_S` = 3 s).
+  `local_images.t2i_status` : cache, sinon vérification en arrière-plan (vol unique, ≤ 1 / 60 s,
+  jamais pendant un rendu ; `T2I_CHECK = False` en test). UI (app.js) : `qwen_plan1_note` ;
+  pub Qwen sans repli connu → `confirm=false`, et si le serveur répond « Confirmation requise »
+  (Plan 1 reparti sur Nano Banana) → confirmation Nano payante habituelle puis renvoi.
+- `/api/avatar-omni/ad` et `/image-options` : `image_engines` / `shoot_styles` sous UNE forme,
+  `[{value, label}]`. `PATCH /api/avatar-omni/options` : `image_engine` inconnu → 400.
+- Anti-2e instance : `comfy_local.desktop_running()` (pid / childPid vivant dans
+  `%APPDATA%\Comfy Desktop\comfy-procs\*.json`, ou processus « Comfy Desktop.exe » via tasklist)
+  → `/api/local/launch` refuse avec `reason: "deja_lance"` avant tout Popen.
+- `/api/local/queue/cancel` : `comfy_queue.free_now("annulation")` une fois le worker arrêté
+  (si un modèle a été chargé).
+- Anti-veille : le thread worker de la file appelle `SetThreadExecutionState(ES_CONTINUOUS |
+  ES_SYSTEM_REQUIRED)` au démarrage et `ES_CONTINUOUS` à l'arrêt (`local_queue._keep_awake` ;
+  no-op hors Windows ; l'écran peut s'éteindre).
+- Prompt MiniMax : pas de « with a warm natural smile » si la direction parle déjà de sourire.

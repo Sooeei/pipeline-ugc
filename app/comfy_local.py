@@ -45,6 +45,7 @@ DEFAULT_PORTS = (8188, 8000)
 USE_WS = True
 POLL_INTERVAL_S = 1.0          # cadence du polling HTTP de /api/jobs/{id}
 OFFLINE_GRACE_S = 15.0         # Comfy injoignable plus longtemps que ça pendant un suivi → offline
+LOST_JOB_S = 30.0              # job accepté puis inconnu de Comfy (redémarrage rapide) → offline
 HTTP_TIMEOUT_S = 10.0
 UPLOAD_TIMEOUT_S = 60.0
 DOWNLOAD_TIMEOUT_S = 300.0
@@ -54,6 +55,7 @@ REF_IMAGE_S = 300.0
 ESTIMATE_CAP = 95
 
 OFFLINE_MSG = "ComfyUI ne répond pas — lance Comfy puis réessaie."
+LOST_JOB_MSG = "Rendu perdu par Comfy (redémarrage ?) — il sera repris."
 
 # Ids des nœuds de sortie (pour choisir le bon fichier en priorité).
 VIDEO_OUTPUT_NODE = "92"
@@ -237,6 +239,83 @@ def exe_path(exe: str = "") -> Path | None:
         return p if p.is_file() else None
     except OSError:
         return None
+
+
+DESKTOP_IMAGE = "Comfy Desktop.exe"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Processus `pid` vivant ? (Windows : OpenProcess + GetExitCodeProcess ; ailleurs os.kill 0).
+    Doute (API indisponible) → False : ne jamais bloquer un lancement sur une erreur."""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = k32.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259          # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(handle)
+        os.kill(int(pid), 0)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _image_running(image: str = DESKTOP_IMAGE) -> bool:
+    """Un processus `image` tourne-t-il ? (Windows : tasklist ; ailleurs False)."""
+    if os.name != "nt":
+        return False
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {image}", "/NH", "/FO", "CSV"],
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except Exception as exc:  # noqa: BLE001
+        _log_detail(f"tasklist : {exc!r}")
+        return False
+    return image.lower() in str(out or "").lower()
+
+
+def _desktop_pids() -> list[int]:
+    """pid / childPid annoncés par Comfy Desktop (%APPDATA%\\Comfy Desktop\\comfy-procs\\*.json)."""
+    root = _desktop_dir()
+    pids: list[int] = []
+    if root is None:
+        return pids
+    try:
+        files = list((root / "comfy-procs").glob("*.json"))
+    except OSError:
+        return pids
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - fichier en cours d'écriture, illisible…
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("pid", "childPid"):
+            try:
+                pid = int(data.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and pid not in pids:
+                pids.append(pid)
+    return pids
+
+
+def desktop_running() -> bool:
+    """Comfy Desktop tourne-t-il déjà (même s'il ne répond pas encore en HTTP) ? Un pid de
+    comfy-procs vivant, ou un processus « Comfy Desktop.exe ». Anti-2e instance avant Popen."""
+    if any(_pid_alive(p) for p in _desktop_pids()):
+        return True
+    return _image_running(DESKTOP_IMAGE)
 
 
 def launch(exe: str = "") -> bool:
@@ -660,6 +739,22 @@ def _queue_position(url: str, prompt_id: str) -> int | None:
     return None
 
 
+def _in_queue(url: str, prompt_id: str) -> bool | None:
+    """Le prompt est-il dans la file de Comfy (en cours ou en attente) ? None si /queue illisible."""
+    try:
+        r = _http("GET", f"{url}/queue", timeout=5)
+        data = _json(r) if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("queue_running", "queue_pending"):
+        for p in data.get(key) or []:
+            if isinstance(p, list) and len(p) > 1 and p[1] == prompt_id:
+                return True
+    return False
+
+
 def _get_job(url: str, prompt_id: str) -> dict[str, Any] | None:
     """État du job (/api/jobs/{id}), repli /history/{id}. None si inconnu (pas encore enregistré).
     Les erreurs réseau remontent (gérées par l'appelant)."""
@@ -770,6 +865,8 @@ def _follow(url: str, prompt_id: str, ws: Any, prog: _Progress, classes: dict[st
     running_since: float | None = None
     next_poll = 0.0
     offline_since: float | None = None
+    # Accepté par Comfy (prompt_id rendu) : le compteur « job perdu » part de l'acceptation.
+    lost_since: float | None = None
     sampler_done = False
 
     def _cancelled() -> bool:
@@ -818,6 +915,15 @@ def _follow(url: str, prompt_id: str, ws: Any, prog: _Progress, classes: dict[st
                 pos = _queue_position(url, prompt_id) if job is not None else None
                 if pos is not None:
                     prog.update(phase="queued", queue_pos=pos)
+            # Job inconnu de Comfy (404 /api/jobs, /history vide, absent de /queue) : Comfy
+            # redémarré entre deux polls → rendu perdu après LOST_JOB_S (la file le reprend).
+            if job is None and offline_since is None and _in_queue(url, prompt_id) is False:
+                lost_since = lost_since if lost_since is not None else now
+                if now - lost_since >= LOST_JOB_S:
+                    _log_detail(f"suivi {prompt_id} : job inconnu de Comfy depuis {LOST_JOB_S:g} s")
+                    raise ComfyOffline(LOST_JOB_MSG)
+            elif job is not None:
+                lost_since = None
 
         # 2) Événements websocket (vrai % / nœud courant) jusqu'au prochain poll.
         if ws is not None:

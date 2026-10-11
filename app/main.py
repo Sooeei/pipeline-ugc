@@ -118,6 +118,8 @@ _LAST_REQUEST = [0.0]
 # Requêtes HTTP en cours (téléchargement d'un zip, export, génération synchrone…) : le serveur
 # ne s'arrête JAMAIS pendant l'une d'elles (cf. _server_busy).
 _INFLIGHT_REQUESTS = [0]
+# Réponse du plan (création d'une pub) : attente max de la vérification du texte→image Qwen.
+PLAN_T2I_WAIT_S = 3.0
 SERVER_INTERNAL_ERROR_MSG = (
     "Erreur interne du serveur — réessaie ; si ça persiste, relance l'app (LANCER.bat). "
     "Le détail technique est dans app.log."
@@ -344,6 +346,9 @@ def create_app() -> FastAPI:
             "dry_run": s.get("dry_run", "1") == "1",
             "avatars": db.list_avatars(),
             "voices": db.list_voices(),
+            # Texte→image Qwen (création d'une pub en Qwen, avant que la pub existe) : cache,
+            # vérification en arrière-plan sans bloquer → qwen_t2i_available, qwen_plan1_note.
+            **local_images.t2i_fields(0.0),
         }
 
     @app.post("/api/settings")
@@ -1158,8 +1163,10 @@ def create_app() -> FastAPI:
                 "blocks": int(res.get("blocks") or 0), "personas": ctx["personas"],
                 "warnings": list(res.get("warnings") or []), "alerts": ctx["alerts"],
                 "style": ctx["style"], "max_spoken": ctx["max_spoken"], "dry_run": cfg.dry_run,
+                **local_images.t2i_fields(PLAN_T2I_WAIT_S),
             }
-        return _omni_plan_response(cfg, body, ctx, mode, body.script)
+        return {**_omni_plan_response(cfg, body, ctx, mode, body.script),
+                **local_images.t2i_fields(PLAN_T2I_WAIT_S)}
 
     @app.post("/api/avatar-omni/validate-doc")
     def avatar_omni_validate_doc(body: AvatarOmniValidateDocIn) -> dict[str, Any]:
@@ -1168,7 +1175,8 @@ def create_app() -> FastAPI:
         cfg = load_provider_config()
         if not body.doc.strip():
             raise HTTPException(400, "Document vide : relis ou régénère le découpage.")
-        return _omni_plan_response(cfg, body, _omni_plan_context(cfg, body), "client", body.doc)
+        return {**_omni_plan_response(cfg, body, _omni_plan_context(cfg, body), "client", body.doc),
+                **local_images.t2i_fields(PLAN_T2I_WAIT_S)}
 
     @app.post("/api/avatar-omni/estimate")
     def avatar_omni_estimate(body: AvatarOmniEstimateIn) -> dict[str, Any]:

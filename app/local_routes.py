@@ -42,6 +42,7 @@ from . import (
     db,
     jobs,
     keyframe_versions,
+    local_images,
     media,
     product_sheet,
 )
@@ -55,6 +56,8 @@ CANCELLED_MSG = "Génération annulée."
 GENERIC_FAIL_MSG = "La génération locale a échoué — vérifie ComfyUI puis réessaie."
 LAUNCH_GRACE_S = 90.0          # « Comfy démarre… » affiché tant que ce délai n'est pas écoulé
 SEED_MAX = 2**32 - 1
+CANCEL_DETECT_TRIES = 3        # annulation des rendus orphelins au démarrage : tentatives
+CANCEL_RETRY_S = 10.0          # … espacées de 10 s (réglable pour les tests)
 
 _UPLOAD_RE = re.compile(r"^upload:([A-Za-z0-9_-]+\.(?:png|jpg|jpeg|webp))$")
 _CLIP_RE = re.compile(r"^clip:(\d+)$")
@@ -214,16 +217,21 @@ def _execute(job_id: str, st: dict[str, Any], on_update: Callable[[dict[str, Any
                 first, last, str(gen.get("prompt") or ""), seconds=float(params["seconds"]),
                 megapixels=float(params["megapixels"]), turbo=bool(params["turbo"]),
                 seed=int(gen["seed"]))
+            # Rendu long en HD : délai = max(1 h, 3 × l'estimation) (sinon tué à 1 h).
+            timeout_s = config_app.local_video_timeout_s(
+                float(params["seconds"]), float(params["megapixels"]), bool(params["turbo"]))
         else:
             image = comfy_local.upload_image(url, paths["source"])
             refs = [comfy_local.upload_image(url, p) for p in paths.get("refs") or []]
             wf = comfy_local.build_image_workflow(
                 image, refs, str(gen.get("prompt") or ""), width=params.get("width"),
                 height=params.get("height"), seed=int(gen["seed"]))
+            timeout_s = config_app.LOCAL_IMAGE_TIMEOUT_S
         if cancel_ev.is_set():   # annulé pendant la détection / l'envoi des images
             raise comfy_local.ComfyCancelled(CANCELLED_MSG)
         out = comfy_local.run(url, wf, dest_dir=out_dir(), stem=f"{gen_id}_{st['kind']}",
-                              on_progress=_progress, should_cancel=cancel_ev.is_set)
+                              on_progress=_progress, should_cancel=cancel_ev.is_set,
+                              timeout_s=timeout_s)
     except comfy_local.ComfyCancelled:
         _finish(st, gen_id, "annule", CANCELLED_MSG)
         on_update({"scene": 1, "phase": "erreur", "status": "annule"})
@@ -506,7 +514,9 @@ def local_status() -> dict[str, Any]:
             "launching": launching, "state": "demarrage" if launching else cs["state"],
             "busy": busy, "busy_label": BUSY_LABEL if busy else "",
             "busy_detail": (snap["running"] or {}).get("label", "") if busy else "",
-            "queue": queue_view(), "comfy_queue": snap, "settings": s}
+            "queue": queue_view(), "comfy_queue": snap, "settings": s,
+            # Texte→image Qwen (cache ; vérification en arrière-plan, jamais pendant un rendu).
+            **local_images.t2i_fields(0.0)}
 
 
 @router.post("/api/local/launch")
@@ -525,6 +535,10 @@ def local_launch() -> dict[str, Any]:
         if _launching():
             return _refused("demarrage")
         if comfy_local.detect(int(s["comfy_port"] or 0), timeout=comfy_queue.DETECT_TIMEOUT_S):
+            return _refused("deja_lance")
+        # Comfy Desktop ouvert mais pas encore joignable (démarrage lent, lancé à la main) :
+        # processus vivant (comfy-procs / « Comfy Desktop.exe ») → pas de 2e instance.
+        if comfy_local.desktop_running():
             return _refused("deja_lance")
         if comfy_local.exe_path(str(s["comfy_exe"] or "")) is None:
             return _refused("exe_introuvable")
@@ -567,11 +581,21 @@ def cancel_interrupted(prompt_ids: list[str]) -> None:
     if not prompt_ids:
         return
     try:
-        det = comfy_local.detect(int(load_local_settings()["comfy_port"] or 0))
-        if det:
-            for pid in prompt_ids:
-                comfy_local.cancel(str(det["url"]), pid)
-                _log_detail(f"[LOCAL] rendu Comfy orphelin annulé : {pid}")
+        port = int(load_local_settings()["comfy_port"] or 0)
+        det = None
+        # Comfy peut répondre lentement juste après un redémarrage (rendu orphelin en cours) :
+        # détection 10 s, CANCEL_DETECT_TRIES tentatives espacées de CANCEL_RETRY_S.
+        for attempt in range(CANCEL_DETECT_TRIES):
+            det = comfy_local.detect(port, timeout=comfy_queue.DETECT_TIMEOUT_S)
+            if det or attempt == CANCEL_DETECT_TRIES - 1:
+                break
+            time.sleep(CANCEL_RETRY_S)
+        if not det:
+            _log_detail(f"[LOCAL] rendus orphelins non annulés (Comfy injoignable) : {prompt_ids}")
+            return
+        for pid in prompt_ids:
+            comfy_local.cancel(str(det["url"]), pid)
+            _log_detail(f"[LOCAL] rendu Comfy orphelin annulé : {pid}")
     except Exception as exc:  # noqa: BLE001 - le démarrage ne doit jamais échouer pour ça
         _log_detail(f"[LOCAL] annulation des rendus orphelins impossible : {exc!r}")
 

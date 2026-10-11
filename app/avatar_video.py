@@ -1506,6 +1506,9 @@ def video_options(ad_id: int, body: OptionsIn) -> dict[str, Any]:
                                 + " | ".join(config_app.SHOOT_STYLES) + ").")
         omni_fields["shoot_style"] = style
     if body.image_engine is not None:
+        if str(body.image_engine).strip().lower() not in config_app.IMAGE_ENGINES:
+            raise HTTPException(400, "Moteur d'images inconnu ("
+                                + " | ".join(config_app.IMAGE_ENGINES) + ").")
         omni_fields["image_engine"] = config_app.normalize_image_engine(body.image_engine)
     if fields or omni_fields:
         db.set_ad_fields(ad_id, **fields, **omni_fields)

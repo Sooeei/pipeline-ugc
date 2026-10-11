@@ -1182,6 +1182,17 @@ def local_video_minutes(seconds: float, megapixels: float, turbo: bool = True) -
     return round(secs * per_second, 2)
 
 
+# Délai maximum d'un rendu Comfy (comfy_local.run timeout_s) : jamais moins d'1 h ; une vidéo
+# longue en HD (ex. 15 s à 0,9 MP sans turbo ≈ 3 h estimées) a 3 × son estimation.
+LOCAL_RENDER_MIN_TIMEOUT_S = 3600.0
+LOCAL_IMAGE_TIMEOUT_S = 3600.0     # image Qwen 2K (édition ou texte→image), section Local et pubs
+
+
+def local_video_timeout_s(seconds: float, megapixels: float, turbo: bool = True) -> float:
+    """Délai max (s) d'un rendu vidéo MiniMax local : max(1 h, 3 × l'estimation)."""
+    return max(LOCAL_RENDER_MIN_TIMEOUT_S, 3 * 60 * local_video_minutes(seconds, megapixels, turbo))
+
+
 # Style de tournage (ads.shoot_style) : appliqué aux prompts image (zone B) et vidéo (zone A)
 # via prompt_profiles.shoot_style_line.
 SHOOT_STYLES: dict[str, str] = {

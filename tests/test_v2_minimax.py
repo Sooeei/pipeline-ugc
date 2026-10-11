@@ -26,7 +26,7 @@ from app.providers import ProviderConfig
 
 ROOT = config_app.MEDIA_DIR / "v2_minimax_tests"
 MM = config_app.LOCAL_VIDEO_MODEL
-POSE_V = prompt_profiles.shoot_style_line("pose", "video")
+POSE_V = avatar_minimax.POSE_VIDEO_LINE   # MiniMax en « pose » : sans « tripod » (NO_CAMERA_GEAR)
 SELFIE_V = prompt_profiles.shoot_style_line("selfie", "video")
 
 
@@ -390,7 +390,10 @@ def test_options_image_engine_normalized_and_in_payload():
         assert body["image_engine"] == "qwen_local"
         assert [e["value"] for e in body["image_engines"]] == list(config_app.IMAGE_ENGINES)
         assert db.get_ad(ad_id)["image_engine"] == "qwen_local"
+        # Moteur inconnu → 400 (comme /image-options), pub inchangée.
         r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"image_engine": "inconnu"})
+        assert r.status_code == 400, r.text
+        r = c.patch(f"/api/avatar-omni/options/{ad_id}", json={"image_engine": "nano"})
         assert r.status_code == 200 and r.json()["image_engine"] == "nano"
         detail = c.get(f"/api/avatar-omni/ad/{ad_id}").json()
     assert detail["image_engine"] == "nano" and detail["image_engines"]

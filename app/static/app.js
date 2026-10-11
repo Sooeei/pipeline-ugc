@@ -3697,10 +3697,12 @@ function aoQwenT2iAvailable() {
   }
   return null;
 }
+// Note de repli du Plan 1 (`qwen_plan1_note` : pub, réponse du plan ou réglages), sinon texte par défaut.
 function aoQwenFallbackText(src) {
-  const s = src || {};
-  return s.plan1_fallback_note || s.qwen_t2i_note ||
-    "Plan 1 généré par Nano Banana Pro quand il n'y a aucune photo de référence (texte→image Qwen indisponible dans Comfy) ; " +
+  for (const s of [src, aoAdState, aoLastPlanResp, currentSettings]) {
+    if (s && typeof s.qwen_plan1_note === "string" && s.qwen_plan1_note) return s.qwen_plan1_note;
+  }
+  return "Plan 1 généré par Nano Banana Pro quand il n'y a aucune photo de référence (texte→image Qwen indisponible dans Comfy) ; " +
     "les plans suivants restent en Qwen (local). Ajoute une photo de référence pour faire aussi le Plan 1 en local.";
 }
 // Voix ElevenLabs « maître » : DÉSACTIVÉE (masquée, code conservé). La voix est toujours générée
@@ -4650,18 +4652,25 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   // référence et texte→image Qwen indisponible).
   const qwen = engines.image_engine === "qwen_local";
   const nanoFallback = qwen && !aoRefsFiles.length && aoQwenT2iAvailable() === false;
-  if (!dryRun && (!qwen || nanoFallback)) {
-    if (!(currentSettings && currentSettings.openrouter_api_key_set))
-      return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
+  // Confirmation Nano Banana (payante) du Plan 1 : true si confirmée, false sinon (toast affiché).
+  const confirmNano = async (fallback) => {
+    if (!(currentSettings && currentSettings.openrouter_api_key_set)) {
+      toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
+      return false;
+    }
     const perImg = (aoLastEstimate && aoLastEstimate.usd_images && aoShots.length)
       ? aoLastEstimate.usd_images / aoShots.length : 0.04;
-    const ok = await showModal({
+    return showModal({
       title: "Mode réel — Plan 1 (la personne)",
       message: `On génère UNIQUEMENT le Plan 1 (≈ ${usd(perImg)}, 1 image Nano Banana). Tu le valides, puis tu génères les plans suivants. Continuer ?` +
-        (nanoFallback ? "\n\n" + aoQwenFallbackText(aoLastPlanResp) : ""),
+        (fallback ? "\n\n" + aoQwenFallbackText(aoLastPlanResp) : ""),
       confirmText: "Générer le Plan 1", cancelText: "Annuler", danger: true,
     });
-    if (!ok) return;
+  };
+  let nanoConfirmed = false;
+  if (!dryRun && (!qwen || nanoFallback)) {
+    if (!(await confirmNano(nanoFallback))) return;
+    nanoConfirmed = true;
   }
   const fd = new FormData();
   // Moteurs de la pub (Local v2) : figés sur la pub dès sa création.
@@ -4672,7 +4681,9 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   if (engines.local_video_turbo != null) fd.append("local_video_turbo", engines.local_video_turbo ? "1" : "0");
   fd.append("ad_name", $("aoAdName").value.trim() || "avatar_ia");
   fd.append("shots_json", JSON.stringify(aoShots));
-  fd.append("confirm", "true");
+  // Qwen sans repli connu : PAS de confirmation d'office — si le serveur bascule le Plan 1 sur
+  // Nano Banana (texte→image absent), il répond « Confirmation requise » → confirmation habituelle.
+  fd.append("confirm", (dryRun || !qwen || nanoConfirmed) ? "true" : "false");
   fd.append("ref_kinds", JSON.stringify(aoRefsKinds));
   fd.append("voice_profile", JSON.stringify(aoReadVoice("aoV")));
   fd.append("voice_profiles", JSON.stringify(aoReadVoiceProfiles()));
@@ -4687,7 +4698,15 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   try {
     res = await api(AO_API + "/generate-images", { method: "POST", body: fd });
   } catch (e) {
-    return toast(e.message);
+    if (!(qwen && !nanoConfirmed && /Confirmation requise/.test(e.message || ""))) return toast(e.message);
+    // Plan 1 reparti sur Nano Banana (texte→image Qwen indisponible) : confirmation payante.
+    if (!(await confirmNano(true))) return;
+    fd.set("confirm", "true");
+    try {
+      res = await api(AO_API + "/generate-images", { method: "POST", body: fd });
+    } catch (e2) {
+      return toast(e2.message);
+    }
   }
   aoAdId = res.ad_id;
   aoVoiceUnlockedBy = {};

@@ -41,6 +41,9 @@ PRIO_BATCH = 10
 KINDS = ("video", "image")
 SOURCES = ("local", "pub", "file", "qwen")
 DETECT_TIMEOUT_S = 10.0
+# Après la fin d'un rendu INTERACTIF, un ticket BATCH en tête attend ce délai sans nouveau
+# ticket interactif avant d'être servi (une demande interactive arrivée entre-temps passe avant).
+INTERACTIVE_GRACE_S = 20.0
 OFFLINE_MSG = comfy_local.OFFLINE_MSG
 CANCELLED_MSG = "Génération annulée."
 BUSY_LABEL = "Comfy occupé — rendu en cours"
@@ -82,6 +85,7 @@ _running: list[Ticket | None] = [None]
 _last_kind: list[str | None] = [None]          # type du dernier rendu préparé
 _last_det: list[dict[str, Any] | None] = [None]  # dernière détection réussie (url, port, version)
 _seq = itertools.count(1)
+_last_interactive_end = [0.0]                  # fin (monotonic) du dernier rendu interactif
 
 # Détection en vol unique (statut) : les requêtes concurrentes attendent le même résultat.
 _det_lock = threading.Lock()
@@ -113,6 +117,14 @@ def _find(ticket: Ticket | str) -> Ticket | None:
 
 def _ordered() -> list[Ticket]:
     return sorted(_waiting, key=Ticket.sort_key)
+
+
+def _grace_left(ticket: Ticket) -> float:
+    """Secondes d'attente restantes pour un ticket BATCH après la fin d'un rendu interactif
+    (0 si le ticket est interactif ou si le délai est écoulé) ; appel sous _cond."""
+    if ticket.priority < PRIO_BATCH or _last_interactive_end[0] <= 0:
+        return 0.0
+    return max(0.0, INTERACTIVE_GRACE_S - (time.monotonic() - _last_interactive_end[0]))
 
 
 # ==================================================================== file
@@ -156,6 +168,12 @@ def wait_turn(ticket: Ticket, on_wait: Callable[[int], None] | None = None) -> N
                 raise comfy_local.ComfyCancelled(CANCELLED_MSG)
             if _running[0] is ticket:
                 return
+            grace = _grace_left(ticket)
+            if _running[0] is None and _ordered()[0] is ticket and grace > 0:
+                # Délai de grâce de l'interactif : une suite de rendus interactifs (ex. cohérence
+                # Qwen de N images) passe d'un bloc, sans rechargement de modèles à chaque plan.
+                _cond.wait(timeout=min(grace, 0.5))
+                continue
             if _running[0] is None and _ordered()[0] is ticket:
                 _waiting.remove(ticket)
                 _running[0] = ticket
@@ -208,6 +226,8 @@ def release(ticket: Ticket) -> None:
         if _running[0] is ticket:
             _running[0] = None
             ticket.state = "annule" if ticket.cancel.is_set() else "termine"
+            if ticket.priority < PRIO_BATCH:
+                _last_interactive_end[0] = time.monotonic()
         elif ticket in _waiting:
             _waiting.remove(ticket)
             ticket.state = "annule"
@@ -351,6 +371,7 @@ def reset_for_tests(hard: bool = False) -> None:
     with _cond:
         _last_kind[0] = None
         _last_det[0] = None
+        _last_interactive_end[0] = 0.0
         if hard:
             _waiting.clear()
             _running[0] = None

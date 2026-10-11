@@ -465,16 +465,33 @@
   function setMsg(txt) {
     $("localStatusMsg").textContent = txt || "";
   }
+  // État Comfy (K4) : `state` du serveur (pret | occupe | demarrage | injoignable), sinon déduit
+  // des anciens champs (reachable / launching).
+  function comfyState(s) {
+    if (!s) return "";
+    if (["pret", "occupe", "demarrage", "injoignable"].includes(s.state)) {
+      return s.state === "injoignable" && launching ? "demarrage" : s.state;
+    }
+    if (s.busy) return "occupe";
+    if (s.reachable) return "pret";
+    return s.launching || launching ? "demarrage" : "injoignable";
+  }
   function renderStatus(s) {
     const pill = $("localStatusPill");
-    pill.classList.remove("ok", "err", "wait");
+    pill.classList.remove("ok", "err", "wait", "busy");
+    pill.title = "";
+    const st = comfyState(s);
     if (!s) {
       pill.textContent = "● Statut inconnu";
       pill.classList.add("wait");
-    } else if (s.reachable) {
+    } else if (st === "pret") {
       pill.textContent = `● Comfy prêt (port ${s.port ?? "?"})`;
       pill.classList.add("ok");
-    } else if (s.launching || launching) {
+    } else if (st === "occupe") {
+      pill.textContent = "● " + (s.busy_label || "Comfy occupé — rendu en cours");
+      if (s.busy_detail) pill.title = String(s.busy_detail);
+      pill.classList.add("busy");
+    } else if (st === "demarrage") {
       pill.textContent = "● Comfy démarre…";
       pill.classList.add("wait");
     } else {
@@ -482,8 +499,11 @@
       pill.classList.add("err");
     }
     const reachable = !!(s && s.reachable);
-    $("localLaunchBtn").classList.toggle("hidden", reachable);
-    $("localFreeBtn").disabled = !reachable;
+    // « Lancer Comfy » : seulement quand Comfy ne répond pas (jamais pendant un rendu / un démarrage).
+    const noLaunch = st === "pret" || st === "occupe" || st === "demarrage";
+    $("localLaunchBtn").classList.toggle("hidden", noLaunch);
+    $("localLaunchBtn").disabled = noLaunch || launching;
+    $("localFreeBtn").disabled = st !== "pret";   // 409 pendant un rendu
     if (s && !reachable && !launching && s.exe_found === false) {
       setMsg("Comfy Desktop est introuvable : indique le chemin de Comfy Desktop dans les réglages ci-dessous.");
     } else if (reachable && !launching) {
@@ -530,7 +550,10 @@
     try {
       const r = await post("/api/local/launch");
       if (!r.launched) {
-        setMsg("Comfy n'a pas pu être lancé : vérifie le chemin de Comfy Desktop dans les réglages ci-dessous.");
+        // Refus motivé (occupe | demarrage | deja_lance | exe_introuvable | echec) : message du serveur.
+        setMsg(r.message || "Comfy n'a pas pu être lancé : vérifie le chemin de Comfy Desktop dans les réglages ci-dessous.");
+        if (r.reason === "exe_introuvable") $("localSettings").open = true;
+        refreshStatus();
         return;
       }
       renderStatus(lastStatus ? { ...lastStatus, launching: true } : { launching: true });

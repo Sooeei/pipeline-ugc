@@ -132,10 +132,13 @@ const _aoLaunching = new Set();
 // Confirmation d'une génération VIDÉO PAYANTE : miniature de chaque plan (l'image qui sera animée),
 // durée, modèle et coût total estimé. Entrée ne confirme pas (clic explicite). En simulation
 // (et sans `force`) : aucune modale, on renvoie true. Tout texte passe par esc().
+// Moteur LOCAL (`local: true`, MiniMax H3 sur le PC) : gratuit, la simulation globale ne s'applique
+// pas (le rendu est réel) → modale toujours affichée, « Estimation : ~X min pour Y plans » à la
+// place du montant (`estimateMinutes`), sans mention de débit.
 function confirmPaidVideo({ title = "Génération vidéo — coût réel", clips = [], usd = null, model = "", detail = "",
-                            confirmText = "Générer", force = false } = {}) {
+                            confirmText = "Générer", force = false, local = false, estimateMinutes = null } = {}) {
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (dryRun && !force) return Promise.resolve(true);
+  if (dryRun && !force && !local) return Promise.resolve(true);
   const list = Array.isArray(clips) ? clips : [];
   const totalS = list.reduce((a, c) => a + (Number(c && c.seconds) || 0), 0);
   const cards = list.map((c) => {
@@ -149,6 +152,16 @@ function confirmPaidVideo({ title = "Génération vidéo — coût réel", clips
   }).join("");
   const usdTxt = (usd === null || usd === undefined || isNaN(Number(usd))) ? "?" : Number(usd).toFixed(2);
   const n = list.length;
+  if (local) {
+    const lsum = `Estimation : ${esc(aoFmtMinutes(estimateMinutes))} pour ${n} plan${n > 1 ? "s" : ""}` +
+      (totalS ? ` · ~${esc(Math.round(totalS))} s de vidéo` : "") + (model ? ` · ${esc(model)}` : "");
+    const lhtml =
+      (n ? `<div class="paid-grid">${cards}</div>` : "") +
+      `<p class="paid-summary"><b>${lsum}</b></p>` +
+      (detail ? `<p class="paid-detail muted">${esc(detail)}</p>` : "") +
+      `<p class="muted small">Rendu sur ton PC (Comfy), gratuit. Vérifie les images ci-dessus : ce sont elles qui seront animées.</p>`;
+    return showModal({ title, html: lhtml, confirmText, danger: false, enterConfirms: false });
+  }
   const summary = `${n} vidéo${n > 1 ? "s" : ""}` + (totalS ? ` · ~${esc(Math.round(totalS))} s` : "") +
     (model ? ` · ${esc(model)}` : "") + ` — coût total estimé ≈ $${esc(usdTxt)}`;
   const html =
@@ -2438,6 +2451,9 @@ function aoLibClip(div, ad, c) {
     ? `<figure class="ao-lib-vid"><video src="${esc(c.media_url)}" controls preload="metadata"></video><figcaption>Vidéo</figcaption></figure>`
     : `<figure class="ao-lib-vid"><div class="ao-lib-empty err">${esc(c.error || "non généré")}</div><figcaption>Vidéo</figcaption></figure>`;
   const v2 = Number(ad.pipeline_version) === 2;
+  // MiniMax H3 (local) : « +1 s » toujours proposé, estimation en minutes (qualité / turbo de la pub).
+  const localCut = v2 && aoIsLocalModel(ad.video_model)
+    ? { quality: aoLocalQuality(ad.local_video_quality), turbo: aoLocalTurbo(ad.local_video_turbo) } : null;
   // v2 : frame 0 de la vidéo à côté du keyframe + score de dérive (contrôle obligatoire).
   const frame0 = v2
     ? (c.frame0_url
@@ -2460,7 +2476,7 @@ function aoLibClip(div, ad, c) {
     `<div class="ao-lib-media${v2 ? " v2" : ""}">${kf}${frame0}${vid}</div>` +
     `<div class="meta"><span class="scene-n">#${esc(c.scene_n)}</span>${drift}${v2 && ok ? speechCutBadge(c) : ""}` +
     (ok ? `<a class="dl" href="/api/clips/${c.id}/download">⬇ Télécharger</a>` : "") + `</div>` +
-    (v2 && ok ? speechCutActions(c, omni.length > 0) : "") +
+    (v2 && ok ? speechCutActions(c, omni.length > 0, localCut) : "") +
     prompts +
     `<div class="ao-lib-actions"><button class="btn small btn-relaunch" type="button" ` +
     (v2
@@ -2470,7 +2486,7 @@ function aoLibClip(div, ad, c) {
   const btn = div.querySelector(".btn-relaunch");
   const state = div.querySelector(".ao-lib-state");
   btn.addEventListener("click", () => aoLibRelaunch(ad, c, btn, state));
-  if (v2 && ok) bindSpeechCut(div, c, omni.length > 0);
+  if (v2 && ok) bindSpeechCut(div, c, omni.length > 0, localCut);
   traceDetails(div, c.id);   // tracabilite.js
 }
 
@@ -2482,19 +2498,32 @@ function speechCutBadge(c) {
     ? `<span class="badge ko" title="La voix continue jusqu'à la toute fin du clip : la réplique est peut-être coupée.">Réplique peut-être coupée</span>`
     : "";
 }
-// Omni : pas de détection automatique → bouton toujours proposé (fin de réplique coupée à l'écoute).
-function speechCutActions(c, isOmni = false) {
-  if (!isOmni && !(c.speech_cut && Number(c.speech_cut))) return "";
+// Omni et MiniMax H3 (local) : pas de détection automatique → bouton toujours proposé (fin de
+// réplique coupée à l'écoute). `local` = {quality, turbo} de la pub MiniMax, sinon null.
+function speechCutActions(c, isOmni = false, local = null) {
+  if (!isOmni && !local && !(c.speech_cut && Number(c.speech_cut))) return "";
   return `<div class="ao-lib-actions"><button class="btn small btn-speech-longer" type="button" ` +
     `title="Refait uniquement la vidéo de ce plan avec 1 s de plus (même image, même réplique)">⏱ Régénérer (+1 s)</button>` +
     `<span class="speech-state muted small"></span></div>`;
 }
-function bindSpeechCut(div, c, isOmni = false) {
+function bindSpeechCut(div, c, isOmni = false, local = null) {
   const btn = div.querySelector(".btn-speech-longer");
   if (!btn) return;
   const state = div.querySelector(".speech-state");
   btn.addEventListener("click", async () => {
-    {
+    if (local) {
+      // MiniMax H3 sur le PC : même seed, 1 s de plus — estimation en minutes, rien à payer.
+      const sec = (Number(c.duration_s) || 0) + 1;
+      const ok = await confirmPaidVideo({
+        title: "Régénérer (+1 s) — rendu local",
+        clips: [{ clip_id: c.id, n: c.scene_n, label: "+1 s", image_url: c.image_url || "", seconds: sec > 1 ? sec : 0 }],
+        model: AO_VIDEO_MODEL_LABEL[AO_LOCAL_VIDEO_MODEL],
+        detail: "Refait UNIQUEMENT la vidéo de ce plan avec 1 seconde de plus (même image, même réplique, même seed). À utiliser si la fin de la réplique est coupée.",
+        confirmText: "Régénérer", local: true,
+        estimateMinutes: sec > 1 ? aoLocalMinutes(sec, local.quality, local.turbo) : null,
+      });
+      if (!ok) return;
+    } else {
       const sec = (Number(c.duration_s) || 0) + 1;
       const perS = isOmni ? 0.10 : 0.14;
       const ok = await confirmPaidVideo({
@@ -3618,8 +3647,62 @@ let aoPresetPlanches = {};   // perso N → planche_url (bibliothèque)
 let aoLoadedPresetId = null; // preset client chargé (lié à la pub créée)
 const aoRefObjUrls = new Map();   // File → objectURL (aperçu planche à côté du keyframe)
 const AO_EL_USD_PER_1K = 0.30;    // estimation ElevenLabs ($ / 1000 caractères) — même valeur que le backend
-const AO_VIDEO_MODEL_LABEL = { grok: "Grok Imagine", kling: "Kling 3.0", omni: "Omni (Google)" };
+const AO_VIDEO_MODEL_LABEL = { grok: "Grok Imagine", kling: "Kling 3.0", omni: "Omni (Google)", minimax_local: "MiniMax H3 (local)" };
 const AO_API = "/api/avatar-omni";
+// ---- Local v2 (CONTRAT_LOCAL.md K5-K9) : vidéo MiniMax H3 et images Qwen rendues sur le PC (gratuit) ----
+const AO_LOCAL_VIDEO_MODEL = "minimax_local";
+const AO_LOCAL_QUALITIES = [0.4, 0.6, 0.9];   // config_app.LOCAL_VIDEO_QUALITIES (MP) ; défaut 0.9
+const AO_IMAGE_ENGINE_LABEL = { nano: "Nano Banana Pro", qwen_local: "Qwen (local)" };
+function aoIsLocalModel(m) {
+  return String(m || "").trim().toLowerCase() === AO_LOCAL_VIDEO_MODEL;
+}
+function aoLocalQuality(v) {
+  const n = Number(v);
+  return AO_LOCAL_QUALITIES.find((q) => Math.abs(q - n) < 1e-6) || 0.9;
+}
+function aoLocalTurbo(v) {   // défaut : turbo activé (ads.local_video_turbo = 1)
+  return !(v === false || v === 0 || v === "0" || v === "false");
+}
+// Même formule que config_app.local_video_minutes : min/s turbo 0,4 MP → 1,2 ; 0,9 MP → 4,8 (loi
+// puissance entre les deux) ; sans turbo × 2,5.
+function aoLocalMinutes(seconds, mp, turbo = true) {
+  const k = Math.log(4.8 / 1.2) / Math.log(0.9 / 0.4);
+  let perS = 1.2 * Math.pow(aoLocalQuality(mp) / 0.4, k);
+  if (!turbo) perS *= 2.5;
+  return Math.max(0, Number(seconds) || 0) * perS;
+}
+function aoFmtMinutes(m) {
+  const v = Number(m);
+  if (m === null || m === undefined || m === "" || !isFinite(v) || v < 0) return "durée inconnue";
+  if (v < 1) return "< 1 min";
+  const total = Math.round(v);
+  if (total < 60) return `~${total} min`;
+  return `~${Math.floor(total / 60)} h ${String(total % 60).padStart(2, "0")}`;
+}
+// Modèle vidéo effectif d'une pub (celui de la pub, sinon le réglage global, sinon Grok).
+function aoAdVideoModel(ad) {
+  const a = ad || aoAdState || {};
+  return a.video_model || (currentSettings && currentSettings.avatar_video_model) || "grok";
+}
+function aoImageEngineOf(ad) {
+  const a = ad || aoAdState || {};
+  return a.image_engine === "qwen_local" ? "qwen_local" : "nano";
+}
+// Texte→image Qwen disponible dans Comfy ? true / false / null (inconnu). Lu de façon tolérante sur
+// la réponse du plan, la pub ou les réglages (zone B : `qwen_t2i_available`).
+let aoLastPlanResp = null;
+function aoQwenT2iAvailable() {
+  for (const src of [aoAdState, aoLastPlanResp, currentSettings]) {
+    if (src && typeof src.qwen_t2i_available === "boolean") return src.qwen_t2i_available;
+  }
+  return null;
+}
+function aoQwenFallbackText(src) {
+  const s = src || {};
+  return s.plan1_fallback_note || s.qwen_t2i_note ||
+    "Plan 1 généré par Nano Banana Pro quand il n'y a aucune photo de référence (texte→image Qwen indisponible dans Comfy) ; " +
+    "les plans suivants restent en Qwen (local). Ajoute une photo de référence pour faire aussi le Plan 1 en local.";
+}
 // Voix ElevenLabs « maître » : DÉSACTIVÉE (masquée, code conservé). La voix est toujours générée
 // nativement par le modèle vidéo. Pour réactiver : true ici + config_app.ACTIVE_VOICE_MODES.
 const AO_ELEVENLABS_ENABLED = false;
@@ -4478,34 +4561,115 @@ function renderAoPlan(shots, r) {
     list.appendChild(div);
   });
   aoRenderWarnings("aoPlanWarnings", r.warnings, r.max_words, r.alerts, r.max_spoken);
+  aoLastPlanResp = r;
+  aoRenderNewEngines();   // note de repli Qwen + estimation (montant ou minutes)
+  $("aoPlanArea").classList.remove("hidden");
+}
+
+// ---- Moteurs de la pub à la création (Local v2) : images, style de tournage, modèle vidéo ----
+function aoNewVideoModel() {
+  const v = $("aoNewVideoModel") ? $("aoNewVideoModel").value : "";
+  return v || (currentSettings && currentSettings.avatar_video_model) || "grok";
+}
+function aoNewEngineSettings() {
+  const out = {
+    image_engine: $("aoNewImageEngine") ? $("aoNewImageEngine").value : "nano",
+    shoot_style: $("aoNewShootStyle") ? $("aoNewShootStyle").value : "pose",
+  };
+  const vm = $("aoNewVideoModel") ? $("aoNewVideoModel").value : "";
+  if (vm) out.video_model = vm;
+  if (aoIsLocalModel(aoNewVideoModel())) {
+    out.local_video_quality = aoLocalQuality($("aoNewLocalQuality") && $("aoNewLocalQuality").value);
+    out.local_video_turbo = !$("aoNewLocalTurbo") || $("aoNewLocalTurbo").checked;
+  }
+  return out;
+}
+function aoRenderNewEngines() {
+  const local = aoIsLocalModel(aoNewVideoModel());
+  document.querySelectorAll("#aoNewEngines .ao-local-only").forEach((el) => el.classList.toggle("hidden", !local));
+  const note = $("aoQwenT2iNote");
+  if (note) {
+    const qwen = $("aoNewImageEngine") && $("aoNewImageEngine").value === "qwen_local";
+    const show = qwen && aoQwenT2iAvailable() === false;
+    note.textContent = show ? "ℹ️ " + aoQwenFallbackText(aoLastPlanResp) : "";
+    note.classList.toggle("hidden", !show);
+  }
+  if (aoLastPlanResp) aoRenderPlanEstimate();
+}
+["aoNewImageEngine", "aoNewShootStyle", "aoNewVideoModel", "aoNewLocalQuality", "aoNewLocalTurbo"].forEach((id) => {
+  if ($(id)) $(id).addEventListener("change", aoRenderNewEngines);
+});
+// Moteurs d'un preset client chargé → sélecteurs de création.
+function aoApplyPresetEngines(d) {
+  d = d || {};
+  const set = (id, v) => {
+    const el = $(id);
+    if (el && v !== undefined && v !== null && v !== "" && [...el.options].some((o) => o.value === String(v))) el.value = String(v);
+  };
+  set("aoNewVideoModel", d.video_model);
+  set("aoNewImageEngine", d.image_engine);
+  set("aoNewShootStyle", d.shoot_style);
+  if (d.local_video_quality != null && d.local_video_quality !== "") set("aoNewLocalQuality", String(aoLocalQuality(d.local_video_quality)));
+  aoRenderNewEngines();
+}
+
+// Estimation de l'étape plan : montant (moteurs payants) ou minutes de rendu (MiniMax H3 local).
+function aoRenderPlanEstimate() {
+  const r = aoLastPlanResp || {};
+  const shots = aoShots || [];
   const e = r.estimate || {};
+  const qwen = $("aoNewImageEngine") && $("aoNewImageEngine").value === "qwen_local";
+  if (aoIsLocalModel(aoNewVideoModel())) {
+    const q = aoLocalQuality($("aoNewLocalQuality") && $("aoNewLocalQuality").value);
+    const turbo = !$("aoNewLocalTurbo") || $("aoNewLocalTurbo").checked;
+    const secs = Number(e.seconds_total) || aoSumSeconds(shots);
+    const mins = e.estimate_minutes != null ? e.estimate_minutes : aoLocalMinutes(secs, q, turbo);
+    $("aoEstimate").innerHTML =
+      `<b>Estimation :</b> ${esc(aoFmtMinutes(mins))} de rendu vidéo sur ton PC pour ${esc(e.shots || shots.length)} plan(s) ` +
+      `<span class="muted">(~${esc(Math.round(secs))} s · MiniMax H3 (local) · gratuit)</span>` +
+      (qwen ? `<div class="card-sub">Images : Qwen (local), gratuites.</div>`
+        : `<div class="card-sub">Images Nano Banana Pro : ${usd(e.usd_images)} (payées seulement en mode réel).</div>`) +
+      (r.max_words ? `<div class="card-sub">Max ~${esc(r.max_words)} mots par tour${r.max_spoken ? ` de ${esc(r.max_spoken)} s` : ""} avec ce débit (moins si le tour a des gestes).</div>` : "");
+    return;
+  }
   $("aoEstimate").innerHTML =
-    `<b>Coût estimé :</b> ${usd(e.usd_total)} ` +
-    `<span class="muted">(images ${usd(e.usd_images)} · vidéo + voix Omni ${usd(e.usd_video)} ` +
+    `<b>Coût estimé :</b> ${usd(qwen ? (Number(e.usd_total) || 0) - (Number(e.usd_images) || 0) : e.usd_total)} ` +
+    `<span class="muted">(images ${qwen ? "Qwen (local) gratuites" : usd(e.usd_images)} · vidéo + voix Omni ${usd(e.usd_video)} ` +
     `pour ~${Math.round(e.seconds_total || 0)} s, ${e.shots || shots.length} plan(s) à ~${usd(aoRate())}/s)</span>` +
     (r.max_words ? `<div class="card-sub">Max ~${esc(r.max_words)} mots par tour${r.max_spoken ? ` de ${esc(r.max_spoken)} s` : ""} avec ce débit (moins si le tour a des gestes).</div>` : "") +
     `<div class="card-sub">Payé seulement en mode réel. En simulation : $0. La vidéo n'est payée que sur les plans validés.</div>` +
     aoTier1Html(Number(e.usd_video) || 0, e.tier1_warning);
-  $("aoPlanArea").classList.remove("hidden");
 }
 
 // -- Étape 4 : Plan 1 (la personne) --
 $("aoGenImagesBtn").addEventListener("click", async () => {
   if (!aoShots.length) return toast("Génère d'abord le plan.");
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
+  const engines = aoNewEngineSettings();
+  // Qwen (local) : gratuit, pas de clé — sauf repli Nano Banana Pro du Plan 1 (aucune photo de
+  // référence et texte→image Qwen indisponible).
+  const qwen = engines.image_engine === "qwen_local";
+  const nanoFallback = qwen && !aoRefsFiles.length && aoQwenT2iAvailable() === false;
+  if (!dryRun && (!qwen || nanoFallback)) {
     if (!(currentSettings && currentSettings.openrouter_api_key_set))
       return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
     const perImg = (aoLastEstimate && aoLastEstimate.usd_images && aoShots.length)
       ? aoLastEstimate.usd_images / aoShots.length : 0.04;
     const ok = await showModal({
       title: "Mode réel — Plan 1 (la personne)",
-      message: `On génère UNIQUEMENT le Plan 1 (≈ ${usd(perImg)}, 1 image Nano Banana). Tu le valides, puis tu génères les plans suivants. Continuer ?`,
+      message: `On génère UNIQUEMENT le Plan 1 (≈ ${usd(perImg)}, 1 image Nano Banana). Tu le valides, puis tu génères les plans suivants. Continuer ?` +
+        (nanoFallback ? "\n\n" + aoQwenFallbackText(aoLastPlanResp) : ""),
       confirmText: "Générer le Plan 1", cancelText: "Annuler", danger: true,
     });
     if (!ok) return;
   }
   const fd = new FormData();
+  // Moteurs de la pub (Local v2) : figés sur la pub dès sa création.
+  fd.append("image_engine", engines.image_engine);
+  fd.append("shoot_style", engines.shoot_style);
+  if (engines.video_model) fd.append("video_model", engines.video_model);
+  if (engines.local_video_quality != null) fd.append("local_video_quality", String(engines.local_video_quality));
+  if (engines.local_video_turbo != null) fd.append("local_video_turbo", engines.local_video_turbo ? "1" : "0");
   fd.append("ad_name", $("aoAdName").value.trim() || "avatar_ia");
   fd.append("shots_json", JSON.stringify(aoShots));
   fd.append("confirm", "true");
@@ -4528,10 +4692,12 @@ $("aoGenImagesBtn").addEventListener("click", async () => {
   aoAdId = res.ad_id;
   aoVoiceUnlockedBy = {};
   aoAdState = null;
-  // Preset chargé : modèle vidéo + mode voix appliqués à la nouvelle pub (v2).
-  if (aoPresetOptions && Object.keys(aoPresetOptions).length) {
+  // Preset chargé : modèle vidéo + mode voix appliqués à la nouvelle pub (v2) ; puis les moteurs
+  // choisis à la création (images, style de tournage, modèle vidéo, qualité / turbo locaux).
+  const createOpts = Object.assign({}, aoPresetOptions || {}, engines);
+  if (Object.keys(createOpts).length) {
     api(AO_API + "/options/" + aoAdId, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(aoPresetOptions),
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(createOpts),
     }).catch(() => { /* pub v1 ou options refusées : sans effet */ });
   }
   // Preset client chargé : la pub est liée à son client (persos + dossier d'export).
@@ -4862,7 +5028,7 @@ function aoRenderAnimEstimate() {
     : `<span class="muted">Aucun keyframe validé pour l'instant.</span>`;
 }
 
-const AO_KF_SOURCE = { nano_banana_pro: "Nano Banana Pro", upload: "Mon image" };
+const AO_KF_SOURCE = { nano_banana_pro: "Nano Banana Pro", upload: "Mon image", qwen_local: "Qwen (local)", local: "Local" };
 
 // ---- Options d'un plan : exclure de la vidéo, supprimer, voix hors champ ----
 function aoPlanCharNums() {
@@ -5201,7 +5367,8 @@ $("aoRefreshBtn").addEventListener("click", () => loadAoGallery(aoAdId));
 $("aoConsistencyBtn").addEventListener("click", async () => {
   if (!aoAdId) return toast("Génère et valide d'abord le Plan 1.");
   const dryRun = currentSettings && currentSettings.dry_run;
-  if (!dryRun) {
+  // Images Qwen (local) : gratuites, aucune clé ni montant à confirmer.
+  if (!dryRun && aoImageEngineOf(aoAdState) !== "qwen_local") {
     if (!(currentSettings && currentSettings.openrouter_api_key_set))
       return toast("Ajoute ta clé OpenRouter (Nano Banana) dans Réglages.");
     const ok = await showModal({
@@ -5694,7 +5861,31 @@ function aoRenderV2Options(ad) {
   if ([...$("aoVideoModel").options].some((o) => o.value === vm)) $("aoVideoModel").value = vm;
   $("aoVoiceMode").value = aoUsesElVoices(ad) ? "elevenlabs" : "native";
   if ($("aoVoiceModeLabel")) $("aoVoiceModeLabel").classList.toggle("hidden", !AO_ELEVENLABS_ENABLED);
+  aoRenderLocalOptions(ad);
 }
+
+// Options Local v2 de la pub : qualité + turbo (MiniMax H3 seulement, la résolution 720p/1080p
+// est alors masquée), moteur d'images, style de tournage, ligne voix MiniMax.
+function aoRenderLocalOptions(ad) {
+  ad = ad || aoAdState || {};
+  const local = aoIsV2(ad) && aoIsLocalModel(aoAdVideoModel(ad));
+  document.querySelectorAll("#aoV2Options .ao-local-only").forEach((el) => el.classList.toggle("hidden", !local));
+  if ($("aoLocalQuality")) $("aoLocalQuality").value = String(aoLocalQuality(ad.local_video_quality));
+  if ($("aoLocalTurbo")) $("aoLocalTurbo").checked = aoLocalTurbo(ad.local_video_turbo);
+  if ($("aoImageEngine")) $("aoImageEngine").value = aoImageEngineOf(ad);
+  if ($("aoShootStyle")) $("aoShootStyle").value = ad.shoot_style === "selfie" ? "selfie" : "pose";
+  if ($("aoResolutionLabel")) $("aoResolutionLabel").classList.toggle("hidden", local);
+  if ($("aoMinimaxVoiceNote")) $("aoMinimaxVoiceNote").classList.toggle("hidden", !local);
+}
+
+if ($("aoLocalQuality")) $("aoLocalQuality").addEventListener("change", () =>
+  aoPatchOptions({ local_video_quality: Number($("aoLocalQuality").value) }));
+if ($("aoLocalTurbo")) $("aoLocalTurbo").addEventListener("change", () =>
+  aoPatchOptions({ local_video_turbo: $("aoLocalTurbo").checked }));
+if ($("aoImageEngine")) $("aoImageEngine").addEventListener("change", () =>
+  aoPatchOptions({ image_engine: $("aoImageEngine").value }));
+if ($("aoShootStyle")) $("aoShootStyle").addEventListener("change", () =>
+  aoPatchOptions({ shoot_style: $("aoShootStyle").value }));
 
 async function aoPatchOptions(body) {
   if (!aoAdId) return;
@@ -5704,6 +5895,7 @@ async function aoPatchOptions(body) {
     });
     if (aoAdState) Object.assign(aoAdState, body);
     if (aoAdState && "video_model" in body) aoRenderOmniOptions(aoAdState);
+    if (aoAdState) aoRenderLocalOptions(aoAdState);
     toast("Option enregistrée ✓");
     aoRenderAnimEstimate();
   } catch (e) { toast(e.message); }
@@ -5719,6 +5911,13 @@ function aoV2EstimateHtml(e) {
   const mode = native ? "voix native du modèle" : "voix ElevenLabs";
   const detail = `${esc(e.n_clips ?? "?")} clip(s) · ~${esc(Math.round(Number(e.seconds_total) || 0))} s` +
     (model ? ` · ${esc(model)}` : "") + ` · ${esc(mode)}`;
+  if (e.local === true || aoIsLocalModel(e.video_model)) {
+    // MiniMax H3 sur le PC : durée de rendu estimée (serveur `estimate_minutes`, sinon calcul local).
+    const ad = aoAdState || {};
+    const mins = e.estimate_minutes != null ? e.estimate_minutes
+      : aoLocalMinutes(e.seconds_total, ad.local_video_quality, aoLocalTurbo(ad.local_video_turbo));
+    return `<b>${esc(aoFmtMinutes(mins))} de rendu sur ton PC</b> <span class="muted">(${detail} · gratuit)</span>`;
+  }
   if (e.dry_run) return `<b>0 $ (simulation)</b> <span class="muted">(${detail})</span>`;
   if (native) return `Vidéo (voix incluse) <b>${usd(e.usd_total)}</b> <span class="muted">(${detail})</span>`;
   return `Voix ${usd(e.usd_voice)} + vidéo ${usd(e.usd_video)} = <b>${usd(e.usd_total)}</b> ` +
@@ -5741,6 +5940,7 @@ async function aoRenderV2Estimate() {
 
 function aoVideoKeyOk(model) {
   const s = currentSettings || {};
+  if (aoIsLocalModel(model)) return "";   // MiniMax H3 sur le PC : aucune clé
   if (model === "omni") return s.gemini_api_key_set ? "" : "Ajoute ta clé API Google (Gemini) dans Réglages.";
   if (model === "kling") return s.openrouter_api_key_set ? "" : "Ajoute ta clé OpenRouter (Kling) dans Réglages.";
   return s.xai_api_key_set ? "" : "Ajoute ta clé xAI (Grok) dans Réglages.";
@@ -5792,7 +5992,15 @@ function aoSkippedText(p) {
 
 async function aoPostAnimateV2(adId, shots, clipId, opt = {}) {
   const dryRun = currentSettings && currentSettings.dry_run;
-  const title = opt.relaunch ? "Relancer la vidéo — coût réel" : clipId ? "Tester ce plan — coût réel" : "Générer les vidéos — coût réel";
+  const paidTitle = opt.relaunch ? "Relancer la vidéo — coût réel" : clipId ? "Tester ce plan — coût réel" : "Générer les vidéos — coût réel";
+  const localTitle = opt.relaunch ? "Relancer la vidéo — rendu local" : clipId ? "Tester ce plan — rendu local" : "Générer les vidéos — rendu local";
+  // MiniMax H3 (local) : estimation en minutes, aucune clé ni montant (aperçu `local: true`).
+  const ad = aoAdState || {};
+  const localQ = aoLocalQuality(ad.local_video_quality);
+  const localT = aoLocalTurbo(ad.local_video_turbo);
+  const localMins = (src, clips) => (src && src.estimate_minutes != null ? Number(src.estimate_minutes)
+    : (clips || []).reduce((t, c) => t + aoLocalMinutes(Number(c && c.seconds) || 0, localQ, localT), 0));
+  let title = paidTitle;
   const confirmText = opt.relaunch ? "Relancer" : clipId ? "Tester" : "Générer";
   const intro = opt.relaunch ? "Refait UNIQUEMENT la vidéo de ce bloc (même keyframe, même voix)."
     : clipId ? "Génère UNIQUEMENT la vidéo de ce bloc." : "1 appel par bloc.";
@@ -5814,15 +6022,19 @@ async function aoPostAnimateV2(adId, shots, clipId, opt = {}) {
     let ok;
     if (pv.preview && (pv.preview.clips || []).length) {
       const p = pv.preview;
-      const keyMsg = dryRun ? "" : aoVideoKeyOk((aoAdState && aoAdState.video_model) || p.model || "grok");
+      const isLocal = p.local === true || aoIsLocalModel(p.model || ad.video_model);
+      title = isLocal ? localTitle : paidTitle;
+      const keyMsg = dryRun || isLocal ? "" : aoVideoKeyOk((aoAdState && aoAdState.video_model) || p.model || "grok");
       if (keyMsg) { toast(keyMsg); return null; }
       expected = p.clips.map((c) => c.clip_id);
       ok = await confirmPaidVideo({
         title, confirmText,
         clips: p.clips,
-        usd: p.usd_total,
+        usd: isLocal ? null : p.usd_total,
         model: AO_VIDEO_MODEL_LABEL[p.model] || p.model || "",
-        detail: [intro, aoSkippedText(p)].filter(Boolean).join(" "),
+        detail: [intro, isLocal ? aoSkippedText(Object.assign({}, p, { already_billed_usd: 0 })) : aoSkippedText(p)].filter(Boolean).join(" "),
+        local: isLocal,
+        estimateMinutes: isLocal ? localMins(p, p.clips) : null,
       });
     } else if (pv.preview && !clipId) {
       // Aperçu vide : rien à facturer (tout est prêt, en cours, refusé ou exclu).
@@ -5833,8 +6045,21 @@ async function aoPostAnimateV2(adId, shots, clipId, opt = {}) {
       // lui-même en 409 un bloc en cours) : estimation locale.
       let e = {};
       try { e = await api(AO_API + "/video/estimate/" + adId); } catch (_) { /* estimation absente */ }
-      const keyMsg = dryRun ? "" : aoVideoKeyOk(e.video_model || (aoAdState && aoAdState.video_model) || "grok");
+      const isLocal = e.local === true || aoIsLocalModel(e.video_model || ad.video_model);
+      title = isLocal ? localTitle : paidTitle;
+      const keyMsg = dryRun || isLocal ? "" : aoVideoKeyOk(e.video_model || (aoAdState && aoAdState.video_model) || "grok");
       if (keyMsg) { toast(keyMsg); return null; }
+      if (isLocal) {
+        const lclips = paidClipsFromShots(shots).map((c, i) => Object.assign(c, { seconds: Number(shots[i].clip_seconds) || c.seconds }));
+        ok = await confirmPaidVideo({
+          title, confirmText, clips: lclips,
+          model: AO_VIDEO_MODEL_LABEL[AO_LOCAL_VIDEO_MODEL],
+          detail: intro, local: true,
+          estimateMinutes: clipId || e.estimate_minutes == null ? localMins(null, lclips) : Number(e.estimate_minutes),
+        });
+        if (!ok) return null;
+        try { return await post(false, null); } catch (e2) { toast(e2.message); return null; }
+      }
       let usdVal = null;
       if (clipId) {
         const s = shots[0] || {};
@@ -6068,8 +6293,19 @@ async function aoSavePreset() {
     };
     // Modèle vidéo du client : celui de la pub ouverte, sinon celui du preset chargé. JAMAIS le
     // réglage global (il écrasait le choix du client, ex. Omni → Grok) ; absent = conservé.
-    const vmPreset = aoIsV2() ? $("aoVideoModel").value : (aoPresetOptions && aoPresetOptions.video_model);
+    const vmPreset = aoIsV2() ? $("aoVideoModel").value
+      : (($("aoNewVideoModel") && $("aoNewVideoModel").value) || (aoPresetOptions && aoPresetOptions.video_model));
     if (vmPreset) data.video_model = vmPreset;
+    // Local v2 : moteur d'images, style de tournage, qualité vidéo locale (pub ouverte, sinon
+    // sélecteurs de création).
+    const openAd = aoIsV2() ? (aoAdState || {}) : null;
+    data.image_engine = openAd ? aoImageEngineOf(openAd) : (($("aoNewImageEngine") && $("aoNewImageEngine").value) || "nano");
+    data.shoot_style = openAd ? (openAd.shoot_style === "selfie" ? "selfie" : "pose")
+      : (($("aoNewShootStyle") && $("aoNewShootStyle").value) || "pose");
+    if (aoIsLocalModel(vmPreset)) {
+      data.local_video_quality = openAd ? aoLocalQuality(openAd.local_video_quality)
+        : aoLocalQuality($("aoNewLocalQuality") && $("aoNewLocalQuality").value);
+    }
     const fd = new FormData();
     fd.append("name", name);
     fd.append("data", JSON.stringify(data));
@@ -6150,6 +6386,11 @@ async function aoLoadPreset() {
     aoPresetOptions = {};
     if (d.video_model) aoPresetOptions.video_model = d.video_model;
     if (d.voice_mode) aoPresetOptions.voice_mode = d.voice_mode;
+    // Local v2 : moteurs du client → sélecteurs de création (copiés aussi sur la pub au serveur).
+    ["image_engine", "shoot_style", "local_video_quality"].forEach((k) => {
+      if (d[k] !== undefined && d[k] !== null && d[k] !== "") aoPresetOptions[k] = d[k];
+    });
+    aoApplyPresetEngines(d);
     aoRefreshCharsUi();
     // aoRefreshCharsUi re-rend les fiches 2..4 en gardant les valeurs : on réécrit les voix.
     // Accent du client (ex. Québec) : imposé à chaque fiche voix (copié aussi sur la pub au serveur).
@@ -6371,6 +6612,10 @@ async function clientEditLoad(id) {
   setSel("clientAccent", d.accent_region);
   setSel("clientResolution", d.resolution);
   setSel("clientCamera", d.omni_camera);
+  setSel("clientImageEngine", d.image_engine);
+  setSel("clientShootStyle", d.shoot_style);
+  setSel("clientLocalQuality", d.local_video_quality == null || d.local_video_quality === "" ? ""
+    : String(aoLocalQuality(d.local_video_quality)));
   clientSettingsWarn();
   const ph = $("clientPhotos");
   ph.innerHTML = "";
@@ -6414,7 +6659,12 @@ function clientSettingsWarn() {
   if (!w) return;
   const vm = $("clientVideoModel") ? $("clientVideoModel").value : "";
   const res = $("clientResolution") ? $("clientResolution").value : "";
-  w.textContent = res === "1080p" && vm && vm !== "omni"
+  // MiniMax H3 (local) : qualité en mégapixels à la place de la résolution 720p / 1080p.
+  const local = aoIsLocalModel(vm);
+  if ($("clientLocalQualityLabel")) $("clientLocalQualityLabel").classList.toggle("hidden", !local);
+  const resLabel = $("clientResolution") && $("clientResolution").closest("label");
+  if (resLabel) resLabel.classList.toggle("hidden", local);
+  w.textContent = res === "1080p" && vm && vm !== "omni" && !local
     ? "⚠ 1080p n'existe qu'avec Google Omni : avec ce modèle, la vidéo sortira en 720p."
     : "";
 }
@@ -6442,6 +6692,11 @@ async function clientSave() {
     accent_region: $("clientAccent") ? $("clientAccent").value : (base.accent_region || ""),
     resolution: $("clientResolution") ? $("clientResolution").value : (base.resolution || ""),
     omni_camera: $("clientCamera") ? $("clientCamera").value : (base.omni_camera || ""),
+    image_engine: $("clientImageEngine") ? $("clientImageEngine").value : (base.image_engine || ""),
+    shoot_style: $("clientShootStyle") ? $("clientShootStyle").value : (base.shoot_style || ""),
+    local_video_quality: $("clientLocalQuality")
+      ? ($("clientLocalQuality").value ? Number($("clientLocalQuality").value) : "")
+      : (base.local_video_quality ?? ""),
   });
   const fd = new FormData();
   fd.append("name", name);

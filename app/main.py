@@ -173,6 +173,9 @@ def create_app() -> FastAPI:
     app.include_router(ad_refs.router)
     # Keyframes : versions d'image par plan, retouche ciblée, outils locaux, réf visage auto.
     app.include_router(keyframe_versions.router)
+    # Section « Local » : ComfyUI sur le PC (gratuit), file d'attente d'un rendu à la fois.
+    from . import local_routes
+    app.include_router(local_routes.router)
 
     # -------------------------------------------------- santé + front
     @app.get("/api/health")
@@ -230,6 +233,7 @@ def create_app() -> FastAPI:
         html = html.replace("/static/style.css", f"/static/style.css?v={_ver('style.css')}")
         html = html.replace("/static/outils_c.js", f"/static/outils_c.js?v={_ver('outils_c.js')}")
         html = html.replace("/static/keyframes.js", f"/static/keyframes.js?v={_ver('keyframes.js')}")
+        html = html.replace("/static/local.js", f"/static/local.js?v={_ver('local.js')}")
         return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
     # -------------------------------------------------- RÉGLAGES

@@ -585,6 +585,44 @@
             <p class="muted">Séquentiel : on génère d'abord le <b>Plan 1</b> (il fixe la personne).
               Tu le valides, puis tu génères les plans suivants — tu ne paies les autres que quand la
               personne te plaît.</p>
+            <!-- Moteurs de la pub (Local v2) : images, style de tournage, modèle vidéo — envoyés à la création. -->
+            <div class="card-block ao-engines" id="aoNewEngines">
+              <div class="ao-voice-head"><b>⚙️ Moteurs de la pub</b>
+                <span class="muted small">— gardés par la pub (modifiables ensuite dans ses options)</span></div>
+              <div class="ao-engines-grid">
+                <label>Images
+                  <select id="aoNewImageEngine">
+                    <option value="nano" selected>Nano Banana Pro</option>
+                    <option value="qwen_local">Qwen (local)</option>
+                  </select>
+                </label>
+                <label>Style de tournage
+                  <select id="aoNewShootStyle">
+                    <option value="pose" selected>Posé (téléphone sur pied)</option>
+                    <option value="selfie">Selfie à la main</option>
+                  </select>
+                </label>
+                <label>Modèle vidéo
+                  <select id="aoNewVideoModel">
+                    <option value="" selected>— réglage global —</option>
+                    <option value="grok">Grok Imagine</option>
+                    <option value="kling">Kling 3.0</option>
+                    <option value="omni">Omni (Google)</option>
+                    <option value="minimax_local">MiniMax H3 (local)</option>
+                  </select>
+                </label>
+                <label class="ao-local-only hidden" id="aoNewLocalQualityLabel">Qualité vidéo locale
+                  <select id="aoNewLocalQuality">
+                    <option value="0.4">Rapide 0,4 MP (~480p)</option>
+                    <option value="0.6">Équilibrée 0,6 MP</option>
+                    <option value="0.9" selected>HD 0,9 MP (~720p, 736×1280)</option>
+                  </select>
+                </label>
+                <label class="check ao-local-only hidden" id="aoNewLocalTurboLabel">
+                  <input type="checkbox" id="aoNewLocalTurbo" checked /> Turbo (beaucoup plus rapide)</label>
+              </div>
+              <p class="muted small hidden" id="aoQwenT2iNote"></p>
+            </div>
             <div class="row">
               <button class="btn primary" id="aoGenImagesBtn">🖼️ Générer le Plan 1 (la personne)</button>
             </div>
@@ -655,6 +693,7 @@
                 <label>Précision libre <input type="text" id="aoEVExtra" maxlength="120" /></label>
               </div>
               <div class="muted small" id="aoVoiceSheet"></div>
+              <div class="muted small ao-minimax-voice hidden" id="aoMinimaxVoiceNote">🎙️ MiniMax H3 : voix générée par plan, peut varier.</div>
               <div class="row">
                 <button class="btn small" id="aoVoiceSaveBtn" type="button">💾 Enregistrer la voix</button>
                 <button class="btn small danger-outline hidden" id="aoVoiceUnlockBtn" type="button">🔓 Déverrouiller</button>
@@ -701,6 +740,28 @@
                   <option value="grok">Grok Imagine (défaut)</option>
                   <option value="kling">Kling 3.0</option>
                   <option value="omni">Omni (Google)</option>
+                  <option value="minimax_local">MiniMax H3 (local)</option>
+                </select>
+              </label>
+              <label class="ao-res ao-local-only hidden" id="aoLocalQualityLabel">Qualité vidéo locale
+                <select id="aoLocalQuality">
+                  <option value="0.4">Rapide 0,4 MP (~480p)</option>
+                  <option value="0.6">Équilibrée 0,6 MP</option>
+                  <option value="0.9" selected>HD 0,9 MP (~720p, 736×1280)</option>
+                </select>
+              </label>
+              <label class="ao-res check ao-local-only hidden" id="aoLocalTurboLabel">
+                <input type="checkbox" id="aoLocalTurbo" checked /> Turbo (beaucoup plus rapide)</label>
+              <label class="ao-res">Images
+                <select id="aoImageEngine">
+                  <option value="nano" selected>Nano Banana Pro</option>
+                  <option value="qwen_local">Qwen (local)</option>
+                </select>
+              </label>
+              <label class="ao-res">Style de tournage
+                <select id="aoShootStyle">
+                  <option value="pose" selected>Posé (téléphone sur pied)</option>
+                  <option value="selfie">Selfie à la main</option>
                 </select>
               </label>
               <!-- Voix : toujours native (générée par le modèle vidéo). Option ElevenLabs masquée
@@ -734,7 +795,7 @@
             </div>
             <div class="estimate" id="aoAnimEstimate"></div>
             <div class="row">
-              <label class="ao-res" title="1080p = agrandissement (upscale) par Google, plus cher : 720p conseillé">Résolution vidéo
+              <label class="ao-res" id="aoResolutionLabel" title="1080p = agrandissement (upscale) par Google, plus cher : 720p conseillé">Résolution vidéo
                 <select id="aoResolution" title="1080p = agrandissement (upscale) par Google, plus cher : 720p conseillé">
                   <option value="720p" selected>720p (économique)</option>
                   <option value="1080p">1080p</option>
@@ -818,6 +879,7 @@
         <div class="subtabs" role="tablist">
           <button class="subtab active" type="button" role="tab" aria-selected="true" data-localtab="video">🎬 Vidéo</button>
           <button class="subtab" type="button" role="tab" aria-selected="false" data-localtab="image">🖼️ Image</button>
+          <button class="subtab" type="button" role="tab" aria-selected="false" data-localtab="queue" id="lqTabBtn">📋 File locale</button>
         </div>
 
         <!-- Vidéo : image → vidéo -->
@@ -898,6 +960,35 @@
           </div>
           <button class="btn primary" id="localImageBtn" type="button">🖼️ Générer l'image</button>
         </div>
+
+        <!-- File locale : plusieurs pubs Avatar IA (MiniMax H3) animées à la suite (local_queue.js) -->
+        <div class="card-block local-form lq-panel hidden" data-localpanel="queue" id="lqPanel">
+          <div id="lqBanner" class="lq-banner hidden" role="status" aria-live="polite"></div>
+          <div class="lq-section-head">
+            <h2>Pubs prêtes à animer</h2>
+            <button class="btn small" id="lqEligibleRefresh" type="button">↻ Rafraîchir</button>
+          </div>
+          <p class="muted small">Pubs Avatar IA en MiniMax H3 (local) dont les keyframes sont validés. Coche-les puis
+            lance : les plans sont rendus un par un sur ton PC, tu peux continuer à travailler.</p>
+          <div id="lqEligible" class="lq-eligible"></div>
+          <div class="row lq-start-row">
+            <label class="check"><input type="checkbox" id="lqAutoExport" /> Exporter chaque pub terminée</label>
+            <button class="btn primary" id="lqStartBtn" type="button">▶ Lancer tout en local</button>
+          </div>
+
+          <div class="lq-section-head">
+            <h2>File en cours</h2>
+            <span id="lqStatePill" class="local-pill wait" role="status">● File vide</span>
+          </div>
+          <div id="lqProgress" class="lq-progress" aria-live="polite"></div>
+          <div class="row lq-controls">
+            <button class="btn" id="lqPauseBtn" type="button">⏸ Pause</button>
+            <button class="btn" id="lqResumeBtn" type="button">▶ Reprendre</button>
+            <button class="btn" id="lqRetryBtn" type="button">↻ Relancer les échecs</button>
+            <button class="btn danger-outline" id="lqCancelBtn" type="button">✕ Annuler la file</button>
+          </div>
+          <ol id="lqList" class="lq-list"></ol>
+        </div>
         <input type="file" id="localFile" accept="image/png,image/jpeg,image/webp" class="hidden" />
 
         <div id="localJobs" class="local-jobs hidden" aria-live="polite"></div>
@@ -974,6 +1065,7 @@
                 <option value="grok">Grok Imagine</option>
                 <option value="kling">Kling 3.0</option>
                 <option value="omni">Google Omni</option>
+                <option value="minimax_local">MiniMax H3 (local)</option>
               </select>
             </label>
             <label>Accent des voix
@@ -1001,6 +1093,32 @@
                 <option value="locked">Caméra fixe, cadrage identique</option>
                 <option value="push_in">Léger travelling avant</option>
                 <option value="handheld">Caméra à la main UGC</option>
+              </select>
+            </label>
+          </div>
+          <div class="row grid2">
+            <label>Images
+              <select id="clientImageEngine">
+                <option value="">— par défaut (Nano Banana Pro) —</option>
+                <option value="nano">Nano Banana Pro</option>
+                <option value="qwen_local">Qwen (local)</option>
+              </select>
+            </label>
+            <label>Style de tournage
+              <select id="clientShootStyle">
+                <option value="">— par défaut (posé) —</option>
+                <option value="pose">Posé (téléphone sur pied)</option>
+                <option value="selfie">Selfie à la main</option>
+              </select>
+            </label>
+          </div>
+          <div class="row grid2">
+            <label id="clientLocalQualityLabel" class="hidden">Qualité vidéo locale (MiniMax H3)
+              <select id="clientLocalQuality">
+                <option value="">— par défaut (HD 0,9 MP) —</option>
+                <option value="0.4">Rapide 0,4 MP (~480p)</option>
+                <option value="0.6">Équilibrée 0,6 MP</option>
+                <option value="0.9">HD 0,9 MP (~720p, 736×1280)</option>
               </select>
             </label>
           </div>
@@ -1200,6 +1318,7 @@
               <option value="grok">Grok Imagine (défaut)</option>
               <option value="kling">Kling 3.0</option>
               <option value="omni">Omni</option>
+              <option value="minimax_local">MiniMax H3 (local)</option>
             </select>
           </label>
           <label>Seuil de dérive « Avatar IA » <span class="muted">(0 à 1 ; sous ce score de ressemblance frame 0 / keyframe, le clip est signalé — 0,80 recommandé)</span>
@@ -1340,5 +1459,6 @@
   <script src="/static/produit_refs.js"></script>
   <script src="/static/keyframes.js"></script>
   <script src="/static/local.js"></script>
+  <script src="/static/local_queue.js"></script>
 </body>
 </html>

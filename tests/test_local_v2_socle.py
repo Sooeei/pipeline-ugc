@@ -229,13 +229,12 @@ def test_regenerate_longer_accepts_minimax_local(monkeypatch):
     assert calls == [cid] and r.json()["extra_seconds"] == 1
 
 
-def test_stubs_signatures():
-    assert local_queue.busy_reason() == "" and local_queue.recover() is None
-    assert local_queue.router.routes == []
-    assert local_images.image_engine_of({"image_engine": "qwen_local"}) == "qwen_local"
-    assert local_images.image_engine_of(None) == "nano" and local_images.t2i_available() is False
+def test_zone_entry_points():
+    """Points d'entrée des zones (le corps est implémenté par chaque zone)."""
     from pathlib import Path
+
+    assert isinstance(local_queue.busy_reason(), str)
+    assert local_images.image_engine_of({"image_engine": "qwen_local"}) == "qwen_local"
+    assert local_images.image_engine_of(None) == "nano"
     v = Path("x.mp4")
-    assert avatar_minimax.change_voice_after_animation({}, {}, v) is v
-    with pytest.raises(NotImplementedError):
-        avatar_minimax.block_prompt({}, {})
+    assert avatar_minimax.change_voice_after_animation({}, {}, v) is v   # point d'accroche, sans effet

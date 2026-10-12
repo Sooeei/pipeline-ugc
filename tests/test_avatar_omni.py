@@ -611,8 +611,8 @@ def test_omni_body_images_png_jpeg_webp_and_duration_flag(monkeypatch, tmp_path)
     Image.new("RGB", (4, 4)).save(jpg, format="JPEG")
     Image.new("RGB", (4, 4)).save(webp, format="WEBP")
     parts = [providers._omni_image_part(p) for p in (png, jpg, webp)]
-    assert [p["mime_type"] for p in parts] == ["image/png", "image/jpeg", "image/png"]
-    assert base64.b64decode(parts[2]["data"])[:8] == b"\x89PNG\r\n\x1a\n"   # webp → PNG
+    assert [p["mime_type"] for p in parts] == ["image/jpeg"] * 3           # copie JPEG envoyée
+    assert all(base64.b64decode(p["data"])[:3] == b"\xff\xd8\xff" for p in parts)
     body = providers._omni_body("t", parts, 6)
     assert len([p for p in body["input"] if p["type"] == "image"]) == 2     # 2 images max
     assert body["response_format"]["duration"] == "6s"
@@ -635,7 +635,7 @@ def test_omni_sends_plan_then_anchor(monkeypatch, omni_env, tmp_path):
     providers.omni_generate_video(cfg, img, "P", out, 5, anchor_path=anchor)
     imgs = [p for p in sent["json"]["input"] if p["type"] == "image"]
     assert len(imgs) == 2 and imgs[0]["data"] == providers._omni_image_part(img)["data"]
-    assert imgs[1]["mime_type"] == "image/png"
+    assert imgs[1]["mime_type"] == "image/jpeg"
 
 
 def test_omni_uri_response_polls_then_downloads(monkeypatch, omni_env, capsys):

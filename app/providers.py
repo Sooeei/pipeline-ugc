@@ -115,6 +115,12 @@ def _log_detail(msg: str) -> None:
         pass
 
 
+IMAGES_TOO_HEAVY_MESSAGE = (
+    "Images de référence trop lourdes pour Google (limite 20 Mo) — retire une référence ou "
+    "remplace-la par une image plus légère, puis réessaie."
+)
+
+
 def _friendly_http(service: str, status: int, action: str = "réessaie") -> str:
     """Message clair et actionnable à partir d'un code HTTP fournisseur (SANS corps brut).
 
@@ -127,6 +133,8 @@ def _friendly_http(service: str, status: int, action: str = "réessaie") -> str:
         return f"Crédits {account} insuffisants — recharge ton compte {service}."
     if status == 429:
         return f"Trop de requêtes {service} (ou quota atteint) — attends un instant et {action}."
+    if status == 413 and service in ("OpenRouter", "Google"):
+        return IMAGES_TOO_HEAVY_MESSAGE
     if 500 <= status < 600:
         return f"{service} a un souci de serveur momentané — {action} dans un moment."
     return (
@@ -563,8 +571,8 @@ def _nano_banana_generate_image(
     content: list[dict[str, Any]] = [
         {"type": "text", "text": nano_banana_final_prompt(prompt_image, size)}
     ]
-    for ref in ref_paths[: config_app.OBJET_MAX_REF_IMAGES]:
-        content.append({"type": "image_url", "image_url": {"url": _data_uri(ref)}})
+    for uri in _ref_data_uris(ref_paths[: config_app.OBJET_MAX_REF_IMAGES]):
+        content.append({"type": "image_url", "image_url": {"url": uri}})
 
     body: dict[str, Any] = {
         "model": model,
@@ -857,7 +865,7 @@ def _grok_generate_video(
 
     image_ref = str(image_path)
     if not image_ref.lower().startswith(("http://", "https://")):
-        image_ref = _data_uri(image_ref)  # data URI base64 (sinon URL publique) — image de départ
+        image_ref = _start_frame_data_uri(image_ref)  # data URI (sinon URL publique) — image de départ
 
     body: dict[str, Any] = {
         "model": model_value,
@@ -910,13 +918,75 @@ def _grok_generate_video(
     return out_mp4
 
 
-def _data_uri(path: str) -> str:
-    """Encode un fichier image en data URI base64 (pour image_url)."""
+# Images ENVOYÉES aux fournisseurs (OpenRouter / Google / xAI) : toujours une copie JPEG en mémoire,
+# jamais le fichier d'origine (PNG 1536×2752 de 3 à 6 Mo → 413 « exceeds the 20000000 byte limit »
+# dès que plusieurs références partent ensemble). Le fichier sur le disque n'est JAMAIS modifié.
+REF_MAX_SIDE = 1536                        # références : côté le plus long (jamais d'agrandissement)
+REF_JPEG_QUALITY = 90
+REF_TOTAL_MAX_BYTES = 15_000_000           # somme des data URI d'une requête (limite Google : 20 Mo)
+REF_FALLBACK_STEPS = ((1280, 85), (1024, 85))   # paliers suivants si la somme dépasse encore
+
+
+def _sent_image(path: str | Path, max_side: int | None = REF_MAX_SIDE,
+                quality: int = REF_JPEG_QUALITY) -> tuple[bytes, str]:
+    """(octets, mime) de la COPIE envoyée : JPEG RGB (transparence aplatie sur blanc), réduite
+    à `max_side` sur son côté le plus long (None = taille d'origine). Fichier illisible par
+    Pillow → octets d'origine tels quels (l'erreur éventuelle viendra du fournisseur)."""
+    import io
+
+    raw = Path(path).read_bytes()
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(raw)) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode in ("RGBA", "LA", "P") or "transparency" in im.info:
+                rgba = im.convert("RGBA")
+                flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                flat.paste(rgba, mask=rgba.getchannel("A"))
+                im = flat
+            else:
+                im = im.convert("RGB")
+            if max_side and max(im.size) > max_side:
+                im.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception as exc:  # noqa: BLE001 - image illisible : envoi tel quel
+        _log_detail(f"image envoyée telle quelle (compression impossible) : {exc}")
+        return raw, _image_mime(str(path))
+
+
+def _data_uri(path: str | Path, max_side: int | None = REF_MAX_SIDE,
+              quality: int = REF_JPEG_QUALITY) -> str:
+    """Data URI base64 de la copie JPEG envoyée (cf. `_sent_image`) — pour image_url."""
     import base64
 
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    return f"data:{_image_mime(path)};base64,{b64}"
+    raw, mime = _sent_image(path, max_side, quality)
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _start_frame_data_uri(path: str | Path) -> str:
+    """Image de DÉPART d'une vidéo (Grok, Kling) : JPEG à sa taille d'origine — c'est la première
+    image de la vidéo, on ne la réduit pas (une seule image : aucun risque de dépasser la limite)."""
+    return _data_uri(path, max_side=None)
+
+
+def _ref_data_uris(paths: list[str] | tuple[str, ...]) -> list[str]:
+    """Data URI des images de référence d'UNE requête, somme garantie sous REF_TOTAL_MAX_BYTES
+    tant que les paliers le permettent (1536 px q90, puis 1280 et 1024 px q85)."""
+    paths = [str(p) for p in paths]
+    if not paths:
+        return []
+    uris = [_data_uri(p) for p in paths]
+    for side, quality in REF_FALLBACK_STEPS:
+        if sum(map(len, uris)) <= REF_TOTAL_MAX_BYTES:
+            break
+        uris = [_data_uri(p, side, quality) for p in paths]
+    before = sum(Path(p).stat().st_size for p in paths) / 1e6
+    after = sum(map(len, uris)) / 1e6
+    _log_detail(f"réfs compressées : {before:.1f} Mo → {after:.1f} Mo ({len(uris)} image(s))")
+    return uris
 
 
 def _grok_video_url(data: dict) -> str:
@@ -1036,7 +1106,7 @@ def _kling_generate_video(
         "resolution": resolution,
         "generate_audio": bool(generate_audio),  # ⚠️ Mashup : toujours False (défaut)
         "input_references": [
-            {"type": "image_url", "image_url": {"url": _data_uri(str(image_path))}}
+            {"type": "image_url", "image_url": {"url": _start_frame_data_uri(image_path)}}
         ],
     }
     try:
@@ -1265,27 +1335,12 @@ def _omni_file_id(uri: str) -> str:
     return mt.group(1) if mt else ""
 
 
-def _omni_image_part(path: str | Path) -> dict[str, Any]:
-    """Image → part `{type:image, data:<b64>, mime_type}`. PNG/JPEG envoyés tels quels ; tout
-    autre format (ex. webp) est converti en PNG EN MÉMOIRE (Pillow) avant l'encodage."""
+def _omni_image_part(path: str | Path, max_side: int | None = None) -> dict[str, Any]:
+    """Image → part `{type:image, data:<b64>, mime_type}` : copie JPEG en mémoire (`_sent_image`).
+    Image de départ du plan : taille d'origine (max_side=None) ; ancre / références : REF_MAX_SIDE."""
     import base64
-    import io
 
-    p = Path(path)
-    raw = p.read_bytes()
-    ext = p.suffix.lower()
-    if ext == ".png" and raw[:8] == b"\x89PNG\r\n\x1a\n":
-        mime = "image/png"
-    elif ext in (".jpg", ".jpeg") and raw[:3] == b"\xff\xd8\xff":
-        mime = "image/jpeg"
-    else:
-        from PIL import Image
-
-        with Image.open(io.BytesIO(raw)) as im:
-            buf = io.BytesIO()
-            im.save(buf, format="PNG")
-        raw = buf.getvalue()
-        mime = "image/png"
+    raw, mime = _sent_image(path, max_side)
     return {"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mime_type": mime}
 
 
@@ -1593,7 +1648,7 @@ def _omni_generate_video(
             raise ProviderError("Image du plan introuvable ou illisible — régénère l'image du plan.") from exc
         if anchor_path and str(anchor_path) != str(image_path) and Path(anchor_path).is_file():
             try:
-                parts.append(_omni_image_part(anchor_path))
+                parts.append(_omni_image_part(anchor_path, REF_MAX_SIDE))
             except Exception as exc:  # noqa: BLE001 - ancre illisible : on continue sans
                 _log_detail(f"Google Omni ancre ignorée (illisible) : {exc}")
     body = _omni_body(prompt, parts, seconds, model_value, store=store, resolution=resolution)
@@ -1662,7 +1717,7 @@ def _omni_extend_video(
     parts: list[dict[str, Any]] = []
     for ref in reference_paths or ():
         try:
-            parts.append(_omni_image_part(ref))
+            parts.append(_omni_image_part(ref, REF_MAX_SIDE))
         except Exception as exc:  # noqa: BLE001 - réf illisible : le prompt la déclare → on stoppe
             _log_detail(f"Google Omni référence illisible ({ref}) : {exc}")
             raise ProviderError("Image de référence du plan illisible — régénère son keyframe.") from exc
